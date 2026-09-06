@@ -1,0 +1,12 @@
+# --- dsh-plugins monorepo 忽略规则 ---
+
+# 机器本地 / 调试（.vscode 内含 chrome-profile 浏览器缓存与本地 token 配置）
+.vscode/
+.serena/
+*.log
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 依赖
+node_modules/

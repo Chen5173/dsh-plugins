@@ -1,0 +1,48 @@
+{
+  "name": "dsh-composer-history-recall",
+  "version": "0.1.0",
+  "description": "Recall the current session's previously-sent user messages into the composer with the arrow keys (terminal-style history), gated to the first/last line so multi-line caret movement and the slash/mention menus are never hijacked. Client-only plugin: it reuses the core conversation.input.overlay slot and inputActions.setDraft, and ships no host endpoint, no model tool and no new attack surface.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "composer",
+    "history",
+    "keyboard"
+  ],
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.1-rc.2"
+  }
+}
