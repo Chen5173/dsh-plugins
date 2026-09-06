@@ -1,0 +1,17 @@
+{
+  "name": "dsh-local-plugins",
+  "version": "0.1.0",
+  "description": "Umbrella bundle for all locally-developed DSH plugins in this monorepo. Install once via `dsh plugin --profile <name> add <this dir>`: one profile dependency + one bundle layer activates every plugin below. Adding a plugin = add its folder here, one dependency row below and one insert row in ./cordis.patch.yml — the profile is never touched again.",
+  "private": true,
+  "type": "module",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "dsh-composer-history-recall": "link:./dsh-composer-history-recall",
+    "dsh-open-session-workdir": "link:./dsh-open-session-workdir",
+    "dsh-session-title-regenerate": "link:./dsh-session-title-regenerate"
+  }
+}

@@ -1,0 +1,11 @@
+# dsh-local-plugins umbrella bundle layer: one insert per local plugin.
+# Row ids stay stable (equal to the ids the standalone bundles used), so
+# existing profile cordis.patch.yml overrides/disables keep targeting them.
+# Adding a plugin = append one row here AND one dependency in ./package.json.
+- insert:
+    - id: session-title-regenerate
+      name: 'dsh-session-title-regenerate'
+    - id: open-session-workdir
+      name: 'dsh-open-session-workdir'
+    - id: composer-history-recall
+      name: 'dsh-composer-history-recall'
