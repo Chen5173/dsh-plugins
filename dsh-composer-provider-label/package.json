@@ -1,0 +1,49 @@
+{
+  "name": "dsh-composer-provider-label",
+  "version": "0.1.0",
+  "description": "Show the provider behind the composer's current model (office · DeepSeek-V4-Flash), so routes that share one model name — ark, codemaker, bai, openroputer — stay distinguishable. Client plugin registered into the empty conversation.input.right slot; the node half only declares an optional settings namespace (dsh-composer-provider-label.providerAliases) so aliases can be edited in the settings page or settings.yaml, and degrades to the built-in map when that dependency is unavailable.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "composer",
+    "model",
+    "provider"
+  ],
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-api-session-controller": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.1-rc.2"
+  }
+}
