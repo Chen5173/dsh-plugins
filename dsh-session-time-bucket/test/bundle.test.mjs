@@ -46,6 +46,14 @@ globalThis.document = {
   body: { appendChild() {} },
 }
 
+// localStorage stub: the follower reads the core's persisted view store.
+const storage = new Map()
+globalThis.window.localStorage = {
+  getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+  setItem: (key, value) => { storage.set(key, String(value)) },
+  removeItem: (key) => { storage.delete(key) },
+}
+
 // --- load the bundle ----------------------------------------------------
 
 const source = fs.readFileSync(bundlePath, 'utf8')
@@ -62,7 +70,7 @@ const exports = factory(() => { throw new Error('unexpected require()') })
 const hooks = globalThis.window.__sessionTimeBucketTest
 assert.ok(hooks, 'window.__DSH_TEST__ hook object missing')
 
-const { bucketKeyOf, collectRows, rowTitle, deriveBuckets, relativeLabel, workspaceTitleBySession, __t, enDict } = hooks
+const { bucketKeyOf, collectRows, rowTitle, deriveBuckets, relativeLabel, workspaceTitleBySession, isFlatUpdatedView, __t, enDict } = hooks
 const DAY = 86400000
 // Fixed local "now": 2026-09-06 12:00 (Sep 6 is a Sunday; weekday is irrelevant).
 const nowMs = new Date(2026, 8, 6, 12, 0, 0).getTime()
@@ -162,6 +170,23 @@ test('deriveBuckets groups, sorts newest-first and hides empty buckets', () => {
   assert.deepEqual(buckets[3].rows.map((r) => r.id), ['o'])
 })
 
+test('follows the core view store: enhances only 单列表+最近更新', () => {
+  const view = (groupBy, orderBy) => storage.set('dsh.workspace.view.v5', JSON.stringify({ groupBy, orderBy }))
+  view('flat', 'updated')
+  assert.equal(isFlatUpdatedView(), true)
+  view('workspace', 'updated')
+  assert.equal(isFlatUpdatedView(), false)
+  view('flat', 'manual')
+  assert.equal(isFlatUpdatedView(), false)
+  view('workspace', 'manual')
+  assert.equal(isFlatUpdatedView(), false)
+  storage.delete('dsh.workspace.view.v5')
+  assert.equal(isFlatUpdatedView(), false)
+  storage.set('dsh.workspace.view.v5', '{broken')
+  assert.equal(isFlatUpdatedView(), false)
+  storage.delete('dsh.workspace.view.v5')
+})
+
 test('zh copy resolves and en dictionary exists', () => {
   assert.equal(__t('bucket.today'), '今天')
   assert.equal(__t('bucket.yesterday'), '昨天')
@@ -169,7 +194,6 @@ test('zh copy resolves and en dictionary exists', () => {
   assert.equal(__t('bucket.last30'), '前30天')
   assert.equal(__t('bucket.older'), '更早')
   assert.equal(__t('ungrouped'), '未分组')
-  assert.equal(__t('option.timeBucket'), '按时间桶')
   assert.equal(enDict['bucket.today'], 'Today')
   assert.equal(enDict['ungrouped'], 'Ungrouped')
 })
@@ -183,11 +207,6 @@ test('relative time labels humanize instants', () => {
   assert.equal(at(40 * DAY), '1个月前')
   assert.equal(at(400 * DAY), '1年前')
   assert.equal(__t('rel.day'), '{n}天前')
-})
-
-test('copy includes the time-bucket option', () => {
-  assert.equal(__t('option.timeBucket'), '按时间桶')
-  assert.equal(enDict['option.timeBucket'], 'Time bucket')
 })
 
 let failed = 0

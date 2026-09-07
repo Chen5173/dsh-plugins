@@ -1,54 +1,45 @@
 // dsh-session-time-bucket: CLIENT half — the whole feature lives here.
 //
-// Standalone architecture (no core-menu injection):
-//   · an own entry icon is appended next to the core "view options" button in the
-//     sidebar section header;
-//   · clicking it opens a SELF-DRAWN popover replicating the requested layout:
-//       分组方式
-//         · 按时间桶   (radio; picking it reveals a hairline-separated 显示工作区 row)
-//       picking it and clicking outside / Escape activates the mode;
-//   · activating TAKES OVER the section (the earliest-approved behaviour): the core
-//     header + list are hidden and replaced by a compact plugin header
-//     (entry → 按时间桶 · 显示工作区 · ＋新建 · ×退出) above the time-bucketed list.
-//   · while active, opening the popover again (entry button) shows 按时间桶 selected,
-//     a 显示工作区 switch (live) and unchecking 按时间桶 exits back to core.
-//
-// Time buckets: 今天 / 昨天 / 前7天 / 前30天 / 更早 by local calendar day, ordered by
-// session updatedAt desc; group headers show count and fold (chevron + hover, state
-// persisted); rows carry [workspace] title when 显示工作区 is on ([未分组] outside every
-// workspace) and a trailing relative time; empty buckets hidden; archived + subagent
-// rows filtered like core.
+// Follow-the-core architecture (no own entry, no popover, no full-section
+// takeover):
+//   · the plugin rides the core "单列表 + 最近更新" view: it reads the workspace
+//     browser viewing store that the core persists under localStorage key
+//     'dsh.workspace.view.v5' ({ groupBy: 'workspace'|'flat', orderBy:
+//     'manual'|'updated', ... }); while the core is in flat + updated mode the
+//     plugin hides ONLY the core list area and renders the same sessions as
+//     time buckets — 今天 / 昨天 / 前7天 / 前30天 / 更早 by local calendar day,
+//     newest-first inside each bucket.
+//   · the core section header stays fully visible and live (分组方式 / 排序方式
+//     menus, search, ＋新建) — switching back to 按工作区 or 手动排序, or starting
+//     a search, exits the enhancement automatically and restores the core list.
+//   · rows ALWAYS carry the owning workspace prefix: [工作区] 标题, or [未分组] 标题
+//     for sessions outside every workspace; plus a trailing relative time.
+//     Group headers show a count and fold (chevron + hover, folded state
+//     persisted under 'dsh.sessionTimeBucket.v1').
+//   · rail (icon) sidebar and search mode never take over.
 //
 // Data comes only from two core client services (never scraping the DOM):
 //   - sessions  -> list.getSnapshot() { ids, byId: {SessionSummary}, current }
 //   - workspaces-> list.getSnapshot() { items: WorkspaceView[], archivedSessionIds }
-// Sessions open via sessions.open(id); new sessions use sessions.create following the
-// current session's workspace (fallback: no-arg create), then open.
+// Sessions open via sessions.open(id).
 //
-// No React: plain DOM + inline styles + --dsw-* tokens. Mode / 显示工作区 / folded
-// buckets persist under a localStorage key; a 1s reconcile watcher re-asserts the
-// takeover, auto-enters the persisted on-state and auto-exits on the rail sidebar.
+// No React: plain DOM + inline styles + --dsw-* tokens. A 1s reconcile watcher
+// re-reads the core view store and re-asserts the takeover / exit; services
+// subscribe for instant re-renders while active.
 //
-// Bundle format (client-modules protocol): classic script registering a factory via
-// window.__ModuleLoader__.load({ id, factory }); returns { apply, inject: ['slots'] }.
+// Bundle format (client-modules protocol): classic script registering a factory
+// via window.__ModuleLoader__.load({ id, factory }); returns { apply, inject: ['slots'] }.
 window.__ModuleLoader__.load({
   id: 'dsh-session-time-bucket',
   factory: (require) => {
     const NS = 'session-time-bucket'
     const STORE_KEY = 'dsh.sessionTimeBucket.v1'
+    const CORE_VIEW_KEY = 'dsh.workspace.view.v5'
     const BUCKET_ORDER = ['today', 'yesterday', 'last7', 'last30', 'older']
     const DAY_MS = 86400000
 
     // --- locale ---------------------------------------------------------------
     const zhDict = {
-      'entry.aria': '按时间桶分组',
-      'popover.groupBy': '分组方式',
-      'option.timeBucket': '按时间桶',
-      'toggle.showWorkspace': '显示工作区',
-      'popover.hint': '勾选后点击空白处生效',
-      'mode.title': '按时间桶',
-      'action.new': '新建会话',
-      'action.exit': '退出按时间桶',
       'bucket.today': '今天',
       'bucket.yesterday': '昨天',
       'bucket.last7': '前7天',
@@ -58,8 +49,7 @@ window.__ModuleLoader__.load({
       'session.new': '新会话',
       'empty.none': '暂无会话',
       'err.noServices': '缺少会话/工作区服务，时间桶模式不可用',
-      'err.create': '新建会话失败',
-      'new.created': '已创建新会话',
+      'err.open': '打开会话失败',
       'rel.now': '刚刚',
       'rel.minute': '{n}分钟前',
       'rel.hour': '{n}小时前',
@@ -68,14 +58,6 @@ window.__ModuleLoader__.load({
       'rel.year': '{n}年前',
     }
     const enDict = {
-      'entry.aria': 'Group by time bucket',
-      'popover.groupBy': 'Group by',
-      'option.timeBucket': 'Time bucket',
-      'toggle.showWorkspace': 'Show workspace',
-      'popover.hint': 'Tick it, then click outside to apply',
-      'mode.title': 'Time bucket',
-      'action.new': 'New session',
-      'action.exit': 'Exit time bucket',
       'bucket.today': 'Today',
       'bucket.yesterday': 'Yesterday',
       'bucket.last7': 'Last 7 days',
@@ -85,8 +67,7 @@ window.__ModuleLoader__.load({
       'session.new': 'New Session',
       'empty.none': 'No sessions',
       'err.noServices': 'Session/workspace services unavailable; time-bucket mode is off',
-      'err.create': 'Failed to create session',
-      'new.created': 'New session created',
+      'err.open': 'Failed to open session',
       'rel.now': 'just now',
       'rel.minute': '{n}m ago',
       'rel.hour': '{n}h ago',
@@ -141,7 +122,7 @@ window.__ModuleLoader__.load({
       __servicesOk = !!(
         __sessions && __sessions.list && typeof __sessions.list.getSnapshot === 'function'
         && __workspaces && __workspaces.list && typeof __workspaces.list.getSnapshot === 'function'
-        && typeof __sessions.open === 'function' && typeof __sessions.create === 'function'
+        && typeof __sessions.open === 'function'
       )
       if (__servicesOk) ensureSubscriptions()
       return __servicesOk
@@ -155,26 +136,33 @@ window.__ModuleLoader__.load({
       } catch { /* best-effort */ }
     }
 
-    // --- persistence ----------------------------------------------------------
-    function readStore() {
+    // --- persistence (folded buckets only) ------------------------------------
+    /** localStorage access that also works inside the Node test harness
+     *  (which stubs window.localStorage but has no global localStorage). */
+    function getStorage() {
       try {
-        const raw = localStorage.getItem(STORE_KEY)
+        if (typeof localStorage !== 'undefined') return localStorage
+        if (typeof window !== 'undefined' && window.localStorage) return window.localStorage
+      } catch { /* */ }
+      return null
+    }
+    function readStore() {
+      const storage = getStorage()
+      try {
+        const raw = storage && storage.getItem(STORE_KEY)
         if (raw) {
           const parsed = JSON.parse(raw)
           return {
-            on: parsed.on === true,
-            showWorkspace: parsed.showWorkspace === true,
             folded: Array.isArray(parsed.folded) ? parsed.folded.filter((k) => BUCKET_ORDER.indexOf(k) >= 0) : [],
           }
         }
       } catch { /* storage unavailable */ }
-      return { on: false, showWorkspace: false, folded: [] }
+      return { folded: [] }
     }
     function writeStore(state) {
+      const storage = getStorage()
       try {
-        localStorage.setItem(STORE_KEY, JSON.stringify({
-          on: state.on === true,
-          showWorkspace: state.showWorkspace === true,
+        if (storage) storage.setItem(STORE_KEY, JSON.stringify({
           folded: Array.isArray(state.folded) ? state.folded.filter((k) => BUCKET_ORDER.indexOf(k) >= 0) : [],
         }))
       } catch { /* never break the UI over persistence */ }
@@ -187,6 +175,23 @@ window.__ModuleLoader__.load({
       __store.folded = BUCKET_ORDER.filter((k) => set.has(k))
       writeStore(__store)
       renderList()
+    }
+
+    // --- core view follower ---------------------------------------------------
+    /** Read the workspace browser viewing store the core persists on every change. */
+    function readCoreView() {
+      const storage = getStorage()
+      try {
+        const raw = storage && storage.getItem(CORE_VIEW_KEY)
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        return { groupBy: parsed.groupBy, orderBy: parsed.orderBy }
+      } catch { return null }
+    }
+    /** True only while the core is in 单列表 (flat) + 最近更新 (updated) mode. */
+    function isFlatUpdatedView() {
+      const view = readCoreView()
+      return !!view && view.groupBy === 'flat' && view.orderBy === 'updated'
     }
 
     // --- pure bucketing / projection (exposed for the logic harness) ----------
@@ -286,23 +291,16 @@ window.__ModuleLoader__.load({
       return node
     }
 
-    const CLOCK_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="flex:none"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 3a5 5 0 1 1 0 10A5 5 0 0 1 8 3zm-.5 1.5h1v3.2l2.1 1.26-.5.86L7.5 8.5V4.5z" fill="currentColor"/></svg>'
-    const PLUS_ICON = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="flex:none"><path d="M8 3.25a.75.75 0 0 1 .75.75v3.25H12a.75.75 0 0 1 0 1.5H8.75V12a.75.75 0 0 1-1.5 0V8.75H4a.75.75 0 0 1 0-1.5h3.25V4a.75.75 0 0 1 .75-.75z" fill="currentColor"/></svg>'
-    const CLOSE_ICON = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="flex:none"><path d="M4.47 3.76a.75.75 0 0 0-1.06 1.06L6.94 8l-3.53 3.18a.75.75 0 1 0 1.06 1.18L8 9.06l3.53 3.06a.75.75 0 1 0 1.06-1.18L9.06 8l3.53-3.18a.75.75 0 0 0-1.06-1.06L8 6.94 4.47 3.76z" fill="currentColor"/></svg>'
     const CHEVRON_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
     // --- live state -----------------------------------------------------------
     var __mode = false
-    var __entry = null            // entry button (icon) inside core header actions
-    var __popoverOpen = false
-    var __popListeners = null
     var __core = null
-    var __host = null             // takeover node (mini header + status + list)
+    var __host = null             // list replacement node (status line + bucket list)
     var __hostList = null
     var __statusEl = null
     var __statusTimer = null
     var __watch = null
-    var __busyNew = false
 
     // --- anchors --------------------------------------------------------------
     function findViewButton() {
@@ -327,189 +325,15 @@ window.__ModuleLoader__.load({
         return { header, root, listArea, rail }
       } catch { return null }
     }
-
-    // --- entry button + popover ----------------------------------------------
-    function ensureEntry() {
-      const viewButton = findViewButton()
-      if (!viewButton) return false
-      const headerActions = viewButton.parentElement
-      if (!headerActions) return false
-      if (__entry && document.contains(__entry)) return true
-      if (__entry) { try { __entry.remove() } catch { /* */ } }
-      const entry = el('button', {
-        type: 'button',
-        'data-dsh-time-bucket-entry': '1',
-        'aria-label': __t('entry.aria'),
-        title: __t('entry.aria'),
-        style: {
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          width: 28, height: 28, padding: 0, border: 'none', borderRadius: 6, background: 'transparent',
-          color: __mode ? 'var(--dsw-alias-accent, #4d9fff)' : 'var(--dsw-alias-label-tertiary, #8a8a8e)',
-          cursor: 'pointer', flex: 'none',
-        },
-        html: CLOCK_ICON,
-      })
-      entry.addEventListener('click', (event) => { event.stopPropagation(); togglePopover() })
-      try { headerActions.appendChild(entry) } catch { /* noop */ }
-      __entry = entry
-      return true
-    }
-    function removeEntry() {
-      if (__entry) { try { __entry.remove() } catch { /* */ } }
-      __entry = null
-    }
-
-    function detachPopListeners() {
-      if (!__popListeners) return
-      try { document.removeEventListener('pointerdown', __popListeners.onDown, true) } catch { /* */ }
-      try { document.removeEventListener('keydown', __popListeners.onKey) } catch { /* */ }
-      __popListeners = null
-    }
-    function closePopover() {
-      if (!__popoverOpen) return
-      __popoverOpen = false
-      const popover = document.querySelector('[data-dsh-time-bucket-popover]')
-      if (popover) popover.remove()
-    }
-
-    /** Open the self-drawn popover. Off mode: radio 按时间桶 + reveal 显示工作区.
-     *  On mode: shows 按时间桶 selected + 显示工作区 (live) ; uncheck exits. */
-    function openPopover() {
-      closePopover()
-      detachPopListeners()
-      __popoverOpen = true
-      const select = __mode   // when active the option is pre-selected
-
-      const popover = el('div', {
-        'data-dsh-time-bucket-popover': '1',
-        role: 'menu',
-        style: {
-          position: 'fixed', zIndex: 1200, minWidth: 200,
-          padding: '4px', borderRadius: 10,
-          background: 'var(--dsw-alias-surface-overlay, #232326)',
-          border: '1px solid var(--dsw-alias-stroke-overlay, rgba(128,128,128,.24))',
-          boxShadow: '0 6px 24px rgba(0,0,0,.28)',
-          fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary, #d8d8dc)',
-        },
-      })
-      popover.appendChild(el('div', {
-        text: __t('popover.groupBy'),
-        style: { padding: '4px 10px 2px', color: 'var(--dsw-alias-label-tertiary, #8a8a8e)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em' },
-      }))
-
-      const row = el('button', {
-        type: 'button', role: 'menuitemradio', 'aria-checked': select ? 'true' : 'false',
-        style: {
-          display: 'flex', alignItems: 'center', gap: 8, width: '100%', minHeight: 34,
-          padding: '5px 10px', border: 'none', background: 'transparent', borderRadius: 10,
-          color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 14,
-          lineHeight: '22px', textAlign: 'left', cursor: 'pointer', boxSizing: 'border-box',
-        },
-      })
-      row.appendChild(el('span', { text: __t('option.timeBucket'), style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }))
-      const check = el('span', {
-        'data-dsh-time-bucket-pcheck': '1',
-        text: '✓',
-        style: { display: select ? 'block' : 'none', flex: 'none', color: 'var(--dsw-alias-label-primary)' },
-      })
-      row.appendChild(check)
-      popover.appendChild(row)
-
-      const sep = el('div', { role: 'separator', 'data-dsh-time-bucket-psep': '1', style: { display: select ? 'block' : 'none', height: 0.5, margin: '4px 2px', background: 'var(--dsw-alias-stroke-default, rgba(128,128,128,.2))' } })
-      popover.appendChild(sep)
-
-      const wsRow = el('label', {
-        'data-dsh-time-bucket-pws': '1',
-        style: { display: select ? 'flex' : 'none', alignItems: 'center', gap: 8, width: '100%', minHeight: 34, padding: '5px 10px', cursor: 'pointer', color: 'var(--dsw-alias-label-primary)', fontSize: 14, lineHeight: '22px', boxSizing: 'border-box' },
-      })
-      const wsInput = document.createElement('input')
-      wsInput.type = 'checkbox'
-      wsInput.checked = __store.showWorkspace
-      Object.assign(wsInput.style, { width: 14, height: 14, margin: 0, flex: 'none', accentColor: 'var(--dsw-alias-accent, #4d9fff)' })
-      wsInput.setAttribute('aria-label', __t('toggle.showWorkspace'))
-      wsInput.addEventListener('click', (event) => { event.stopPropagation() })
-      wsInput.addEventListener('change', () => {
-        __store.showWorkspace = wsInput.checked
-        writeStore(__store)
-        if (__mode) { renderList(); syncMiniHeaderSwitch() }
-      })
-      wsRow.appendChild(wsInput)
-      wsRow.appendChild(el('span', { text: __t('toggle.showWorkspace'), style: { flex: 1 } }))
-      popover.appendChild(wsRow)
-
-      popover.appendChild(el('div', {
-        text: __t('popover.hint'),
-        style: { display: select ? 'none' : 'block', padding: '2px 10px 4px', color: 'var(--dsw-alias-label-tertiary, #8a8a8e)', fontSize: 11, lineHeight: '15px' },
-      }))
-
-      const setSelected = (on) => {
-        check.style.display = on ? 'block' : 'none'
-        row.setAttribute('aria-checked', on ? 'true' : 'false')
-        sep.style.display = on ? 'block' : 'none'
-        wsRow.style.display = on ? 'flex' : 'none'
-      }
-
-      row.addEventListener('click', (event) => {
-        event.stopPropagation()
-        if (__mode) {
-          // Active mode: unchecking exits back to core immediately.
-          exitMode()
-          setSelected(false)
-          return
-        }
-        const nowOn = check.style.display !== 'block'
-        setSelected(nowOn)
-      })
-
-      document.body.appendChild(popover)
-      // Position under the entry (mini-header entry or core-header entry).
-      const anchorEl = __entry && document.contains(__entry) ? __entry : document.querySelector('[data-dsh-time-bucket-entry]')
-      const rect = anchorEl && anchorEl.getBoundingClientRect
-        ? anchorEl.getBoundingClientRect()
-        : { left: 0, bottom: 40 }
-      const pw = popover.offsetWidth || 200
-      let left = rect.left
-      if (left + pw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - pw - 8)
-      popover.style.left = left + 'px'
-      popover.style.top = ((rect.bottom || 40) + 6) + 'px'
-
-      const apply = () => {
-        const on = check.style.display === 'block'
-        if (!__mode && on) {
-          __store.on = true
-          writeStore(__store)
-          enterMode()
-        }
-      }
-      const onDown = (event) => {
-        const target = event.target
-        if (target instanceof Node) {
-          const anchorEl2 = __entry && document.contains(__entry) ? __entry : document.querySelector('[data-dsh-time-bucket-entry]')
-          if (popover.contains(target)) return
-          if (anchorEl2 && anchorEl2.contains(target)) return
-        }
-        apply()
-        closePopover()
-        detachPopListeners()
-      }
-      const onKey = (event) => {
-        if (event.key !== 'Escape') return
-        apply()
-        closePopover()
-        detachPopListeners()
-      }
-      __popListeners = { onDown, onKey }
-      document.addEventListener('pointerdown', onDown, true)
-      document.addEventListener('keydown', onKey)
-    }
-
-    function togglePopover() {
-      if (__popoverOpen) {
-        closePopover()
-        detachPopListeners()
-        return
-      }
-      openPopover()
+    /** Search expansion swaps the flat list for the search tree inside listArea:
+     *  never take over while a search is active. */
+    function isSearchActive(root) {
+      if (!root) return false
+      try {
+        if (root.querySelector('[class*="searchExpanded"]')) return true
+        if (root.querySelector('[class*="searchTree"]')) return true
+      } catch { /* */ }
+      return false
     }
 
     // --- takeover UI ----------------------------------------------------------
@@ -525,84 +349,12 @@ window.__ModuleLoader__.load({
       }, 3000)
     }
 
-    function buttonStyle() {
-      return {
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        width: 28, height: 28, padding: 0, border: 'none', borderRadius: 6, background: 'transparent',
-        color: 'var(--dsw-alias-label-tertiary, #8a8a8e)', cursor: 'pointer', flex: 'none',
-      }
-    }
-
-    function syncMiniHeaderSwitch() {
-      try {
-        const input = document.querySelector('[data-dsh-time-bucket-switch] input')
-        if (input) input.checked = __store.showWorkspace
-      } catch { /* noop */ }
-    }
-
-    function buildMiniHeader() {
-      const bar = el('div', {
-        'data-dsh-time-bucket-miniheader': '1',
-        style: { display: 'flex', alignItems: 'center', gap: 2, padding: '4px 6px', flex: 'none', minHeight: 30 },
-      })
-      // Entry (opens the popover; active state lets you uncheck to exit / toggle 显示工作区).
-      const entry = el('button', {
-        type: 'button', 'aria-label': __t('entry.aria'), title: __t('entry.aria'),
-        style: { ...buttonStyle(), color: 'var(--dsw-alias-accent, #4d9fff)' },
-        html: CLOCK_ICON,
-      })
-      entry.addEventListener('click', (event) => { event.stopPropagation(); togglePopover() })
-      bar.appendChild(entry)
-
-      bar.appendChild(el('span', {
-        text: __t('mode.title'),
-        style: { color: 'var(--dsw-alias-label-primary, #d8d8dc)', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', marginRight: 'auto', overflow: 'hidden', textOverflow: 'ellipsis' },
-      }))
-
-      const wsToggle = el('label', {
-        'data-dsh-time-bucket-switch': '1',
-        style: { display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', color: 'var(--dsw-alias-label-secondary, #b0b0b4)', fontSize: 12, whiteSpace: 'nowrap' },
-      })
-      const wsInput = document.createElement('input')
-      wsInput.type = 'checkbox'
-      wsInput.checked = __store.showWorkspace
-      Object.assign(wsInput.style, { width: 13, height: 13, margin: 0, accentColor: 'var(--dsw-alias-accent, #4d9fff)' })
-      wsInput.setAttribute('aria-label', __t('toggle.showWorkspace'))
-      wsInput.addEventListener('change', () => {
-        __store.showWorkspace = wsInput.checked
-        writeStore(__store)
-        renderList()
-      })
-      wsToggle.appendChild(wsInput)
-      wsToggle.appendChild(document.createTextNode(__t('toggle.showWorkspace')))
-      bar.appendChild(wsToggle)
-
-      const newBtn = el('button', { type: 'button', 'aria-label': __t('action.new'), title: __t('action.new'), style: buttonStyle(), html: PLUS_ICON })
-      newBtn.addEventListener('click', () => { void createNewSession() })
-      bar.appendChild(newBtn)
-
-      const exitBtn = el('button', { type: 'button', 'aria-label': __t('action.exit'), title: __t('action.exit'), style: buttonStyle(), html: CLOSE_ICON })
-      exitBtn.addEventListener('click', () => { exitMode() })
-      bar.appendChild(exitBtn)
-
-      __statusEl = el('div', {
-        'data-dsh-time-bucket-status': '1',
-        style: { display: 'none', fontSize: 11, lineHeight: '15px', padding: '0 10px 4px', color: 'var(--dsw-alias-label-tertiary, #8a8a8e)' },
-      })
-      const wrap = el('div', { style: { display: 'flex', flexDirection: 'column', flex: 'none' } })
-      wrap.appendChild(bar)
-      wrap.appendChild(__statusEl)
-      return wrap
-    }
-
-    function hideCore() {
+    function hideCoreList() {
       if (!__core) return
-      if (__core.header) __core.header.style.display = 'none'
       if (__core.listArea) __core.listArea.style.display = 'none'
     }
-    function restoreCore() {
+    function restoreCoreList() {
       if (!__core) return
-      if (__core.header) __core.header.style.display = ''
       if (__core.listArea) __core.listArea.style.display = ''
     }
     function mountHost() {
@@ -613,7 +365,11 @@ window.__ModuleLoader__.load({
         'data-dsh-time-bucket-host': '1',
         style: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 },
       })
-      host.appendChild(buildMiniHeader())
+      __statusEl = el('div', {
+        'data-dsh-time-bucket-status': '1',
+        style: { display: 'none', fontSize: 11, lineHeight: '15px', padding: '4px 12px 0', color: 'var(--dsw-alias-label-tertiary, #8a8a8e)' },
+      })
+      host.appendChild(__statusEl)
       __hostList = el('div', { 'data-dsh-time-bucket-list': '1', style: { flex: '1 1 auto', overflowY: 'auto', padding: '2px 4px 12px' } })
       host.appendChild(__hostList)
       try {
@@ -689,12 +445,11 @@ window.__ModuleLoader__.load({
             if (row.blank) {
               label.textContent = __t('session.new')
               btn.style.color = 'var(--dsw-alias-label-tertiary, #8a8a8e)'
-            } else if (__store.showWorkspace) {
+            } else {
+              // 显示工作区 is always on in follow mode: [工作区] 标题 / [未分组] 标题.
               const prefixText = row.wsTitle ? row.wsTitle : ungroupedLabel
               label.appendChild(el('span', { text: '[' + prefixText + '] ', style: { color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.85))' } }))
               label.appendChild(document.createTextNode(row.title))
-            } else {
-              label.textContent = row.title
             }
             btn.appendChild(label)
             btn.appendChild(el('span', {
@@ -718,30 +473,7 @@ window.__ModuleLoader__.load({
     // --- actions --------------------------------------------------------------
     function openSession(id) {
       if (!__sessions || typeof __sessions.open !== 'function') return
-      try { __sessions.open(id) } catch (error) { statusText(String((error && error.message) || error), true) }
-    }
-    async function createNewSession() {
-      if (__busyNew || !__servicesOk) return
-      __busyNew = true
-      try {
-        const listSnap = __sessions.list.getSnapshot()
-        const wsSnap = __workspaces.list.getSnapshot()
-        const current = listSnap && listSnap.current
-        let workspaceId
-        if (current) {
-          const items = (wsSnap && wsSnap.items) || []
-          for (const item of items) {
-            if ((item.sessionIds || []).indexOf(current) >= 0) { workspaceId = item.workspaceId; break }
-          }
-        }
-        const id = workspaceId ? await __sessions.create({ workspaceId }) : await __sessions.create()
-        try { __sessions.open(id) } catch { /* list may lag a frame */ }
-        statusText(__t('new.created'), false)
-      } catch (error) {
-        statusText(__t('err.create') + ': ' + String((error && error.message) || error), true)
-      } finally {
-        __busyNew = false
-      }
+      try { __sessions.open(id) } catch (error) { statusText(__t('err.open') + ': ' + String((error && error.message) || error), true) }
     }
 
     // --- mode control ---------------------------------------------------------
@@ -752,47 +484,37 @@ window.__ModuleLoader__.load({
       if (!core || core.rail) return
       __core = core
       __mode = true
-      hideCore()
+      hideCoreList()
       mountHost()
       renderList()
-      refreshEntryColor()
     }
     function exitMode() {
       if (!__mode) return
       __mode = false
-      __store.on = false
-      writeStore(__store)
-      closePopover()
-      restoreCore()
+      restoreCoreList()
       unmountHost()
       __core = null
-      refreshEntryColor()
-    }
-    function refreshEntryColor() {
-      try {
-        if (__entry) __entry.style.color = __mode ? 'var(--dsw-alias-accent, #4d9fff)' : 'var(--dsw-alias-label-tertiary, #8a8a8e)'
-      } catch { /* noop */ }
     }
 
     // --- watcher --------------------------------------------------------------
     function tick() {
       try {
         if (!refreshServiceStatus()) return
-        if (__mode) {
-          const core = locateCore()
-          if (!core || core.rail) { exitMode(); return }
-          if (core.header && core.header.style.display !== 'none') core.header.style.display = 'none'
-          if (core.listArea && core.listArea.style.display !== 'none') core.listArea.style.display = 'none'
-          if (!__host || !document.contains(__host)) { __core = core; mountHost(); renderList() }
+        const core = locateCore()
+        if (core && !core.rail && isFlatUpdatedView() && !isSearchActive(core.root)) {
+          if (!__mode) {
+            __core = core
+            __mode = true
+            hideCoreList()
+            mountHost()
+            renderList()
+          } else {
+            hideCoreList()
+            if (!__host || !document.contains(__host)) { __core = core; mountHost(); renderList() }
+          }
           return
         }
-        // Off mode: keep the entry icon beside 视图选项 and honor a persisted on-state.
-        if (__entry && !document.contains(__entry)) removeEntry()
-        if (findViewButton()) {
-          if (ensureEntry() && __store.on) enterMode()
-        } else if (__entry) {
-          removeEntry()
-        }
+        if (__mode) exitMode()
       } catch { /* watcher never crashes the UI */ }
     }
 
@@ -821,12 +543,13 @@ window.__ModuleLoader__.load({
     if (typeof window !== 'undefined' && window.__DSH_TEST__) {
       window.__sessionTimeBucketTest = {
         bucketKeyOf, startOfLocalDay, workspaceTitleBySession, collectRows, rowTitle, deriveBuckets, relativeLabel,
+        readCoreView, isFlatUpdatedView,
         BUCKET_ORDER, __t, zhDict, enDict,
         reset() {
           __scope = null; __ctx = null; __sessions = null; __workspaces = null; __servicesOk = false; __subscribed = false
-          __mode = false; __store = { on: false, showWorkspace: false, folded: [] }
-          if (__entry) { try { __entry.remove() } catch { /* */ } __entry = null }
-          closePopover(); detachPopListeners()
+          __mode = false; __core = null
+          unmountHost()
+          if (__statusTimer) { clearTimeout(__statusTimer); __statusTimer = null }
           if (__watch) { clearInterval(__watch); __watch = null }
         },
       }
