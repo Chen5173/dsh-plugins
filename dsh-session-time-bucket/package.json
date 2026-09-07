@@ -1,0 +1,49 @@
+{
+  "name": "dsh-session-time-bucket",
+  "version": "0.1.0",
+  "description": "Standalone time-bucket grouping for the DSH Web sidebar session section. Adds its own clock entry beside the core view-options button (no core-menu injection: core ui-workspace's 分组方式 menu proved unsafe to extend). The entry opens a self-drawn popover (分组方式 → 按时间桶; picking it reveals a hairline-separated 显示工作区 row). Activating takes over the section with a compact plugin header (entry · 按时间桶 · 显示工作区 · ＋new session · ×exit) above a time-bucketed session list (今天/昨天/前7天/前30天/更早 by local calendar day, updatedAt desc, count + collapsible headers, trailing relative times, empty buckets hidden, archived/subagent filtered like core). While active the popover shows 按时间桶 selected + live 显示工作区; unchecking exits. Rows open via sessions.open; ＋new follows the current session's workspace; mode + 显示工作区 + folded buckets persist to localStorage. Client-only: reads the core sessions/workspaces services, ships no host endpoint and no model tool.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "session",
+    "workspace",
+    "grouping",
+    "time-bucket",
+    "sidebar"
+  ],
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.2"
+  }
+}

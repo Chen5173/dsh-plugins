@@ -9,3 +9,5 @@
       name: 'dsh-open-session-workdir'
     - id: composer-history-recall
       name: 'dsh-composer-history-recall'
+    - id: session-time-bucket
+      name: 'dsh-session-time-bucket'
