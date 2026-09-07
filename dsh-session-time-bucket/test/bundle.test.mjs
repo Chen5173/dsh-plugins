@@ -126,11 +126,13 @@ test('collectRows applies core-equivalent visibility', () => {
     d: { id: 'd', displayTitle: '当前空白', updatedAt: nowMs, blank: true },
     e: { id: 'e', displayTitle: '已归档', updatedAt: nowMs, blank: false },
     f: { id: 'f', displayTitle: '', updatedAt: nowMs, blank: false },
+    g: { id: 'g', displayTitle: '运行中', updatedAt: nowMs, blank: false, running: true },
+    h: { id: 'h', displayTitle: '已完成', updatedAt: nowMs, blank: false, completed: true },
   }
   const list = { byId, current: 'd' }
   const rows = collectRows(list, ['e'], workspaceTitleBySession([{ workspaceId: 'w', title: 'ws-a', sessionIds: ['a'] }]))
   const ids = rows.map((row) => row.id).sort()
-  assert.deepEqual(ids, ['a', 'd', 'f'])
+  assert.deepEqual(ids, ['a', 'd', 'f', 'g', 'h'])
   const a = rows.find((row) => row.id === 'a')
   const d = rows.find((row) => row.id === 'd')
   assert.equal(a.wsTitle, 'ws-a')
@@ -141,6 +143,12 @@ test('collectRows applies core-equivalent visibility', () => {
   assert.equal(d.wsTitle, undefined)
   const f = rows.find((row) => row.id === 'f')
   assert.equal(f.title, '')
+  const g = rows.find((row) => row.id === 'g')
+  assert.equal(g.running, true)
+  assert.equal(g.completed, false)
+  const h = rows.find((row) => row.id === 'h')
+  assert.equal(h.running, false)
+  assert.equal(h.completed, true)
 })
 
 test('rowTitle prefixes workspace / ungrouped and honors the switch', () => {

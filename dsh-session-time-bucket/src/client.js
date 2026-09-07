@@ -50,6 +50,9 @@ window.__ModuleLoader__.load({
       'empty.none': '暂无会话',
       'err.noServices': '缺少会话/工作区服务，时间桶模式不可用',
       'err.open': '打开会话失败',
+      'status.running': '进行中',
+      'status.completed': '已完成',
+      'status.idle': '空闲',
       'rel.now': '刚刚',
       'rel.minute': '{n}分钟前',
       'rel.hour': '{n}小时前',
@@ -68,6 +71,9 @@ window.__ModuleLoader__.load({
       'empty.none': 'No sessions',
       'err.noServices': 'Session/workspace services unavailable; time-bucket mode is off',
       'err.open': 'Failed to open session',
+      'status.running': 'Running',
+      'status.completed': 'Completed',
+      'status.idle': 'Idle',
       'rel.now': 'just now',
       'rel.minute': '{n}m ago',
       'rel.hour': '{n}h ago',
@@ -231,6 +237,8 @@ window.__ModuleLoader__.load({
           title: s.blank === true ? '' : String(s.displayTitle || s.title || ''),
           blank: s.blank === true,
           current: id === current,
+          running: s.running === true,
+          completed: s.completed === true,
           updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : 0,
           wsTitle: titleBySession[id],
         })
@@ -292,6 +300,119 @@ window.__ModuleLoader__.load({
     }
 
     const CHEVRON_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
+    // --- status dots (mirror core StateDot) -----------------------------------
+    var __chaseStyleInjected = false
+    function injectChaseStyle() {
+      if (__chaseStyleInjected) return
+      __chaseStyleInjected = true
+      try {
+        if (!document.head) return
+        const style = document.createElement('style')
+        style.setAttribute('data-dsh-time-bucket-style', '1')
+        style.textContent = '@keyframes dsh-time-bucket-chase{0%,12.4%{opacity:1}12.5%,24.9%{opacity:.6}25%,37.4%{opacity:.35}37.5%,100%{opacity:.15}}'
+        document.head.appendChild(style)
+      } catch { /* non-browser test env */ }
+    }
+    /** 10px state dot HTML: 'ongoing' = blue pixel chase, otherwise a green
+     *  solid dot with a soft halo (core StateDot semantics; aria-hidden). */
+    function statusDotHtml(state) {
+      if (state === 'ongoing') {
+        const xs = [0, 4, 8, 8, 8, 4, 0, 0]
+        const ys = [0, 0, 0, 4, 8, 8, 8, 4]
+        let rects = ''
+        for (let i = 0; i < 8; i++) {
+          rects += '<rect x="' + xs[i] + '" y="' + ys[i] + '" width="2" height="2" style="fill:currentColor;opacity:.15;animation:dsh-time-bucket-chase 1s infinite;animation-delay:' + ((i - 8) * 125) + 'ms"/>'
+        }
+        return '<svg width="10" height="10" viewBox="0 0 10 10" shape-rendering="crispEdges" aria-hidden="true" style="flex:none;color:var(--dsw-static-deepseek-450,#4d9fff)"><g fill="currentColor">' + rects + '</g></svg>'
+      }
+      return '<span aria-hidden="true" style="position:relative;display:inline-block;flex:none;width:10px;height:10px;color:var(--dsw-alias-state-success-primary,#3fbf7f)">'
+        + '<span style="position:absolute;inset:0;border-radius:50%;background:currentColor;opacity:.1"></span>'
+        + '<span style="position:absolute;inset:20%;border-radius:50%;background:currentColor"></span></span>'
+    }
+
+    // --- hover card (mirror core HoverCard: 500ms dwell, right of row, holdable) ---
+    var __hoverCard = null
+    var __hoverRow = null
+    var __hoverTimer = null
+    var __hoverCloseTimer = null
+    var __hoverPlace = null
+
+    function placeHover() {
+      const row = __hoverRow
+      const card = __hoverCard
+      if (!row || !card) return
+      const r = row.getBoundingClientRect()
+      const h = card.offsetHeight || 0
+      let top = r.top
+      if (top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - h - 8)
+      card.style.left = (r.right + 8) + 'px'
+      card.style.top = top + 'px'
+    }
+    function hideHover() {
+      if (__hoverTimer) { clearTimeout(__hoverTimer); __hoverTimer = null }
+      if (__hoverCloseTimer) { clearTimeout(__hoverCloseTimer); __hoverCloseTimer = null }
+      if (__hoverPlace) {
+        try { window.removeEventListener('scroll', __hoverPlace, true) } catch { /* */ }
+        try { window.removeEventListener('resize', __hoverPlace) } catch { /* */ }
+        __hoverPlace = null
+      }
+      if (__hoverCard) { try { __hoverCard.remove() } catch { /* */ } __hoverCard = null }
+      __hoverRow = null
+    }
+    function showHover(row, nowMs) {
+      hideHover()
+      __hoverRow = row
+      injectChaseStyle()
+      const card = el('div', {
+        'data-dsh-time-bucket-hover': '1',
+        role: 'tooltip',
+        style: {
+          position: 'fixed', zIndex: 1100, width: 244, boxSizing: 'border-box',
+          padding: '12px 16px', borderRadius: 12,
+          background: 'var(--dsw-hovercard-bg, #2c2c2e)',
+          boxShadow: 'var(--dsw-shadow-lv3, 0 6px 24px rgba(0,0,0,.28))',
+          color: 'var(--dsw-alias-label-primary, #e8e8ea)',
+          display: 'flex', flexDirection: 'column', gap: 8,
+        },
+      })
+      const titleDiv = el('div', { style: { overflowWrap: 'break-word', wordBreak: 'break-word', fontSize: 14, lineHeight: '20px', color: 'var(--dsw-alias-label-primary, #fff)' } })
+      titleDiv.textContent = row.blank ? __t('session.new') : row.title
+      card.appendChild(titleDiv)
+      if (!row.blank) {
+        card.appendChild(el('div', {
+          text: relativeLabel(row.updatedAt, nowMs, __t),
+          style: { fontSize: 12, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary, #cfd3d6)' },
+        }))
+      }
+      const statusRow = el('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '20px', color: 'var(--dsw-alias-label-secondary, #adb2b8)' } })
+      const statusKey = row.running ? 'status.running' : (row.completed ? 'status.completed' : 'status.idle')
+      statusRow.innerHTML = statusDotHtml(row.running ? 'ongoing' : 'done')
+      statusRow.appendChild(el('span', { text: __t(statusKey) }))
+      card.appendChild(statusRow)
+      // The card itself is hit-testable (pointer may rest on it).
+      card.addEventListener('mouseenter', () => { if (__hoverCloseTimer) { clearTimeout(__hoverCloseTimer); __hoverCloseTimer = null } })
+      card.addEventListener('mouseleave', () => { hideHover() })
+      document.body.appendChild(card)
+      __hoverCard = card
+      __hoverPlace = () => { placeHover() }
+      window.addEventListener('scroll', __hoverPlace, true)
+      window.addEventListener('resize', __hoverPlace)
+      placeHover()
+    }
+    /** Arm the 500ms dwell; cancels any pending close (grace re-entry). */
+    function armHover(row, nowMs) {
+      if (__hoverTimer) { clearTimeout(__hoverTimer); __hoverTimer = null }
+      if (__hoverCloseTimer) { clearTimeout(__hoverCloseTimer); __hoverCloseTimer = null }
+      __hoverTimer = setTimeout(() => { showHover(row, nowMs) }, 500)
+    }
+    /** Cancel a pending show but keep the card if open (grace on leave). */
+    function disarmHover() {
+      if (__hoverTimer) { clearTimeout(__hoverTimer); __hoverTimer = null }
+      if (!__hoverCard) return
+      if (__hoverCloseTimer) { clearTimeout(__hoverCloseTimer); __hoverCloseTimer = null }
+      __hoverCloseTimer = setTimeout(() => { hideHover() }, 150)
+    }
 
     // --- live state -----------------------------------------------------------
     var __mode = false
@@ -388,6 +509,7 @@ window.__ModuleLoader__.load({
     // --- rendering ------------------------------------------------------------
     function renderList() {
       if (!__mode || !__hostList || !__servicesOk) return
+      hideHover()
       try {
         const nowMs = Date.now()
         const listSnap = __sessions.list.getSnapshot()
@@ -441,6 +563,16 @@ window.__ModuleLoader__.load({
                 background: row.current ? 'var(--dsw-alias-interactive-bg-selected, rgba(128,128,128,.22))' : 'transparent',
               },
             })
+            // Leading status slot, same rule as the core flat list: only while
+            // running (blue chase) or completed (green dot).
+            if (row.running || row.completed) {
+              const slot = el('span', {
+                style: { width: 16, height: 20, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+              })
+              slot.setAttribute('aria-label', __t(row.running ? 'status.running' : 'status.completed'))
+              slot.innerHTML = statusDotHtml(row.running ? 'ongoing' : 'done')
+              btn.appendChild(slot)
+            }
             const label = el('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } })
             if (row.blank) {
               label.textContent = __t('session.new')
@@ -456,9 +588,9 @@ window.__ModuleLoader__.load({
               text: relativeLabel(row.updatedAt, nowMs, __t),
               style: { flex: 'none', fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.75))' },
             }))
-            btn.addEventListener('mouseenter', () => { if (!row.current) btn.style.background = 'var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14))' })
-            btn.addEventListener('mouseleave', () => { btn.style.background = row.current ? 'var(--dsw-alias-interactive-bg-selected, rgba(128,128,128,.22))' : 'transparent' })
-            btn.addEventListener('click', () => { openSession(row.id) })
+            btn.addEventListener('mouseenter', () => { if (!row.current) btn.style.background = 'var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14))'; armHover(row, nowMs) })
+            btn.addEventListener('mouseleave', () => { btn.style.background = row.current ? 'var(--dsw-alias-interactive-bg-selected, rgba(128,128,128,.22))' : 'transparent'; disarmHover() })
+            btn.addEventListener('click', () => { hideHover(); openSession(row.id) })
             __hostList.appendChild(btn)
           }
         }
@@ -491,6 +623,7 @@ window.__ModuleLoader__.load({
     function exitMode() {
       if (!__mode) return
       __mode = false
+      hideHover()
       restoreCoreList()
       unmountHost()
       __core = null
@@ -548,6 +681,7 @@ window.__ModuleLoader__.load({
         reset() {
           __scope = null; __ctx = null; __sessions = null; __workspaces = null; __servicesOk = false; __subscribed = false
           __mode = false; __core = null
+          hideHover()
           unmountHost()
           if (__statusTimer) { clearTimeout(__statusTimer); __statusTimer = null }
           if (__watch) { clearInterval(__watch); __watch = null }
