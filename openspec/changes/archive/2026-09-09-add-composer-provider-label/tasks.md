@@ -34,7 +34,7 @@
 
 ## 6. 集成验收与交付
 
-- [ ] 6.1 逐条走查 `specs/composer-provider-label/spec.md` 的 7 条 Requirement 全部场景并记录结果；验证：`openspec validate add-composer-provider-label --strict` 无 error
+- [x] 6.1 逐条走查 `specs/composer-provider-label/spec.md` 的 7 条 Requirement 全部场景并记录结果；验证：`openspec validate add-composer-provider-label --strict` 无 error。GUI 走查记录（2026-09-09，真实 dsh web）：标签位置/默认路由/无会话隐藏、ARK 括号剪短与 tooltip 完整名、office、别名覆盖、切模型/切会话/子代理即时更新、tooltip 三字段、键盘 aria、点击零副作用（会话日志 mtime/size 不变）、zh/en、深浅主题、窄窗口省略均通过；`--strict` 无 error
 - [x] 6.2 写 `README.md`：安装/卸载（含 `disabled:true` 回滚）、版本下限 ≥0.1.2-rc.1、别名配置（settings 段 + 官方预置 office + codemaker 等无 displayName 的显示为 id 及补 displayName 的办法）、卸载后 settings 残留段的清理步骤、与既有三插件共存说明、不含宿主端点（仅一个 settings section）；验证：照 README 在干净 profile 从零装一遍成功，再按回滚步骤卸载
 - [x] 6.3 写 `ACCEPTANCE.md`：覆盖 GUI 侧人工项——真实安装加载无报错、标签出现位置与顺序（模型名左侧、order 10）、`office` 与 `ARK` 显示、切会话/切模型/子代理会话三条路径即时更新、settings 改 displayName/别名后不刷新热更新、深浅主题、窄窗口省略、zh/en 切换、与 `dsh-composer-history-recall`（↑ 召回）/ `dsh-open-session-workdir` / `dsh-session-title-regenerate` 共存、点击标签零副作用、会话日志 mtime/size 不变；验证：文档列出可勾选项，条目与 spec 场景一一对应
 ---
