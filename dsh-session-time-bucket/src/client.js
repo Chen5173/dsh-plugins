@@ -545,9 +545,9 @@ window.__ModuleLoader__.load({
             'data-dsh-time-bucket-group': key,
             'aria-expanded': folded ? 'false' : 'true',
             style: {
-              display: 'flex', alignItems: 'center', gap: 4, width: '100%', margin: '2px 0',
-              padding: '6px 10px', border: 'none', background: 'transparent', borderRadius: 6,
-              cursor: 'pointer', textAlign: 'left', fontSize: 13, lineHeight: '18px',
+              display: 'flex', alignItems: 'center', gap: 6, width: '100%', margin: '2px 0 6px',
+              padding: '7px 10px', border: 'none', background: 'transparent', borderRadius: 8,
+              cursor: 'pointer', textAlign: 'left', fontSize: 14, lineHeight: '20px',
               color: 'var(--dsw-alias-label-secondary, #b0b0b4)',
             },
           })
@@ -570,25 +570,25 @@ window.__ModuleLoader__.load({
               type: 'button',
               'data-dsh-time-bucket-row': row.id,
               style: {
-                display: 'flex', alignItems: 'center', gap: 8, width: '100%', margin: '1px 0',
-                padding: '5px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', textAlign: 'left',
+                display: 'flex', alignItems: 'center', gap: 0, width: '100%', margin: '2px 0',
+                padding: '6px 10px', border: 'none', borderRadius: 8, cursor: 'pointer', textAlign: 'left',
                 font: 'inherit', fontSize: 13, lineHeight: '18px',
                 color: row.current ? 'var(--dsw-alias-label-primary, #d8d8dc)' : 'var(--dsw-alias-label-secondary, #b0b0b4)',
                 background: row.current ? 'var(--dsw-alias-interactive-bg-selected, rgba(128,128,128,.22))' : 'transparent',
               },
             })
             // Leading status slot, same rule as the core flat list: only while
-            // running (blue chase) or completed (green dot). Extra right margin
-            // breathes between the dot and the [workspace] prefix, like core.
+            // running (blue chase) or completed (green dot). Core gap:0, and the
+            // title owns the 4px left gap (title margin, like fPQ3ha_title).
             if (row.running || row.completed) {
               const slot = el('span', {
-                style: { width: 16, height: 20, marginRight: 4, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+                style: { width: 16, height: 20, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
               })
               slot.setAttribute('aria-label', __t(row.running ? 'status.running' : 'status.completed'))
               slot.innerHTML = statusDotHtml(row.running ? 'ongoing' : 'done')
               btn.appendChild(slot)
             }
-            const label = el('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } })
+            const label = el('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', margin: '0 6px 0 4px' } })
             if (row.blank) {
               label.textContent = __t('session.new')
               btn.style.color = 'var(--dsw-alias-label-tertiary, #8a8a8e)'
@@ -601,7 +601,7 @@ window.__ModuleLoader__.load({
             btn.appendChild(label)
             btn.appendChild(el('span', {
               text: relativeLabel(row.updatedAt, nowMs, __t),
-              style: { flex: 'none', fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.75))' },
+              style: { flex: 'none', fontSize: 12, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary, #8a8a8e)' },
             }))
             btn.addEventListener('mouseenter', () => { if (!row.current) btn.style.background = 'var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14))'; armHover(row, nowMs) })
             btn.addEventListener('mouseleave', () => { btn.style.background = row.current ? 'var(--dsw-alias-interactive-bg-selected, rgba(128,128,128,.22))' : 'transparent'; disarmHover() })
