@@ -27,7 +27,7 @@
 ## 设计约束与取舍
 
 - **不重绘、不复制官方行**：行的一切交互与样式（状态点、hover 卡、行菜单、拖拽）由核心 React 组件原生提供；插件注入的只有组头与 4px 宽的文本前缀，官方视觉格式天然一致，无“适配漂移”。
-- **React 调和安全性**：React 用 key 调和 `list` 子节点、只读写它自己 fiber 里记录的节点；插入其间的组头对 diff 不可见。核心按更新顺序重排行时，MutationObserver（childList/characterData，关闭 attributes 防自触发）即时重锚组头；所有写操作先比较后写，保证幂等不死循环。
+- **React 调和安全性**：React 用 key 调和 `list` 子节点、只读写它自己 fiber 里记录的节点；插入其间的组头对 diff 不可见。核心按更新顺序重排行时，MutationObserver（childList/characterData，关闭 attributes 防自触发）即时重锚组头；所有写操作先比较后写，保证幂等不死循环。**真实 DOM 中每行外层包着一个 hover-card 锚点 span（如 `_root_1b2ny_3`），行不是树的直接子节点**——行探测用 `[role=treeitem]` 后代查询，组头/折叠锚定到该 wrapper 上（已用无头 Chrome 对真实 GUI 验证）。
 - **行顺序不重排**：核心 recency 顺序天然产生单调的桶区间（今天在前…更早在后），插件只在桶边界插组头，绝不搬动官方行（手动拖乱后组头按实际顺序成段出现，每段独立折叠）。
 - **视图状态读取不靠 DOM**：核心把 `{groupBy, orderBy, …}` 整值 JSON 同步持久化到 `dsh.workspace.view.v5`，插件 1s 观察器读它判定激活；搜索态/rail 由 DOM 特征判断。
 - **退出零残留**：exit 时删除组头、删除前缀 span、还原标题 margin、展开全部折叠行；React 列表不受影响。
@@ -45,7 +45,7 @@ dsh plugin --profile web add dsh-session-time-bucket   # 或 add ./dsh-session-t
 ## 开发 / 验证
 
 ```bash
-node dsh-session-time-bucket/test/bundle.test.mjs   # 逻辑 harness（14 条）
+node dsh-session-time-bucket/test/bundle.test.mjs   # 逻辑 harness（15 条）
 node --check dsh-session-time-bucket/src/client.js
 ```
 

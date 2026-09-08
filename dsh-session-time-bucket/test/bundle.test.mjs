@@ -70,7 +70,7 @@ const exports = factory(() => { throw new Error('unexpected require()') })
 const hooks = globalThis.window.__sessionTimeBucketTest
 assert.ok(hooks, 'window.__DSH_TEST__ hook object missing')
 
-const { bucketKeyOf, collectRows, rowTitle, wsPrefixText, sortRowsByRecency, matchRowTitles, planBuckets, deriveBuckets, relativeLabel, workspaceTitleBySession, isFlatUpdatedView, __t, enDict } = hooks
+const { bucketKeyOf, collectRows, rowTitle, wsPrefixText, sortRowsByRecency, matchRowTitles, planBuckets, deriveBuckets, relativeLabel, readDomRows, workspaceTitleBySession, isFlatUpdatedView, __t, enDict } = hooks
 const DAY = 86400000
 // Fixed local "now": 2026-09-06 12:00 (Sep 6 is a Sunday; weekday is irrelevant).
 const nowMs = new Date(2026, 8, 6, 12, 0, 0).getTime()
@@ -256,6 +256,72 @@ test('planBuckets groups contiguous render-order keys into fold runs', () => {
   ])
   assert.deepEqual(planBuckets([]), [])
   assert.deepEqual(planBuckets([null, null]), [])
+})
+
+test('readDomRows finds rows nested under React wrapper spans (live DOM shape)', () => {
+  // Mirror the real flat tree: every row sits inside a hover-card wrapper
+  // span, so role/class live on descendants — direct-children scanning must
+  // not be required (regression: live GUI rendered zero rows and the
+  // enhancement never appeared).
+  const el = (props = {}) => {
+    const node = {
+      _cls: props.cls || '', _role: props.role || null,
+      textContent: props.text || '',
+      children: [],
+      parentElement: null,
+    }
+    for (const child of props.children || []) {
+      child.parentElement = node
+      node.children.push(child)
+    }
+    node.className = node._cls
+    node.getAttribute = (name) => (name === 'role' ? node._role : null)
+    node.querySelectorAll = (sel) => {
+      const hits = []
+      const walk = (n) => {
+        for (const c of n.children) {
+          if (sel === '[role="treeitem"]' && c._role === 'treeitem') hits.push(c)
+          walk(c)
+        }
+      }
+      walk(node)
+      return hits
+    }
+    node.querySelector = (sel) => {
+      const hits = []
+      const walk = (n) => {
+        for (const c of n.children) {
+          if (c._cls.indexOf((sel.match(/\*="([^"]+)"/) || [])[1] || '') >= 0) hits.push(c)
+          walk(c)
+        }
+      }
+      walk(node)
+      return hits[0] || null
+    }
+    return node
+  }
+  const mkRow = (cls, title, extra) => {
+    const titleEl = el({ cls: 'fPQ3ha_title', text: title })
+    const kids = [titleEl]
+    if (extra && extra.slot) kids.unshift(el({ cls: 'fPQ3ha_slot' }))
+    return el({ cls: 'fPQ3ha_sessionRow' + cls, role: 'treeitem', children: kids })
+  }
+  const wrap = (row) => el({ cls: '_root_1b2ny_3', children: [row] })
+  const rowA = mkRow('', '写插件', { slot: true })
+  const rowB = mkRow(' fPQ3ha_flatSessionRowWithoutStatus', '看readme', {})
+  const rowNoTitle = el({ cls: 'fPQ3ha_sessionRow', role: 'treeitem', children: [el({ cls: 'x' })] })
+  const notARow = el({ cls: 'MV_2aq_empty', role: null })
+  const tree = el({ children: [wrap(rowA), notARow, wrap(rowB), wrap(rowNoTitle)] })
+
+  const rows = readDomRows(tree)
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].el, rowA)
+  assert.equal(rows[0].wrapper, rowA.parentElement)
+  assert.equal(rows[0].hasSlot, true)
+  assert.equal(rows[0].titleText, '写插件')
+  assert.equal(rows[1].el, rowB)
+  assert.equal(rows[1].hasSlot, false)
+  assert.equal(rows[1].titleText, '看readme')
 })
 
 let failed = 0

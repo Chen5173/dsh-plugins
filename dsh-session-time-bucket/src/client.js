@@ -399,18 +399,25 @@ window.__ModuleLoader__.load({
       } catch { /* */ }
       return null
     }
-    /** Official session rows inside the flat tree, in render order. */
+    /**
+     * Official session rows inside the flat tree, in render order.
+     * The live DOM nests every row under a React wrapper span (the hover-card
+     * anchor), so rows are located via role/class descendants rather than
+     * tree children; `wrapper` is the tree's direct child we anchor headers
+     * against, and `el` is the row itself.
+     */
     function readDomRows(tree) {
       const out = []
       try {
-        for (const child of tree.children) {
-          if (child.getAttribute('role') !== 'treeitem') continue
+        const rows = tree.querySelectorAll('[role="treeitem"]')
+        for (const child of rows) {
           if (String(child.className || '').indexOf('sessionRow') < 0) continue
           const titleEl = child.querySelector('[class*="title"]')
           if (!titleEl) continue
           const slotEl = child.querySelector('[class*="slot"]')
           out.push({
             el: child,
+            wrapper: child.parentElement,
             titleEl,
             hasSlot: !!slotEl,
             titleText: String(titleEl.textContent || '').replace(/\s+/g, ' ').trim(),
@@ -423,7 +430,7 @@ window.__ModuleLoader__.load({
     // --- enhancement state ----------------------------------------------------
     var __mode = false
     var __core = null
-    var __mapped = new Map()      // official row element -> { row, titleEl } (mapped session)
+    var __mapped = new Map()      // official row element -> { row, titleEl, wrapper } (mapped session)
     var __headers = new Map()     // run identity (key#n) -> injected header element
     var __observer = null
     var __observerRoot = null
@@ -475,7 +482,7 @@ window.__ModuleLoader__.load({
         style: {
           display: 'flex', alignItems: 'center', gap: 6, width: '100%', margin: '2px 0 6px',
           padding: '7px 8px', border: 'none', background: 'transparent', borderRadius: 8,
-          cursor: 'pointer', textAlign: 'left', fontSize: 14, lineHeight: '20px',
+          cursor: 'pointer', textAlign: 'left', fontSize: '14px', lineHeight: '20px',
           color: 'var(--dsw-alias-label-secondary, #b0b0b4)', boxSizing: 'border-box',
         },
       })
@@ -521,7 +528,7 @@ window.__ModuleLoader__.load({
           'data-dsh-time-bucket-ws': '1',
           style: {
             flex: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            maxWidth: '40%', fontSize: 12, lineHeight: '20px',
+            maxWidth: '40%', fontSize: '12px', lineHeight: '20px',
             color: 'var(--dsw-alias-label-tertiary, #8a8a8e)',
           },
         })
@@ -556,6 +563,7 @@ window.__ModuleLoader__.load({
       for (const [elm, info] of __mapped) {
         removeWsPrefix(info)
         try { elm.style.display = '' } catch { /* */ }
+        try { if (info && info.wrapper) info.wrapper.style.display = '' } catch { /* */ }
       }
       __mapped = new Map()
       for (const header of __headers.values()) { try { header.remove() } catch { /* */ } }
@@ -595,17 +603,25 @@ window.__ModuleLoader__.load({
         const domRow = domRows[i]
         const row = mapped[i]
         if (!row) {
-          if (old.has(domRow.el)) { removeWsPrefix(domRow); try { domRow.el.style.display = '' } catch { /* */ } }
+          if (old.has(domRow.el)) {
+            removeWsPrefix(domRow)
+            try { domRow.el.style.display = '' } catch { /* */ }
+            try { if (domRow.wrapper) domRow.wrapper.style.display = '' } catch { /* */ }
+          }
           continue
         }
-        __mapped.set(domRow.el, { row, titleEl: domRow.titleEl })
-        if (!old.has(domRow.el)) try { domRow.el.style.display = '' } catch { /* */ }
+        __mapped.set(domRow.el, { row, titleEl: domRow.titleEl, wrapper: domRow.wrapper })
+        if (!old.has(domRow.el)) {
+          try { domRow.el.style.display = '' } catch { /* */ }
+          try { if (domRow.wrapper) domRow.wrapper.style.display = '' } catch { /* */ }
+        }
         ensureWsPrefix(domRow, row, ungroupedLabel)
       }
       for (const [elm, info] of old) {
         if (!__mapped.has(elm)) {
           removeWsPrefix(info)
           try { elm.style.display = '' } catch { /* */ }
+          try { if (info && info.wrapper) info.wrapper.style.display = '' } catch { /* */ }
         }
       }
 
@@ -626,7 +642,7 @@ window.__ModuleLoader__.load({
         const occ = (keyOccurrence[run.key] = (keyOccurrence[run.key] || 0) + 1)
         const identity = run.key + '#' + occ
         liveIdentities.add(identity)
-        const anchor = domRows[run.index].el
+        const anchor = domRows[run.index].wrapper || domRows[run.index].el
         let header = __headers.get(identity)
         if (!header) {
           header = makeGroupHeader(run.key, identity)
@@ -664,7 +680,9 @@ window.__ModuleLoader__.load({
         if (!liveIdentities.has(identity)) { try { header.remove() } catch { /* */ } __headers.delete(identity) }
       }
 
-      // Fold: collapse every mapped row whose bucket is folded.
+      // Fold: collapse every mapped row whose bucket is folded. The wrapper
+      // is the tree's direct child, so hiding it (and the row) removes the
+      // item from layout entirely.
       for (let i = 0; i < domRows.length; i++) {
         const domRow = domRows[i]
         const row = mapped[i]
@@ -674,6 +692,9 @@ window.__ModuleLoader__.load({
           if (isBucketFolded(key)) want = 'none'
         }
         try { if (domRow.el.style.display !== want) domRow.el.style.display = want } catch { /* */ }
+        try {
+          if (domRow.wrapper && domRow.wrapper.style.display !== want) domRow.wrapper.style.display = want
+        } catch { /* */ }
       }
     }
 
@@ -732,7 +753,7 @@ window.__ModuleLoader__.load({
       window.__sessionTimeBucketTest = {
         bucketKeyOf, startOfLocalDay, workspaceTitleBySession, collectRows,
         sortRowsByRecency, rowTitle, wsPrefixText, matchRowTitles, planBuckets,
-        deriveBuckets, relativeLabel,
+        deriveBuckets, relativeLabel, readDomRows, findFlatTree,
         readCoreView, isFlatUpdatedView,
         BUCKET_ORDER, __t, zhDict, enDict,
         reset() {
