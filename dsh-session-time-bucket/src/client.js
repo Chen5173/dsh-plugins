@@ -299,7 +299,9 @@ window.__ModuleLoader__.load({
       return node
     }
 
-    const CHEVRON_SVG = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    // Core ic_ds_triangle_right_fill_14: solid triangle pointing right;
+    // the core rotates it 90° for the open (expanded) state.
+    const TRIANGLE_SVG = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M4.25 2.82782L4.25 11.1722C4.25 11.6622 4.84243 11.9076 5.18891 11.5611L9.36109 7.38891C9.57588 7.17412 9.57588 6.82588 9.36109 6.61109L5.18891 2.43891C4.84243 2.09243 4.25 2.33782 4.25 2.82782Z" fill="currentColor"/></svg>'
 
     // --- status dots (mirror core StateDot) -----------------------------------
     var __chaseStyleInjected = false
@@ -550,10 +552,11 @@ window.__ModuleLoader__.load({
             },
           })
           const chevron = el('span', {
-            html: CHEVRON_SVG,
-            style: { flex: 'none', width: 12, height: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.7))', transition: 'transform 120ms ease' },
+            html: TRIANGLE_SVG,
+            style: { flex: 'none', width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.7))', transition: 'transform 150ms ease' },
           })
-          if (folded) chevron.style.transform = 'rotate(-90deg)'
+          // Core behavior: pointing right when collapsed, rotated 90° down when expanded.
+          chevron.style.transform = folded ? 'rotate(0deg)' : 'rotate(90deg)'
           head.appendChild(chevron)
           head.appendChild(el('span', { text: __t('bucket.' + key), style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 } }))
           head.appendChild(el('span', { text: String(bucket.rows.length), style: { flex: 'none', color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.7))' } }))
@@ -575,10 +578,11 @@ window.__ModuleLoader__.load({
               },
             })
             // Leading status slot, same rule as the core flat list: only while
-            // running (blue chase) or completed (green dot).
+            // running (blue chase) or completed (green dot). Extra right margin
+            // breathes between the dot and the [workspace] prefix, like core.
             if (row.running || row.completed) {
               const slot = el('span', {
-                style: { width: 16, height: 20, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
+                style: { width: 16, height: 20, marginRight: 4, flex: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' },
               })
               slot.setAttribute('aria-label', __t(row.running ? 'status.running' : 'status.completed'))
               slot.innerHTML = statusDotHtml(row.running ? 'ongoing' : 'done')
