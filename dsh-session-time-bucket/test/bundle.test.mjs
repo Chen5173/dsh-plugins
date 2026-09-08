@@ -217,6 +217,15 @@ test('relative time labels humanize instants', () => {
   assert.equal(__t('rel.day'), '{n}天前')
 })
 
+test('row-action copy resolves with interpolation', () => {
+  assert.equal(__t('rename'), '重命名')
+  assert.equal(__t('menu.fork'), '分叉会话')
+  assert.equal(__t('menu.archiveSession'), '归档会话')
+  assert.equal(__t('actions.session.aria', { name: '会话A' }), '会话“会话A”的操作')
+  assert.equal(__t('actions.session.aria', { name: 'x' }), '会话“x”的操作')
+  assert.equal(enDict['actions.session.aria'], 'Session actions for {name}')
+})
+
 let failed = 0
 for (const [name, fn] of tests) {
   try { fn(); console.log('ok  -', name) }
