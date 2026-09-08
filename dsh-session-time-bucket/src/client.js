@@ -214,6 +214,18 @@ window.__ModuleLoader__.load({
       if (updatedAtMs >= startToday - 30 * DAY_MS) return 'last30'
       return 'older'
     }
+    /** Bucketing time for a row. The core reuses a workspace's still-blank
+     *  session for 新会话 (connectWorkspace) and keeps its old updatedAt, so a
+     *  freshly opened New Session row can surface under 昨天/前7天. The only
+     *  blank row the list shows is the current one (sessionVisible), so pin
+     *  blank && current rows to now: the session you are editing right now
+     *  always lands in 今天 and newest-first inside it. Everything else keeps
+     *  its real updatedAt. */
+    function bucketTimeOf(row, nowMs) {
+      const ref = typeof nowMs === 'number' ? nowMs : Date.now()
+      if (row && row.blank === true && row.current === true) return ref
+      return row && typeof row.updatedAt === 'number' ? row.updatedAt : 0
+    }
     function workspaceTitleBySession(items) {
       const map = {}
       for (const item of items || []) {
@@ -304,12 +316,16 @@ window.__ModuleLoader__.load({
     function deriveBuckets(rows, nowMs) {
       const buckets = {}
       for (const key of BUCKET_ORDER) buckets[key] = []
-      for (const row of rows || []) buckets[bucketKeyOf(row.updatedAt, nowMs)].push(row)
+      for (const row of rows || []) buckets[bucketKeyOf(bucketTimeOf(row, nowMs), nowMs)].push(row)
       const out = []
       for (const key of BUCKET_ORDER) {
         const list = buckets[key]
         if (list.length === 0) continue
-        list.sort((a, b) => (b.updatedAt !== a.updatedAt ? b.updatedAt - a.updatedAt : (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0))))
+        list.sort((a, b) => {
+          const at = bucketTimeOf(a, nowMs)
+          const bt = bucketTimeOf(b, nowMs)
+          return (bt !== at ? bt - at : (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)))
+        })
         out.push({ key, rows: list })
       }
       return out
@@ -729,7 +745,7 @@ window.__ModuleLoader__.load({
         const keys = []
         for (let i = 0; i < domRows.length; i++) {
           const r = mapped[i]
-          keys.push(r ? bucketKeyOf(r.updatedAt, nowMs) : null)
+          keys.push(r ? bucketKeyOf(bucketTimeOf(r, nowMs), nowMs) : null)
         }
         const runs = planBuckets(keys)
         const keyOccurrence = {}
@@ -763,7 +779,7 @@ window.__ModuleLoader__.load({
         const row = mapped[i]
         let want = ''
         if (row) {
-          const key = bucketKeyOf(row.updatedAt, nowMs)
+          const key = bucketKeyOf(bucketTimeOf(row, nowMs), nowMs)
           if (isBucketFolded(key)) want = 'none'
         }
         try { if (domRow.el.style.display !== want) domRow.el.style.display = want } catch { /* */ }
@@ -840,7 +856,7 @@ window.__ModuleLoader__.load({
     // Test-only hooks (window.__DSH_TEST__ is set by test/bundle.test.mjs only).
     if (typeof window !== 'undefined' && window.__DSH_TEST__) {
       window.__sessionTimeBucketTest = {
-        bucketKeyOf, startOfLocalDay, workspaceTitleBySession, collectRows,
+        bucketKeyOf, bucketTimeOf, startOfLocalDay, workspaceTitleBySession, collectRows,
         sortRowsByRecency, rowTitle, wsPrefixText, matchRowTitles, planBuckets,
         deriveBuckets, relativeLabel, readDomRows, findFlatTree,
         readCoreView, isFlatUpdatedView,

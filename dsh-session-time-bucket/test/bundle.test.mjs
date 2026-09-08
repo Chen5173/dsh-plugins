@@ -70,7 +70,7 @@ const exports = factory(() => { throw new Error('unexpected require()') })
 const hooks = globalThis.window.__sessionTimeBucketTest
 assert.ok(hooks, 'window.__DSH_TEST__ hook object missing')
 
-const { bucketKeyOf, collectRows, rowTitle, wsPrefixText, sortRowsByRecency, matchRowTitles, planBuckets, deriveBuckets, relativeLabel, readDomRows, workspaceTitleBySession, isFlatUpdatedView, __t, enDict } = hooks
+const { bucketKeyOf, bucketTimeOf, collectRows, rowTitle, wsPrefixText, sortRowsByRecency, matchRowTitles, planBuckets, deriveBuckets, relativeLabel, readDomRows, workspaceTitleBySession, isFlatUpdatedView, __t, enDict } = hooks
 const DAY = 86400000
 // Fixed local "now": 2026-09-06 12:00 (Sep 6 is a Sunday; weekday is irrelevant).
 const nowMs = new Date(2026, 8, 6, 12, 0, 0).getTime()
@@ -176,6 +176,39 @@ test('deriveBuckets groups, sorts newest-first and hides empty buckets', () => {
   assert.deepEqual(buckets[1].rows.map((r) => r.id), ['y'])
   assert.deepEqual(buckets[2].rows.map((r) => r.id), ['d'])
   assert.deepEqual(buckets[3].rows.map((r) => r.id), ['o'])
+})
+
+test('current blank New Session is pinned to today (reused stale blanks land under 今天)', () => {
+  // Core reuses a workspace's still-blank session for 新会话 and keeps its old
+  // updatedAt; the only blank row the list shows is the current one, so the
+  // plugin buckets it as "now" while the user is editing it.
+  const mk = (id, updatedAt, extra) => ({ id, title: id, updatedAt, blank: false, wsTitle: undefined, current: false, ...extra })
+  const stale = mk('blank-cur', startToday - 3 * DAY, { blank: true, current: true })
+  const staleOther = mk('blank-old', startToday - 3 * DAY, { blank: true, current: false })
+  const ordinaryOld = mk('old', startToday - 2 * DAY, {})
+
+  // bucketTimeOf: only blank && current is pinned to now; everything else keeps
+  // its real updatedAt.
+  assert.equal(bucketTimeOf(stale, nowMs), nowMs)
+  assert.equal(bucketTimeOf(staleOther, nowMs), startToday - 3 * DAY)
+  assert.equal(bucketTimeOf(ordinaryOld, nowMs), startToday - 2 * DAY)
+  assert.equal(bucketTimeOf(null, nowMs), 0)
+
+  // deriveBuckets: the current blank row joins 今天 and sorts newest-first even
+  // though its stored updatedAt is three days old; other stale blanks keep
+  // their own bucket.
+  const buckets = deriveBuckets([stale, ordinaryOld, staleOther], nowMs)
+  assert.deepEqual(buckets.map((b) => b.key), ['today', 'last7'])
+  assert.deepEqual(buckets[0].rows.map((r) => r.id), ['blank-cur'])
+  assert.deepEqual(buckets[1].rows.map((r) => r.id).sort(), ['blank-old', 'old'])
+
+  // collectRows still reports the real updatedAt: pinning is a display-layer
+  // decision (row identity / core-order matching keep the true timestamp).
+  const list = { byId: { [stale.id]: { id: stale.id, displayTitle: '', updatedAt: stale.updatedAt, blank: true } }, current: stale.id }
+  const rows = collectRows(list, [], {})
+  assert.equal(rows[0].updatedAt, stale.updatedAt)
+  assert.equal(rows[0].blank, true)
+  assert.equal(rows[0].current, true)
 })
 
 test('follows the core view store: enhances only 单列表+最近更新', () => {

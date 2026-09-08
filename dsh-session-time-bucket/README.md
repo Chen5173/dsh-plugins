@@ -17,6 +17,7 @@
 | 核心处于 单列表+最近更新 | 自动激活：核心列表**保持原样渲染**，仅在其行间/行内注入组头与工作区前缀 |
 | 时间桶组头 | 出现在每桶首行上方：今天/昨天/前7天/前30天/更早（**空桶不出现**）；chevron（▾/▸）+ 数量；点击折叠（隐藏该桶全部行）/展开，折叠态持久化 |
 | 桶内顺序 | **严格按最近更新，最新在前**。核心“最近更新”本身是活动提升+持久化账号顺序（只提升 updatedAt 增长的会话、手动拖拽会被钉住），会出现旧会话排在新会话前面；插件把官方行按 桶序+updatedAt 重排，退出时还原核心顺序 |
+| 新建会话 | 核心“+新会话”会**复用工作区里仍为空白（从未发过消息）的旧会话**并保留其旧 updatedAt——若不处理，跨天后该行会滑进 昨天/前7天。插件把**当前正在编辑的空白新会话**（blank && current，列表里唯一可见的空白行）按“现在”分桶：始终落在 今天 且桶内最新；一旦发消息 updatedAt 变真实时间，自然留在 今天 |
 | 会话行 | 核心原生行：状态点、悬停提示卡、`…` 菜单、拖拽、打开全部为核心行为；插件只加 `[工作区名]`/`[未分组]` 前缀（12px tertiary，贴标题前） |
 | 行身份匹配 | 渲染顺序 == 核心 recency 顺序，按标题文本逐行匹配（重复标题按序映射）；匹配失败的行不注入、保持原样 |
 | 点某一行 | 核心原生 `onOpen`（插件不接管） |
@@ -46,7 +47,7 @@ dsh plugin --profile web add dsh-session-time-bucket   # 或 add ./dsh-session-t
 ## 开发 / 验证
 
 ```bash
-node dsh-session-time-bucket/test/bundle.test.mjs   # 逻辑 harness（15 条）
+node dsh-session-time-bucket/test/bundle.test.mjs   # 逻辑 harness（16 条）
 node --check dsh-session-time-bucket/src/client.js
 ```
 
