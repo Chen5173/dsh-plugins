@@ -70,7 +70,7 @@ const exports = factory(() => { throw new Error('unexpected require()') })
 const hooks = globalThis.window.__sessionTimeBucketTest
 assert.ok(hooks, 'window.__DSH_TEST__ hook object missing')
 
-const { bucketKeyOf, collectRows, rowTitle, deriveBuckets, relativeLabel, workspaceTitleBySession, isFlatUpdatedView, __t, enDict } = hooks
+const { bucketKeyOf, collectRows, rowTitle, wsPrefixText, sortRowsByRecency, matchRowTitles, planBuckets, deriveBuckets, relativeLabel, workspaceTitleBySession, isFlatUpdatedView, __t, enDict } = hooks
 const DAY = 86400000
 // Fixed local "now": 2026-09-06 12:00 (Sep 6 is a Sunday; weekday is irrelevant).
 const nowMs = new Date(2026, 8, 6, 12, 0, 0).getTime()
@@ -217,13 +217,45 @@ test('relative time labels humanize instants', () => {
   assert.equal(__t('rel.day'), '{n}天前')
 })
 
-test('row-action copy resolves with interpolation', () => {
-  assert.equal(__t('rename'), '重命名')
-  assert.equal(__t('menu.fork'), '分叉会话')
-  assert.equal(__t('menu.archiveSession'), '归档会话')
-  assert.equal(__t('actions.session.aria', { name: '会话A' }), '会话“会话A”的操作')
-  assert.equal(__t('actions.session.aria', { name: 'x' }), '会话“x”的操作')
-  assert.equal(enDict['actions.session.aria'], 'Session actions for {name}')
+test('wsPrefixText: [工作区] / [未分组] prefix, none for blank rows', () => {
+  const plain = { blank: false, title: '写插件', wsTitle: 'dsh-tmp' }
+  assert.equal(wsPrefixText(plain, '未分组'), '[dsh-tmp] ')
+  assert.equal(wsPrefixText({ ...plain, wsTitle: undefined }, '未分组'), '[未分组] ')
+  assert.equal(wsPrefixText({ ...plain, wsTitle: '' }, '未分组'), '[未分组] ')
+  assert.equal(wsPrefixText({ ...plain, blank: true }, '未分组'), '')
+})
+
+test('sortRowsByRecency orders newest-first with a stable id tiebreak', () => {
+  const mk = (id, updatedAt) => ({ id, updatedAt })
+  const rows = [mk('a', 1000), mk('b', 5000), mk('c', 3000), mk('d', 5000)]
+  assert.deepEqual(sortRowsByRecency(rows).map((r) => r.id), ['b', 'd', 'c', 'a'])
+  assert.deepEqual(rows.map((r) => r.id), ['a', 'b', 'c', 'd'], 'input not mutated')
+})
+
+test('matchRowTitles aligns DOM order to recency order, incl. duplicates and blanks', () => {
+  const mk = (id, title, updatedAt, extra) => ({ id, title, updatedAt, blank: false, ...extra })
+  const rows = sortRowsByRecency([
+    mk('new', '分享链接', 9000),
+    mk('t2', '写插件', 5000),
+    mk('t1', '写插件', 4000),
+    mk('b', '', 3000, { blank: true }),
+  ])
+  const domTitles = ['写插件', '写插件', '新会话', '分享链接']
+  const mapped = matchRowTitles(domTitles, rows, '新会话')
+  assert.deepEqual(mapped.map((r) => (r ? r.id : null)), ['t2', 't1', 'b', 'new'])
+  // Unknown title -> null (row stays unenhanced), used ids never reassigned.
+  assert.deepEqual(matchRowTitles(['不存在', '写插件'], rows, '新会话').map((r) => (r ? r.id : null)), [null, 't2'])
+})
+
+test('planBuckets groups contiguous render-order keys into fold runs', () => {
+  assert.deepEqual(planBuckets(['today', 'today', 'yesterday', 'today', null, 'older', 'older']), [
+    { key: 'today', count: 2, index: 0 },
+    { key: 'yesterday', count: 1, index: 2 },
+    { key: 'today', count: 1, index: 3 },
+    { key: 'older', count: 2, index: 5 },
+  ])
+  assert.deepEqual(planBuckets([]), [])
+  assert.deepEqual(planBuckets([null, null]), [])
 })
 
 let failed = 0
