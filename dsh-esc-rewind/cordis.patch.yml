@@ -1,0 +1,6 @@
+# dsh-esc-rewind bundle layer: inserts the esc-rewind plugin row.
+# Loaded via `dsh plugin --profile <name> add` — the row id stays stable so
+# re-adds and profile patches can target it.
+- insert:
+    - id: esc-rewind
+      name: 'dsh-esc-rewind'

@@ -13,6 +13,7 @@
     "dsh-composer-history-recall": "link:./dsh-composer-history-recall",
     "dsh-open-session-workdir": "link:./dsh-open-session-workdir",
     "dsh-session-title-regenerate": "link:./dsh-session-title-regenerate",
-    "dsh-session-time-bucket": "link:./dsh-session-time-bucket"
+    "dsh-session-time-bucket": "link:./dsh-session-time-bucket",
+    "dsh-esc-rewind": "link:./dsh-esc-rewind"
   }
 }

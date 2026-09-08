@@ -1,0 +1,56 @@
+# DSH 插件：Esc 停止 + Esc Esc /rewind 回退重来
+
+日期：2026-09-08 · 插件 `dsh-esc-rewind`（client-only）
+
+## 结论（可复用）
+
+- **DSH 会话日志 append-only，插件无法原地删消息**。核心 `ConversationContextOriginKind 'rewind'/'rewrite'`（`packages/client/ui-chat/src/client/model/conversation-context.ts`）是全仓死代码（无生产者/消费者）；surface-replace（`core/session/src/surface.ts`）只能「一段→一条新节点」且仅供 `/compact` 宿主内部，客户端无任何 delete/truncate/rewind verb。想表达 Codex/Claude 式 rewind → 用官方非破坏组合：`sessions.fork({sessionId, atSeq, increaseTitle:false})`（fork 边界 = `atSeq` 之后第一个 turn/end）+ `workspaces.archiveSession(oldId)` + `sessions.open(childId)` + `inputActions.setDraft(text)`。fork 语义见 `api/session-controller/.../contract/sessions.ts` 的 fork 注释：只切「完整回合前缀」。
+- **客户端可触达的服务**（plugin client apply(ctx) 用 `ctx.inject([name], cb)` 懒取即可，勿写死 inject 数组以免旧版本阻塞加载）：`sessions`（ISessions：binding/fork/open/create/search；list 快照 `{ids, byId: {title, displayTitle, origin:'subagent'}}`）、`workspaces`（IWorkspaces：`archiveSession`/`list.getSnapshot().items[{workspaceId, sessionIds}]`）、`conversation`（ConversationController：scope-addressed cancel/send/updateQueue + 无 scope 的 `createDraftImages(File[])→ComposerAttachment[]`、`releaseDraftImage`，Service 名 `'conversation'`，root 单例）、`uiConversation`（root Service：`binding(sessionId).snapshot.get().views.get('chat')` 可命令式读会话节点）、`commandUi`（`register(CommandContribution)`：纯客户端 `/`-菜单条目，`ui.kind:'popupSelect'` 的 options/onSelect 全在 client，是「斜杠命令+自绘交互」的正规扩展缝；贡献名与宿主命令冲突会 fail loud）。
+- **取消**：`sessions.binding(id).session.cancel()`（SessionFace，含 updateQueue/readAttachment/rename/loadOlder；getSnapshot().running/queue）。`inputActions`（slot kit 提供的公共面）**没有** cancel/stop——只有 setDraft/addImages/removeImage/pruneImages/submit。排队清除：对 `snapshot.queue[]` 每个 `item.id` 调 `session.updateQueue(item.id, {kind:'remove'})`。
+- **会话节点读数**：`chat` 视图快照（`views.get('chat')`）历史字段 `legacy.nodes` 已在新版消失；可靠路径 = `{order, nodes.get(key)}` 的 view node：`node.kind`、`node.anchorSeq`(seq)、`node.data.content`（user/steering，ContentBlock[]，image 块为 `{type:'image', attachment: ImageAttachmentRef{attachmentId, mediaType, name}}`）、assistant 状态在 `node.data.status`（'running'|'settled'|'interrupted'）。跨版本读法写容错 + `window.__dsew` 诊断。
+- **Esc 捕获**：核心所有 Esc 关闭逻辑都是 bubble 阶段（Menu/Modal/ContextMeter/TurnUsagePanel/Lightbox/MessageFeedback）；composer 内 Lexical keymap 在 CRITICAL 优先级处理 ESC 弹层（`KEY_ESCAPE_COMMAND`）。插件用 document **capture** keydown（同 composer-history-recall），必须先过门控：无弹层（role dialog/menu/listbox/aria-modal）+ 无外来文本框 + **composer 无 `/@` trigger token 在光标前**（trigger 弹层是 portal，composedPath 看不见）。
+- **armed（可回退）用派生状态而非记忆**：running 可停；或尾部 assistant `status==='interrupted'`（即曾被 Stop/ESC 打断，自然 settled 永不 armed）且草稿为空（改草稿即解除）；新发送/切会话天然失效。ESC-stop 与工具栏 Stop 都能进入同态。
+- 附件尽力还原：`binding.session.readAttachment(attachmentId)` → `{attachment, data(Uint8Array)}` → `new File([data], name, {type})` → `conversation.createDraftImages([file]).map(a=>a.id)` → 分支挂载后 `inputActions.addImages(ids)`。跨会话 setDraft 用「module 级 pending（keyed by child sessionId），桥在目标会话挂载时消费」解决（open 后 inputActions 身份变化，不能当场调）。
+
+## 复用点
+- 伞包登记：根 `cordis.patch.yml` 一行 + 根 `package.json.dependencies` 一行（web profile 实际是 per-plugin 直连：`dependencies link:` + `dsh.profile.bundles` 行 + `dsh plugin --profile web add <dir>`；README 的 umbrella 模型当前未启用）。
+- 浏览器端 bundle 无构建：改 `src/client.js` 刷新即可；新插件行需 GUI host 重启后生效。
+
+## 补：长历史 /rewind 分页（同文更新 2026-09-08）
+
+- `commandUi` popupSelect **打开时只加载一次 options、不做动态追加/增量渲染**（`ui-commands/src/client/popup.ts`：options once, filter locally）。需要“未加载历史也能选 + 每屏 5 条 + ↓ 分页”时，popupSelect 只能当**启动器**（单行 → `openPicker`），真正列表要**自绘**：复用 `@deepseek-ai/dsh-client-ui-primitives` 的 `Modal`（body portal、headless、Esc/遮罩 onClose）。
+- 会话客户端只持有“已加载事件窗口”的节点（`chat` 视图）；更早内容要靠 `sessions.binding(id).session.loadOlder()` 逐页向后拉，然后**轮询 conversation 快照**直到节点数增长或 `hasMore` 翻 false（assembler 异步 flush）。
+- `/rewind` 可用性要与已加载内容**解耦**：非 subagent、非 blank（`SessionSummary.blank`）即可选；面板空列表时自动 loadOlder，底部到 `hasMore=false` 为止。
+- 自绘面板键盘：document capture 处理 ↑/↓/Enter 并 stopPropagation（避免命中 composer/Lexical）；Esc 交给 Modal 关闭。EscBridge 在 `__pickerSession===sessionId` 时必须**让行**（不停止底层回合）。面板归属用 module 级 `__pickerSession` + pub/sub，桥卸载/切会话要清理，防止旧会话重挂载时“复活”面板。
+
+## v3 定稿（2026-09-08 二次迭代后，取代上文“自绘面板”方案）
+
+- 实测教训：自绘 Modal 面板 + “按 ↓ 触发 `loadOlder()` 逐页 + 轮询节点数增长”在真实 GUI 不稳定（停在“加载中”不出新行，节点数不涨）。且用户要的是**一次性全量预读** + 沿用原生命令选择器，不是逐页动态追加。
+- **正确做法**：打开 `/rewind` 时在 popupSelect 的 `options()` 里先 `session.loadThrough(0)`（SessionFace 自带“跳到最早”的翻页加载器，ChatView 跳转旧回合同款，内部自动翻完全部页）一次把整个历史读进客户端；随后 `waitForSettled`（轮询组装节点数稳定 2 次采样且 `hasMore=false`）再一次性返回全部选项。shell 在 options pending 期间原生显示“加载中”，读完后支持本地搜索/↑↓/滚动 → 列表可覆盖任意早的回合，无动态追加问题。
+- 兼容：宿主无 `loadThrough` 时回退到 `loadOlder()` 循环（上限 400 页）。
+- UI：不要自绘面板——复用原生 popupSelect（原生外观、自带 loading/空态/搜索/定位），插件只负责把 options 喂全。
+- 可选：`options()` 开始时 publishToast 一条“正在读取全部历史…”给用户进度感（toast 走 composer 区域，不是面板）。
+
+## v4：load-once + 缓存水位（2026-09-08）
+
+- 每次开 `/rewind` 都 `loadThrough(0)` 属多余。策略：`refreshHistory()` 四级短路——
+  1) 本页 `__fullLoaded` 且 `hasMore=false` → 直接读**活的会话快照**（窗口已锚定开头、新消息实时长尾，天然不丢最新）；2) `hasMore=false` 且能看到首个回合（`isFirst`）→ 认为已全覆盖；3) 有**内存/localStorage 记录**且 `watermarkSeq(≥)` 当前最新回合 → 直接出缓存，不发请求；4) 否则才全量 `loadThrough(0)` 并写缓存。
+- 缓存条目 = 该会话全部用户回合（seq/anchorSeq/isFirst/time/全文本/imageRefs）+ watermarkSeq（最新用户回合 seq），localStorage 键 `dsh-esc-rewind.history.<sessionId>`，超 2.5MB 跳过持久化只留内存。
+- **新鲜度**：缓存不直接信任——每次用「当前活窗口最新用户回合 seq」与 watermark 比较；有新内容就合并重载一次并刷新水位，因此“读缓存不会漏最新”。同页内新消息由活窗口直接覆盖（机制 1），无需触发重载。
+- 选型执行：`onSelect` 从 `knownExchangesOf()`（缓存优先）按 seq 找回合，避免只读当前窗口而找不到旧回合；图片回退仍走 durable `attachmentId` 的 `readAttachment`。
+
+## v5：删除模式（2026-09-08，grill 确认后新增）
+
+- **需求**：回退后旧会话怎么处理可切换——默认归档，开关打开=真删。开关放**会话头右侧 actions 排**（图标档案柜⇄红色带叉垃圾桶，order 28，避开 schedule 10/job-list 20/open-workdir 25/chameleon 30），全局偏好、settings 持久化，无二次确认（用户已接受误触即永久丢失），但分层 toast 警示。
+- **真删无官方客户端 verb**：`ISessions` 只有 create/open/archive 相关/clear/refresh/search；`workspaces.delete` 是删 **workspace 注册**（`api/workspace-controller/src/index.ts` 注释明言 *"while retaining files and Sessions"*）；核心 `session/disposed` 只是广播。真删必须**宿主半自建**（本机 `@huanlin/dsh-plugin-session-delete` 是范本：`fs.rmSync` 删 `~/.dsh/sessions/<slug>/<id>/` 两拼写 + `storageDomain` 清 `session_projcache`/`workspace` + `agents` 拒删运行中 + `sessions.store/detachEntered`）。esc-rewind 自建同款（`src/index.js`）但不依赖第三方。
+- **node 半注册三件套**（全部懒/可选，`inject:[]` 不阻塞加载）：① settings 段 `esc-rewind.deleteOldOnRewind`（动态 import schemastery，同 provider-label 的坑：外部 link 插件静态 import 不保证解析）；② `webServer.register` `POST /__esc-rewind/session/delete`；③ 模型工具 `esc_rewind_session_delete`（动态 import `@deepseek-ai/dsh-tools`）。webServer/tools/schemastery 缺席都静默降级。
+- **client 半读/写开关**：`remote.settings.describe()`（懒 `ctx.inject(['remote.settings'])`，shape 兼容 `scope.settings`/`scope['remote.settings']`/`scope.get('settings')`）读 `deleteOldOnRewind`；切换 `settings.update(ns, patch, undefined)` 无条件写；**describe 失败/缺字段一律回退 false**（绝不因读不到配置而误开删除）；`settings/document-updated`（ns===自己的）时重新加载。
+- **安全时序**（D7）：删除永远在 **fork+open 新分支确认可用之后**；删除失败 → 降级 `workspaces.archiveSession` + toast「删除失败，已改为归档」，回退本身不失败。首轮降级（create 新空会话）同样按开关处置旧会话。
+- **分层反馈**（D8）：切删除态 toast「已开启：回退将删除旧会话（不可恢复）」；删除态下首次 Esc 停止 toast 用 `esc.hint.delete`（警示文案）；执行后 toast「旧会话已删除」。module 级 `__t` 返回**翻译文本**（zh/en），seat `t` 返回 key——测试断言要区分（教训）。
+- **测试坑**（harness）：`publishToast` 走 `__toastListeners`，纯逻辑调用（不经 React）不渲染 Toast → 测试需先 `mount()` 一个组件注册 listener 再 `rerender()`；`materialize` 需递归遍历 Fragment children（DisposeToggle 返回 Fragment[button, toast]）；`withFetch` 必须 `await fn()` 否则 finally 提前恢复 fetch；`mountHeader` 用 `freshInstance` 会丢 state → 用 `rerender`（beginRender）保留 slots。
+- **真机 bug：client 绑定 `remote.settings` 时，全部探测放同一 try 会因 guard ctx 抛错短路**。真实 cordis client ctx 上**未注入名字的裸属性读取会 throw**（`cannot get property "settings" without inject`，provider-label 注释原话）；若 `bindSettings` 第一步 `scope.settings` 抛错且与后续探测共享一个 try，后面 `scope.remote.settings`/`get('remote.settings')` 全被跳过 → `__settings` 恒 null → 点击开关报「切换失败：settings-unavailable」。修复 = `readRemoteSettings(scope)` **每个候选独立 try**，顺序：`get('remote.settings')` → `scope['remote.settings']`（dotted 字面键）→ `get('remote')?.settings` → `scope.remote?.settings` → `get('settings')`（带 describe 形状校验）→ `scope.settings`；注入面：`ctx.inject(['remote.settings'])` 与 `ctx.inject(['remote'])` 双通道。
+- **真机解析真相（我最初判断错误）**：从插件源码目录裸 `node` 探测 `import('@deepseek-ai/schemastery')` 会 FAIL（源码目录无 node_modules），**但宿主进程里 app-boot 重写了裸 specifier 的 `import()`**（`packages/boot/app-boot/src/index.ts` override import → `internal.import(specifier, bareModuleBaseUrl)`），路由到**安装 closure** `~/.dsh/profiles/node_modules/@deepseek-ai/`（含 schemastery/dsh-tools/dsh-settings，共 233 包）解析成功。所以宿主半的动态 import 在真机**可用**；用裸 node 探测是错误场景。验证宿主半已加载：`POST /__esc-rewind/session/delete` 带无效 id 应回 `{"error":"invalid session id: ..."}` 400。
+- **RemoteResult envelope**：`remote.settings.describe()/update()` 返回 typert envelope `{ok:true,value}|{ok:false,error}`——解包必须 `unwrapResult`：`ok:false` 抛错（带 error.message/code），`ok:true` 取 `.value`；非 envelope 直接透传。
+- **第二真机 bug：settings 段未注册（“namespace is not registered”）**。绑定修好后 update 仍被宿主拒绝，因为宿主半 `installSettingsSection` 依赖 `import('@deepseek-ai/schemastery')`，而**宿主解析 bundle 的裸 specifier 走插件源码目录**（title-regenerate 能静态 import `@deepseek-ai/dsh-llm` 只因为它源码目录自带本地 stub）——外部 link 插件目录无 schemastery → import 失败 → 段从未注册。修复 = **零依赖 fallback schema**：`SettingsProvider` 只用 `schema(value)`（resolve 校验/默认值）与 `schema.toJSON()`（describe 序列化），`redactSecrets(schema,…)` 对函数型 schema 走 default 分支原样放行（无 secret 声明即安全）。`fallbackSectionSchema(field, fallback)` 返回可调用函数 + toJSON，语义等同 `z.object({field: z.boolean().default(false)})`。installSettingsSection 现在：schemastery 可用用真 schema，解析失败/不兼容 → catch → 仍用 fallback 注册，`HOST_DIAG` 记录结果。
+- **宿主半改动必须重启 GUI host**（client 半刷新页面即可）：`src/index.js` 新增只读 `GET /__esc-rewind/status`（返回 `settingsSectionRegistered`/`settingsSectionError`/`deleteOldOnRewind`，对应 ACCEPTANCE 5.10 探针）。
+- 现有 **35 条 harness 全绿**（18 既有 + 10 删除模式 + 4 宿主半 + 3 settings-reader 回归）。

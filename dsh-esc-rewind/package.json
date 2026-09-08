@@ -1,0 +1,58 @@
+{
+  "name": "dsh-esc-rewind",
+  "version": "0.1.0",
+  "description": "Keyboard + command rewind for the DSH Web conversation. ESC once stops the running turn; ESC again rewinds the whole just-stopped exchange (fork a branch from the previous completed turn, restore the prompt into the composer); the `/rewind` slash command restarts from any historical exchange. Client-driven via the official sessions (fork/open/create/binding), workspaces (archive), conversation (cancel/updateQueue/draft images), uiConversation (node snapshots) and commandUi (popupSelect contribution) services. Optional DELETE mode: a session-header toggle (archive ⇄ permanently delete the old session after a rewind) persisted through the `esc-rewind` settings namespace, with a small self-hosted half (src/index.js) serving the delete endpoint/tool — no dependency on any third-party delete implementation.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "rewind",
+    "escape",
+    "stop",
+    "branch",
+    "delete",
+    "archive",
+    "keyboard",
+    "command"
+  ],
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-api-session-controller": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-api-workspace-controller": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-commands": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  }
+}

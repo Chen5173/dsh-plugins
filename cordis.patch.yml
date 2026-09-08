@@ -11,3 +11,5 @@
       name: 'dsh-composer-history-recall'
     - id: session-time-bucket
       name: 'dsh-session-time-bucket'
+    - id: esc-rewind
+      name: 'dsh-esc-rewind'
