@@ -361,9 +361,16 @@ window.__ModuleLoader__.load({
       __hoverRow = null
     }
     function showHover(row, nowMs) {
-      hideHover()
-      __hoverRow = row
-      injectChaseStyle()
+      // Re-anchor on the live row: a re-render may have replaced the element
+      // while the dwell timer was pending (stale rects break fixed placement).
+      const liveRow = row && __hostList
+        ? __hostList.querySelector('[data-dsh-time-bucket-row="' + row.id + '"]')
+        : null
+      if (!liveRow) { hideHover(); return }
+      try {
+        hideHover()
+        __hoverRow = liveRow
+        injectChaseStyle()
       const card = el('div', {
         'data-dsh-time-bucket-hover': '1',
         role: 'tooltip',
@@ -399,6 +406,7 @@ window.__ModuleLoader__.load({
       window.addEventListener('scroll', __hoverPlace, true)
       window.addEventListener('resize', __hoverPlace)
       placeHover()
+      } catch { hideHover() }
     }
     /** Arm the 500ms dwell; cancels any pending close (grace re-entry). */
     function armHover(row, nowMs) {
@@ -509,7 +517,9 @@ window.__ModuleLoader__.load({
     // --- rendering ------------------------------------------------------------
     function renderList() {
       if (!__mode || !__hostList || !__servicesOk) return
-      hideHover()
+      // Keep an open hover card across re-renders: remember the hovered
+      // session and re-anchor it on the rebuilt row below.
+      const hoverId = __hoverRow ? __hoverRow.id : null
       try {
         const nowMs = Date.now()
         const listSnap = __sessions.list.getSnapshot()
@@ -521,6 +531,7 @@ window.__ModuleLoader__.load({
         const ungroupedLabel = __t('ungrouped')
         __hostList.textContent = ''
         if (buckets.length === 0) {
+          hideHover()
           __hostList.appendChild(el('div', { text: __t('empty.none'), style: { padding: '18px 12px', color: 'var(--dsw-alias-label-tertiary, #8a8a8e)', fontSize: 12, textAlign: 'center' } }))
           return
         }
@@ -594,7 +605,14 @@ window.__ModuleLoader__.load({
             __hostList.appendChild(btn)
           }
         }
+        // Re-anchor an open hover card on the rebuilt row, or close it.
+        if (hoverId) {
+          const live = __hostList.querySelector('[data-dsh-time-bucket-row="' + hoverId + '"]')
+          if (live && __hoverCard) { __hoverRow = live; placeHover() }
+          else hideHover()
+        }
       } catch (error) {
+        hideHover()
         if (__hostList) {
           __hostList.textContent = ''
           __hostList.appendChild(el('div', { text: String((error && error.message) || error), style: { padding: '12px', color: 'var(--dsw-alias-text-danger, #ff6b6b)', fontSize: 12 } }))
