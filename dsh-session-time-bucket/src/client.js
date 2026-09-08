@@ -298,8 +298,9 @@ window.__ModuleLoader__.load({
       }
       return runs
     }
-    /** Legacy bucket derivation (retained for the logic harness; the renderer
-     *  groups in place instead of reordering). */
+    /** Canonical bucket derivation: BUCKET_ORDER, newest-first inside each
+     *  bucket. The sorted layout path re-sequences official wrappers into
+     *  exactly this order. */
     function deriveBuckets(rows, nowMs) {
       const buckets = {}
       for (const key of BUCKET_ORDER) buckets[key] = []
@@ -386,16 +387,17 @@ window.__ModuleLoader__.load({
       } catch { /* */ }
       return false
     }
-    /** The official flat session list element (tree role, flatList class). */
+    /**
+     * The official flat session list element (tree role + flatList class).
+     * No fallback: the workspace-grouped tree also contains sessionRow
+     * descendants, and matching it would make the plugin fight the core's
+     * own grouping during a view switch.
+     */
     function findFlatTree(core) {
       if (!core || !core.root) return null
       try {
         const direct = core.root.querySelector('[class*="flatList"][role="tree"]')
         if (direct) return direct
-        const trees = core.root.querySelectorAll('[role="tree"]')
-        for (const tree of trees) {
-          if (tree.querySelector('[class*="sessionRow"]')) return tree
-        }
       } catch { /* */ }
       return null
     }
@@ -436,6 +438,9 @@ window.__ModuleLoader__.load({
     var __observerRoot = null
     var __pending = false
     var __watch = null
+    var __dragging = false        // a core row drag is in flight: never reorder mid-drag
+    var __exitOrder = null        // official children order snapshot, restored on exit
+    var __snapTree = null         // the tree __exitOrder belongs to
 
     function detachObserver() {
       if (__observer) { try { __observer.disconnect() } catch { /* */ } __observer = null }
@@ -507,6 +512,29 @@ window.__ModuleLoader__.load({
       head.addEventListener('mouseleave', () => { head.style.background = 'transparent' })
       return head
     }
+    /** Idempotent presentation refresh: aria-expanded, chevron rotation,
+     *  label and count — every write is compare-first (observer no-op). */
+    function refreshHeader(header, key, count) {
+      const folded = isBucketFolded(key)
+      try { header.setAttribute('aria-expanded', folded ? 'false' : 'true') } catch { /* */ }
+      try {
+        const chevron = header.firstElementChild && header.querySelector('svg') ? header.firstElementChild : null
+        if (chevron) {
+          const want = folded ? 'rotate(0deg)' : 'rotate(90deg)'
+          if (chevron.style.transform !== want) chevron.style.transform = want
+        }
+      } catch { /* */ }
+      try {
+        const label = header.querySelector('[data-dsh-time-bucket-headlabel]')
+        const text = __t('bucket.' + key)
+        if (label && label.textContent !== text) label.textContent = text
+      } catch { /* */ }
+      try {
+        const countEl = header.querySelector('[data-dsh-time-bucket-headcount]')
+        const text = String(count)
+        if (countEl && countEl.textContent !== text) countEl.textContent = text
+      } catch { /* */ }
+    }
     /**
      * Inject/refresh the [工作区] span directly before the official title.
      * Mirrors the core slot→title geometry: the 4px lead gap moves from the
@@ -573,6 +601,11 @@ window.__ModuleLoader__.load({
     // --- reconciliation -------------------------------------------------------
     function reconcile() {
       if (!__mode || !__servicesOk) return
+      // The watcher gates on the view store too, but reconcile also runs
+      // from subscriptions/microtasks between ticks — re-check so a view
+      // switch that just happened (flat tree unmounted, workspace tree
+      // mounted) can never receive injections.
+      if (!isFlatUpdatedView()) { exitMode(); return }
       const core = (__core && document.contains(__core.root)) ? __core : locateCore()
       if (!core || core.rail) { exitMode(); return }
       __core = core
@@ -580,6 +613,18 @@ window.__ModuleLoader__.load({
       const tree = findFlatTree(core)
       if (!tree) { clearEnhancements(); return }
       ensureObserver(core)
+      try {
+        if (tree.__dshTbDragWired !== 1) {
+          tree.__dshTbDragWired = 1
+          tree.addEventListener('dragstart', () => { __dragging = true }, true)
+          tree.addEventListener('dragend', () => { __dragging = false; scheduleReconcile() }, true)
+        }
+      } catch { /* */ }
+      // Snapshot the official order once per tree mount so exit can restore
+      // the core's own sequence (we re-sequence wrappers while active).
+      if (__snapTree !== tree) {
+        try { __exitOrder = Array.from(tree.children); __snapTree = tree } catch { __exitOrder = null }
+      }
 
       const nowMs = Date.now()
       const listSnap = __sessions.list.getSnapshot()
@@ -625,59 +670,89 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // Time-bucket runs over the live render order (rows stay put — the
-      // official recency order already produces monotonic bucket runs).
-      const keys = []
-      for (let i = 0; i < domRows.length; i++) {
-        const r = mapped[i]
-        keys.push(r ? bucketKeyOf(r.updatedAt, nowMs) : null)
-      }
-      const runs = planBuckets(keys)
-      // Runs carry an occurrence identity so a bucket key that appears in two
-      // non-contiguous runs (an unmapped row in between) gets one header per
-      // run instead of one shared header ping-ponging between anchors.
+      // Buckets in canonical order, newest-first INSIDE each bucket (the
+      // v2 guarantee). The core's "最近更新" order is an activity-promotion +
+      // persisted account order — it only lifts sessions whose updatedAt
+      // grew and otherwise keeps historical/manual order, so older rows can
+      // legitimately sit above newer ones. React never validates DOM order
+      // against its vdom (it moves nodes only when ITS order changes), so
+      // re-sequencing the official wrappers is stable; the observer
+      // reconciles after any core-driven move.
+      const mappedRows = domRows.map((d, i) => mapped[i]).filter(Boolean)
+      const allMapped = domRows.length > 0 && mappedRows.length === domRows.length
       const liveIdentities = new Set()
-      const keyOccurrence = {}
-      for (const run of runs) {
-        const occ = (keyOccurrence[run.key] = (keyOccurrence[run.key] || 0) + 1)
-        const identity = run.key + '#' + occ
-        liveIdentities.add(identity)
-        const anchor = domRows[run.index].wrapper || domRows[run.index].el
-        let header = __headers.get(identity)
-        if (!header) {
-          header = makeGroupHeader(run.key, identity)
-          __headers.set(identity, header)
+      const collectStale = () => {
+        for (const [identity, header] of __headers) {
+          if (!liveIdentities.has(identity)) { try { header.remove() } catch { /* */ } __headers.delete(identity) }
         }
-        let attached = false
-        try { attached = header.parentElement !== null } catch { /* */ }
-        if (!attached) {
-          try { tree.insertBefore(header, anchor) } catch { /* */ }
-        } else if (header.nextElementSibling !== anchor) {
-          try { tree.insertBefore(header, anchor) } catch { /* */ }
-        }
-        // Refresh presentation after fold toggles (idempotent compares).
-        const folded = isBucketFolded(run.key)
-        try { header.setAttribute('aria-expanded', folded ? 'false' : 'true') } catch { /* */ }
-        try {
-          const chevron = header.querySelector('svg') && header.firstElementChild
-          if (chevron) {
-            const want = folded ? 'rotate(0deg)' : 'rotate(90deg)'
-            if (chevron.style.transform !== want) chevron.style.transform = want
-          }
-        } catch { /* */ }
-        try {
-          const label = header.querySelector('[data-dsh-time-bucket-headlabel]')
-          const text = __t('bucket.' + run.key)
-          if (label && label.textContent !== text) label.textContent = text
-        } catch { /* */ }
-        try {
-          const count = header.querySelector('[data-dsh-time-bucket-headcount]')
-          const text = String(run.count)
-          if (count && count.textContent !== text) count.textContent = text
-        } catch { /* */ }
       }
-      for (const [identity, header] of __headers) {
-        if (!liveIdentities.has(identity)) { try { header.remove() } catch { /* */ } __headers.delete(identity) }
+      if (allMapped) {
+        // Sorted layout: [header, wrappers...] per bucket, all children
+        // re-appended when the live sequence diverges.
+        const wrapperOf = new Map()
+        for (let i = 0; i < domRows.length; i++) {
+          if (mapped[i]) wrapperOf.set(mapped[i].id, domRows[i].wrapper || domRows[i].el)
+        }
+        const seq = []
+        for (const bucket of deriveBuckets(mappedRows, nowMs)) {
+          const identity = bucket.key + '#1'
+          liveIdentities.add(identity)
+          let header = __headers.get(identity)
+          if (!header) {
+            header = makeGroupHeader(bucket.key, identity)
+            __headers.set(identity, header)
+          }
+          refreshHeader(header, bucket.key, bucket.rows.length)
+          seq.push(header)
+          for (const row of bucket.rows) {
+            const node = wrapperOf.get(row.id)
+            if (node) seq.push(node)
+          }
+        }
+        collectStale()
+        if (!__dragging) {
+          let orderChanged = false
+          try { orderChanged = tree.children.length !== seq.length } catch { /* */ }
+          if (!orderChanged) {
+            for (let i = 0; i < seq.length; i++) {
+              if (tree.children[i] !== seq[i]) { orderChanged = true; break }
+            }
+          }
+          if (orderChanged) {
+            for (const node of seq) { try { tree.appendChild(node) } catch { /* */ } }
+          }
+        }
+      } else {
+        // Partial mapping fallback: keep render order, anchor headers above
+        // the first row of each contiguous run. Occurrence identities keep
+        // two runs of the same key from sharing one header.
+        const keys = []
+        for (let i = 0; i < domRows.length; i++) {
+          const r = mapped[i]
+          keys.push(r ? bucketKeyOf(r.updatedAt, nowMs) : null)
+        }
+        const runs = planBuckets(keys)
+        const keyOccurrence = {}
+        for (const run of runs) {
+          const occ = (keyOccurrence[run.key] = (keyOccurrence[run.key] || 0) + 1)
+          const identity = run.key + '#' + occ
+          liveIdentities.add(identity)
+          const anchor = domRows[run.index].wrapper || domRows[run.index].el
+          let header = __headers.get(identity)
+          if (!header) {
+            header = makeGroupHeader(run.key, identity)
+            __headers.set(identity, header)
+          }
+          let attached = false
+          try { attached = header.parentElement !== null } catch { /* */ }
+          if (!attached) {
+            try { tree.insertBefore(header, anchor) } catch { /* */ }
+          } else if (header.nextElementSibling !== anchor) {
+            try { tree.insertBefore(header, anchor) } catch { /* */ }
+          }
+          refreshHeader(header, run.key, run.count)
+        }
+        collectStale()
       }
 
       // Fold: collapse every mapped row whose bucket is folded. The wrapper
@@ -705,9 +780,23 @@ window.__ModuleLoader__.load({
       __mode = true
       reconcile()
     }
+    function restoreCoreOrder() {
+      const order = __exitOrder
+      __exitOrder = null
+      __snapTree = null
+      if (!order || !__core) return
+      try {
+        const tree = findFlatTree(__core)
+        if (!tree) return
+        for (const node of order) {
+          try { if (node && node.parentElement === tree) tree.appendChild(node) } catch { /* */ }
+        }
+      } catch { /* */ }
+    }
     function exitMode() {
       if (!__mode) return
       __mode = false
+      restoreCoreOrder()
       clearEnhancements()
       detachObserver()
       __core = null
@@ -763,6 +852,9 @@ window.__ModuleLoader__.load({
           __mapped = new Map()
           __headers = new Map()
           __pending = false
+          __dragging = false
+          __exitOrder = null
+          __snapTree = null
           detachObserver()
           if (__watch) { clearInterval(__watch); __watch = null }
         },
