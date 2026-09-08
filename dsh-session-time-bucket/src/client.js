@@ -767,14 +767,16 @@ window.__ModuleLoader__.load({
             'aria-expanded': folded ? 'false' : 'true',
             style: {
               display: 'flex', alignItems: 'center', gap: 6, width: '100%', margin: '2px 0 6px',
-              padding: '7px 10px', border: 'none', background: 'transparent', borderRadius: 8,
+              padding: '7px 8px', border: 'none', background: 'transparent', borderRadius: 8,
               cursor: 'pointer', textAlign: 'left', fontSize: 14, lineHeight: '20px',
               color: 'var(--dsw-alias-label-secondary, #b0b0b4)',
             },
           })
+          // The triangle lives in a 16px slot like the core project row's
+          // chevron (core: slot 16x20, gap 6, pad 0 8px).
           const chevron = el('span', {
             html: TRIANGLE_SVG,
-            style: { flex: 'none', width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.7))', transition: 'transform 150ms ease' },
+            style: { flex: 'none', width: 16, height: 20, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-quaternary, rgba(138,138,142,.7))', transition: 'transform 150ms ease' },
           })
           // Core behavior: pointing right when collapsed, rotated 90° down when expanded.
           chevron.style.transform = folded ? 'rotate(0deg)' : 'rotate(90deg)'
