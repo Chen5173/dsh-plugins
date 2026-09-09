@@ -20,7 +20,7 @@
 
 ## 踩坑备忘
 
-- 外部 `link:` 插件**不能指望 pnpm 装它自己声明的嵌套依赖**（不遍历 link 目标），所以 js-yaml 从 profile 拿、或像 title-regenerate 那样本地 stub。
+- 外部 `link:` 插件**不能指望 pnpm 装它自己声明的嵌套依赖**（不遍历 link 目标），所以 js-yaml 从 profile 拿。**host 半不要 import `@deepseek-ai/*` 宿主内部包**：Node 按仓库真实路径解析（`link:` 的 symlink 被解引用），仓库祖先链上无 `node_modules` → 启动即 `ERR_MODULE_NOT_FOUND`。title-regenerate 曾靠仓库内不入库的本地 stub 顶着，2026-09-09 已去核心化（就地实现 createUserMessage / BlockAssembler，见 [2026-09-09-plugin-host-half-no-core-import.md](2026-09-09-plugin-host-half-no-core-import.md)）。
 - 迁移前 profile 里子插件在 `dependencies`+各自 `bundles`；迁移=移 devDeps + bundles 收敛只留 manager + 按当前激活补行，**先备份** `package.json`/`cordis.patch.yml`（`*.bak-<ts>`），失败回滚。
 - 面板对 `state==='legacy'` 的行**禁用开关与移除**（返回 409），引导先一键迁移——避免与 bundle 层同 id 行冲突。
 

@@ -1,6 +1,6 @@
 # 验收清单 — dsh-session-title-regenerate
 
-代码侧的 20 条逻辑断言已由 `test/bundle.test.mjs` 自动覆盖并通过（宿主 13 条 + 客户端 7 条）。本清单覆盖**只有装起来在浏览器里才能确认**的部分：真实安装、视觉布局、模型调用落地、标题即时刷新、语言切换、以及与其它插件共存。
+代码侧的 24 条逻辑断言已由 `test/bundle.test.mjs` 自动覆盖并通过（宿主 16 条 + 客户端 8 条）。本清单覆盖**只有装起来在浏览器里才能确认**的部分：真实安装、视觉布局、模型调用落地、标题即时刷新、语言切换、以及与其它插件共存。
 
 标 `[H]` 的条目 harness 已断言过，回归时抽查即可；标 `[B]` 的必须人眼看。
 
@@ -26,6 +26,8 @@ dsh --dump-config --profile web | grep -n session-title-regenerate   # 应看到
 - [ ] 1.1 `[B]` 重启 `dsh web` 无报错、无插件加载失败提示
 - [ ] 1.2 `[B]` Console 无 `slot "conversation.session.header.actions" is not declared`、无 `list slot ... already has an entry with id`
 - [ ] 1.3 重复执行 add → `dsh.profile.bundles` 与 `cordis.patch.yml` 各**只有一行** `session-title-regenerate`
+- [ ] 1.4 `[H]` `grep -rnE "from '@deepseek-ai/|require\('@deepseek-ai/" dsh-session-title-regenerate/src/index.js` 无输出（宿主半零宿主包 import；注释里提到包名不算）
+- [ ] 1.5 `[B]` link 安装可直接加载（无 `node_modules`、默认解析）：`cd ~/.dsh/profiles/web && node --input-type=module -e "await import('dsh-session-title-regenerate')"` → 打印 `OK`
 
 ## 2. 头部按钮入口（spec：会话头部提供重新生成标题入口）
 

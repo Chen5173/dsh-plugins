@@ -2,10 +2,11 @@
 //
 // WHY THIS EXISTS
 // The plugin has two halves:
-//   - src/index.js is a plain ESM cordis plugin importing
-//     `@deepseek-ai/dsh-llm`; the harness resolves that import to the local
-//     stub under node_modules/@deepseek-ai/dsh-llm (never shipped) and drives
-//     the command handler with a fake ctx / agent / llm stream.
+//   - src/index.js is a plain ESM cordis plugin with NO host-package import:
+//     it reaches the host only through injected ctx services (commands / llm /
+//     sessionTitle) and carries its own local message + stream helpers. The
+//     harness drives the command handler with a fake ctx / agent / llm stream,
+//     so this whole file runs with no node_modules at all.
 //   - src/client.js is a browser classic-script bundle (no build step), so it
 //     is materialized the way @deepseek-ai/dsh-client-modules does —
 //     window.__ModuleLoader__.load({id, factory}) then factory(require) — with
@@ -115,6 +116,16 @@ test('host exports cordis contract and registers the command', () => {
   assert.equal(def.recordInput, false)
   assert.equal(typeof def.description, 'string')
   assert.equal(typeof def.handler, 'function')
+})
+
+// =============================================================================
+// Host: link-install safety
+// =============================================================================
+
+test('host: src/index.js imports no host package (link-install safe)', () => {
+  const source = fs.readFileSync(path.join(here, '..', 'src', 'index.js'), 'utf8')
+  assert.ok(!/from\s+'@deepseek-ai\//.test(source), 'host half must not import host packages')
+  assert.ok(!/require\('@deepseek-ai\//.test(source), 'host half must not require host packages')
 })
 
 // =============================================================================

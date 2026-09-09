@@ -24,7 +24,7 @@
 dsh plugin --profile web add ./dsh-session-title-regenerate
 ```
 
-或手动接入（当前 web profile 已用 `link:` 方式挂载两个先例插件）：
+或手动接入（**当前仓库统一由 `dsh-plugin-manager` 管理本地子插件**：装好管理器后在设置页「本地插件」里启用本插件即可；下面这段是已退役的旧布局写法，仅作参考）：
 
 ```jsonc
 // ~/.dsh/profiles/web/package.json
@@ -36,7 +36,7 @@ dsh plugin --profile web add ./dsh-session-title-regenerate
 }
 ```
 
-重启 `dsh web` 生效。插件自身的 `cordis.patch.yml` 提供稳定行 `session-title-regenerate`，重复 add 不产生重复行。
+新管理器布局下：子插件放 profile `devDependencies`（`link:` 到本仓库子目录），激活行由管理器写进 `cordis.patch.yml`（live 热重载）；`dsh.profile.bundles` 只留 `dsh-plugin-manager`。插件自身的 `cordis.patch.yml` 提供稳定行 `session-title-regenerate`，重复 add 不产生重复行。
 
 ## 配置
 
@@ -62,11 +62,12 @@ dsh plugin --profile web add ./dsh-session-title-regenerate
 node dsh-session-title-regenerate/test/bundle.test.mjs
 ```
 
-纯 Node 逻辑 harness（无浏览器）：宿主命令 handler（消息收集、最低推理参数、标题规范化、错误/重试/截断/取消路径）+ 客户端（槽位注册、命令触发、标题→id 解析、菜单注入与点击流）。`test/bundle.test.mjs` 通过 `node_modules/@deepseek-ai/dsh-llm` 下的**本地测试桩**解析 `@deepseek-ai/dsh-llm` 导入（桩只镜像本插件用到的 API，绝不发布、运行时不加载）。
+纯 Node 逻辑 harness（无浏览器）：宿主命令 handler（消息收集、最低推理参数、标题规范化、错误/重试/截断/取消路径）+ 客户端（槽位注册、命令触发、标题→id 解析、菜单注入与点击流）。宿主半**不 import 任何宿主包**——消息构造与流装配是 `src/index.js` 内的本地实现——因此测试与运行都不需要 `node_modules`，`link:` 安装也能直接加载。
 
 ## 兼容性与风险
 
 - 目标核心版本 `>= 0.1.1-rc.2`（`remote.commands.execute`、`ctx.sessionTitle`、`purpose:'session-title'` 均自该版本存在）。
+- **宿主半零宿主包依赖**：只用注入服务 `commands` / `llm` / `sessionTitle`，消息构造与流装配为文件内本地实现 → 以 `link:` 形态装在 profile 之外也能加载。若在 `src/index.js` 里 import `@deepseek-ai/*`，Node 会按仓库真实路径解析（symlink 被解引用），仓库祖先链上没有 `node_modules` → 启动即 `ERR_MODULE_NOT_FOUND`。
 - 菜单项依赖核心 `ui-workspace` 的会话行 DOM（`[class*=sessionRow]` + `menuOpen`、`[role=menu]`、`[class*=title]`）。`session-delete` 插件在本 profile 已在用同款手法；若上游为会话菜单新增插件槽位，本插件的注入项可平滑换成槽位实现。
 - 会话行 DOM 不携带 id，菜单项按**标题**反查会话（客户端列表 store：精确 → 去 fork 后缀 → 互相包含）。同名标题极端情况下可能解析偏差；头部按钮按 id 触发，不受影响。
 - 标题以 `user` 来源固定：此后新消息不会自动更新该标题，需再次「重新生成」（这是第 1 轮已确认的「始终覆盖」语义）。

@@ -21,9 +21,16 @@
 //
 // No host endpoint, no model tool, no new attack surface.
 //
+// NO host package is imported: this half reaches the host only through the
+// injected `commands` / `llm` / `sessionTitle` services. The two pure data
+// helpers it needs (message construction, stream assembly) are implemented
+// below, so the plugin stays resolvable when it is `link:`-installed from
+// outside the profile — a bare `@deepseek-ai/dsh-llm` import would be resolved
+// from the repo's real path, where no node_modules exists (ERR_MODULE_NOT_FOUND).
+//
 // ESM module format (cordis bundle rule): named exports apply/inject/name.
 
-import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { randomUUID } from 'node:crypto'
 
 const name = 'session-title-regenerate'
 
@@ -200,6 +207,95 @@ function withTimeout(signal, ms) {
       clearTimeout(timer)
       signal.removeEventListener('abort', onAbort)
     },
+  }
+}
+
+// --- 本地消息构造 / 流装配（等价替代 @deepseek-ai/dsh-llm 的两个纯工具）---------
+//
+// 为什么不用 import：本插件以 `link:` 形态装在 profile 之外（真实路径在 git 仓库里），
+// Node 的裸包解析会从仓库目录向上找 node_modules —— 而宿主内部包 @deepseek-ai/dsh-llm
+// 只存在于宿主安装树（~/.dsh/profiles/...）里，永远不在那条祖先链上，启动即
+// ERR_MODULE_NOT_FOUND。这里就地实现所需的两个纯数据工具，插件对宿主能力的依赖
+// 只剩注入服务（commands / llm / sessionTitle）。
+
+/**
+ * 构造一条 user 角色请求消息（对齐 dsh-llm 的 createUserMessage：展开入参 +
+ * role:'user' + 新 id；模型请求只读 role/content）。
+ * - 参数类型：input -- {content: ContentBlock[]}
+ * - 返回值：{...input, role:'user', id: string}
+ * - 调用样例：createUserMessage({ content: [{ type: 'text', text }] })
+ */
+function createUserMessage(input) {
+  return { ...input, role: 'user', id: randomUUID() }
+}
+
+/**
+ * 流式块装配器（对齐 dsh-llm 的 BlockAssembler 的可观察行为）：按 index 累积
+ * text/reasoning 增量，`block-end` 的闭合块优先，`finish` 记录结束原因
+ * （缺省 {kind:'stop'}）。本插件只用 push / finish / blocks 三个成员。
+ * - 参数类型：chunk -- StreamChunk（block-start / text-delta / reasoning-delta /
+ *   block-end / finish；usage、tool-call-delta 等与标题生成无关，忽略）
+ * - 返回值：实例；blocks() -> ContentBlock[]；finish -> FinishReason
+ * - 调用样例：const a = new BlockAssembler(); for await (const c of stream) a.push(c)
+ */
+class BlockAssembler {
+  #order = []
+  #partials = new Map()
+  #finish
+
+  push(chunk) {
+    switch (chunk && chunk.type) {
+      case 'block-start':
+        if (!this.#partials.has(chunk.index)) {
+          this.#order.push(chunk.index)
+          this.#partials.set(chunk.index, { blockType: chunk.blockType, text: '', block: undefined })
+        }
+        return
+      case 'text-delta':
+      case 'reasoning-delta': {
+        const partial = this.#ensure(chunk.index, chunk.type === 'text-delta' ? 'text' : 'reasoning')
+        if (!partial.block) partial.text += chunk.text
+        return
+      }
+      case 'block-end': {
+        const partial = this.#ensure(chunk.index, chunk.block.type)
+        if (!partial.block) partial.block = chunk.block
+        return
+      }
+      case 'finish':
+        this.#finish = chunk.reason
+        return
+      default:
+        return // usage / tool-call-delta / 未知 chunk：标题生成用不到
+    }
+  }
+
+  #ensure(index, blockType) {
+    let partial = this.#partials.get(index)
+    if (!partial) {
+      partial = { blockType, text: '', block: undefined }
+      this.#partials.set(index, partial)
+      this.#order.push(index)
+    }
+    return partial
+  }
+
+  get finish() {
+    return this.#finish ?? { kind: 'stop' }
+  }
+
+  blocks() {
+    return this.#order
+      .map((index) => {
+        const partial = this.#partials.get(index)
+        if (!partial) return undefined
+        if (partial.block) return partial.block
+        if (partial.blockType === 'text' || partial.blockType === 'reasoning') {
+          return { type: partial.blockType, text: partial.text }
+        }
+        return undefined // 未闭合的未知块（如 tool-call）不参与标题
+      })
+      .filter(Boolean)
   }
 }
 
