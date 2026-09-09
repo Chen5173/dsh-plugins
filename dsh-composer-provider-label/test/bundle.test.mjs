@@ -77,14 +77,21 @@ function makeReact() {
 // --- fresh browser globals + module load -------------------------------------
 
 /** Evaluate the bundle once in a fresh window; returns the factory map. */
-function bootModule(language) {
+function bootModule(language, storage) {
   const factories = new Map()
   const window = { __ModuleLoader__: { load: ({ id, factory }) => factories.set(id, factory) } }
+  if (storage !== undefined && storage !== null) window.localStorage = storage
   const navigator = { languages: [language || 'zh-CN'], language: language || 'zh-CN' }
-  const document = { body: {}, createElement: () => ({ style: {}, setAttribute() {} }) }
+  const styles = []
+  const document = {
+    body: {},
+    head: { appendChild: (element) => { styles.push(element) } },
+    createElement: () => ({ style: {}, setAttribute() {} }),
+    getElementById: (id) => styles.find((element) => element.id === id) || null,
+  }
   // eslint-disable-next-line no-new-func -- mirroring browser classic-script evaluation
   new Function('window', 'navigator', 'document', source)(window, navigator, document)
-  return { window, factories }
+  return { window, factories, document, styles }
 }
 
 function makeLocale(log) {
@@ -105,7 +112,7 @@ function makeLocale(log) {
  * __ensureLoaded. ctx.on records handlers (so tests can fire connection/reset);
  * remote.$on handlers are recorded too.
  */
-function makeCtx({ locale, remote, log }) {
+function makeCtx({ locale, remote, log, sessions }) {
   const registered = []
   const handlers = { on: [], remoteEvents: [], reset: [] }
   const ctx = {
@@ -116,6 +123,7 @@ function makeCtx({ locale, remote, log }) {
       if (name === 'remote') return remote
       if (name === 'remote.session') return remote && remote.session
       if (name === 'remote.settings') return remote && remote.settings
+      if (name === 'sessions') return sessions
       return undefined
     },
     effect: (fn) => { fn(); return () => {} },
@@ -159,11 +167,23 @@ function makeCtx({ locale, remote, log }) {
   return ctx
 }
 
-function requireStub(React) {
+/** Menu stub: a marker component so tests can drive items/footer/onSelect directly. */
+function makeMenuStub() {
+  const Menu = (props) => ({ __element: true, type: { __menuStub: true }, props })
+  Menu.__menuStub = true
+  return Menu
+}
+
+function requireStub(React, { withMenu = true } = {}) {
   return (specifier) => {
     if (specifier === 'react') return React
     if (specifier === '@deepseek-ai/dsh-client-ui-primitives') {
-      return { Tooltip: (props) => props.children }
+      const lib = { Tooltip: (props) => props.children }
+      if (withMenu) {
+        lib.Menu = makeMenuStub()
+        lib.IconChevronDownOutline14 = (props) => ({ __element: true, type: 'chevron', props: props || {} })
+      }
+      return lib
     }
     throw new Error(`unexpected require("${specifier}")`)
   }
@@ -173,15 +193,15 @@ function requireStub(React) {
  * Boot one module, apply the plugin with the given remote handles, and return
  * everything needed to drive the registered component.
  */
-function boot({ language = 'zh-CN', remote } = {}) {
-  const { window, factories } = bootModule(language)
+function boot({ language = 'zh-CN', remote, sessions, storage, withMenu = true } = {}) {
+  const { window, factories, document: fakeDocument, styles } = bootModule(language, storage)
   const { React, beginRender, freshInstance, isDirty } = makeReact()
   const log = { registered: [] }
   const locale = makeLocale(log)
-  const ctx = makeCtx({ locale, remote, log })
+  const ctx = makeCtx({ locale, remote, log, sessions })
   const factory = factories.get(PKG_ID)
   assert.ok(factory, `bundle did not register id "${PKG_ID}"`)
-  const exports_ = factory(requireStub(React))
+  const exports_ = factory(requireStub(React, { withMenu }))
   assert.equal(typeof exports_.apply, 'function')
   exports_.apply(ctx)
   const entry = ctx.registered[0]
@@ -206,25 +226,106 @@ function boot({ language = 'zh-CN', remote } = {}) {
     log,
     entry,
     Component,
+    styles,
+    document: fakeDocument,
     render: (props) => renderStable(Component, props, true),
     rerender: (props) => renderStable(Component, props, false),
     flush: async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
+      for (let tick = 0; tick < 8; tick += 1) await Promise.resolve()
     },
   }
   return env
 }
 
-/** Unwrap the Tooltip wrapper: { tooltip, text, aria } or null when nothing renders. */
+/** Concatenate the text of a (possibly nested/array) element tree. */
+function textOf(node) {
+  if (node === null || node === undefined || node === false) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  if (node.__element) return textOf(node.props && node.props.children)
+  return ''
+}
+
+/** The Menu element when the picker rendered, else null (degraded/read-only label). */
+function menuOf(tree) {
+  return tree && tree.__element && tree.type && tree.type.__menuStub === true ? tree : null
+}
+
+/** The Tooltip-wrapped entry: the Menu anchor when present, else the tree itself. */
+function anchorOf(tree) {
+  const menu = menuOf(tree)
+  return menu ? menu.props.anchor : tree
+}
+
+/** The interactive button of the entry (null on the degraded read-only label). */
+function buttonOf(tree) {
+  const anchor = anchorOf(tree)
+  if (!anchor || !anchor.__element) return null
+  const node = anchor.props && anchor.props.children
+  if (node && node.__element && node.type === 'button') return node
+  if (Array.isArray(node)) {
+    const found = node.find((child) => child && child.__element && child.type === 'button')
+    if (found) return found
+  }
+  return null
+}
+
+function clickEntry(tree) {
+  const button = buttonOf(tree)
+  assert.ok(button, 'the entry renders an interactive button')
+  button.props.onClick()
+}
+
+function hoverEntry(tree) {
+  const button = buttonOf(tree)
+  assert.ok(button, 'the entry renders an interactive button')
+  button.props.onMouseEnter()
+}
+
+/** Unwrap the entry: { tooltip, text, aria } or null when nothing renders. */
 function labelOf(tree) {
-  if (!tree || !tree.__element) return null
-  const tooltip = tree.props && tree.props.label
-  const span = tree.props && tree.props.children
-  const text = span && span.props && span.props.children
-  const aria = span && span.props && span.props['aria-label']
-  return { tooltip, text, aria }
+  const anchor = anchorOf(tree)
+  if (!anchor || !anchor.__element) return null
+  const tooltip = anchor.props && anchor.props.label
+  const node = anchor.props && anchor.props.children
+  const aria = node && node.props && node.props['aria-label']
+  return { tooltip, text: textOf(node), aria }
+}
+
+function menuProps(tree) {
+  const menu = menuOf(tree)
+  return menu ? menu.props : null
+}
+
+function itemsOf(tree) {
+  const props = menuProps(tree)
+  return props ? props.items : []
+}
+
+function footerOf(tree) {
+  const props = menuProps(tree)
+  return props ? props.footer || [] : []
+}
+
+function itemById(tree, id) {
+  return itemsOf(tree).find((entry) => entry && entry.id === id)
+}
+
+function selectItem(tree, id) {
+  const props = menuProps(tree)
+  assert.ok(props, 'the menu is rendered')
+  props.onSelect(id)
+}
+
+/** A fake localStorage backed by a Map, mirroring the browser surface used. */
+function makeStorage(initial) {
+  const map = new Map(Object.entries(initial || {}))
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => { map.set(key, String(value)) },
+    removeItem: (key) => { map.delete(key) },
+    dump: () => Object.fromEntries(map),
+  }
 }
 
 // --- fake catalog + projection ----------------------------------------------
@@ -579,15 +680,497 @@ test('node half installs nothing when settings lacks installSection', async () =
   assert.equal(registered, 0, 'only installSection (not register) may be used')
 })
 
-// --- capability audit (spec: read-only display) ------------------------------
+// --- picker: entry, panes and the whitelisted write --------------------------
 
-test('capability audit: the bundle never calls a state-changing session remote', () => {
+const STORE_KEY = 'dsh.composer-provider-label.v1'
+
+/** Boot a picker-ready environment: a catalog, a recording selectModel, storage. */
+function pickerBoot(extra = {}) {
+  const writes = []
+  const catalogCalls = { count: 0 }
+  const remote = {
+    session: {
+      modelCatalog: async () => {
+        catalogCalls.count += 1
+        if (extra.failCatalog) return { ok: false, error: { code: 'catalog-down', message: 'catalog down' } }
+        return { ok: true, value: extra.catalog ? extra.catalog() : catalogOf() }
+      },
+      selectModel: async (request) => {
+        writes.push(request)
+        return extra.selectModel ? extra.selectModel(request) : { ok: true, value: { selected: request } }
+      },
+    },
+  }
+  const env = boot({ remote, sessions: extra.sessions, storage: extra.storage })
+  env.writes = writes
+  env.catalogCalls = catalogCalls
+  return env
+}
+
+/** Render, settle the catalog, then click the entry open; returns the open tree. */
+async function openPicker(env, projection = projectionOf(SESS), sessionId = 's1') {
+  env.render(compProps(sessionId, projection))
+  await env.flush()
+  let tree = env.rerender(compProps(sessionId, projection))
+  clickEntry(tree)
+  tree = env.rerender(compProps(sessionId, projection))
+  return tree
+}
+
+test('picker: the entry is a menu button and opening it writes nothing', async () => {
+  const env = pickerBoot()
+  const tree = await openPicker(env)
+  const button = buttonOf(tree)
+  assert.equal(button.type, 'button')
+  assert.equal(button.props['aria-haspopup'], 'menu')
+  assert.equal(button.props['aria-expanded'], true)
+  assert.ok(menuProps(tree).open)
+  assert.deepEqual(env.writes, [], 'opening the picker is read-only')
+})
+
+test('picker: root pane shows the provider and model rows with their current values', async () => {
+  const env = pickerBoot()
+  const tree = await openPicker(env)
+  const providerRow = itemById(tree, 'provider')
+  const modelRow = itemById(tree, 'model')
+  assert.ok(providerRow && modelRow)
+  assert.match(textOf(providerRow.label), /提供方/)
+  assert.match(textOf(providerRow.label), /ARK/)
+  assert.match(textOf(modelRow.label), /模型/)
+  assert.match(textOf(modelRow.label), /DeepSeek-V4-Flash/)
+})
+
+test('picker: provider pane lists advertised providers in catalog order', async () => {
+  const env = pickerBoot()
+  let tree = await openPicker(env)
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  const ids = itemsOf(tree).map((entry) => entry.id).filter((id) => id.startsWith('provider:'))
+  assert.deepEqual(ids, [
+    'provider:deepseek-official', 'provider:ark', 'provider:codemaker', 'provider:bai', 'provider:openroputer',
+  ])
+  const ark = itemById(tree, 'provider:ark')
+  assert.match(textOf(ark.label), /ARK/)
+  assert.match(textOf(ark.label), /ARK \(Coding Plan\)/)
+  assert.ok(menuProps(tree).selectedIds.includes('provider:ark'), 'current provider is marked')
+})
+
+test('picker: failed providers are disabled and carry their failure text', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      groups: catalogOf().groups.filter((group) => group.id !== 'bai'),
+      failures: [{ id: 'bai', name: 'B.AI', message: 'no key' }],
+    }),
+  })
+  let tree = await openPicker(env)
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  const row = itemById(tree, 'provider:bai')
+  assert.equal(row.disabled, true)
+  assert.match(textOf(row.label), /加载失败: no key/)
+})
+
+test('picker: an unadvertised current provider gets a synthetic top row', async () => {
+  const env = pickerBoot()
+  const route = { provider: 'ghost-router', model: 'x' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  const rows = itemsOf(tree).filter((entry) => entry.id.startsWith('provider:'))
+  assert.equal(rows[0].id, 'provider:ghost-router')
+  assert.match(textOf(rows[0].label), /当前路由/)
+})
+
+test('picker: choosing another provider writes the profile default when it belongs there', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'bai', model: 'bai-model' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-model', name: 'Ark Model' }] },
+        { id: 'bai', name: 'B.AI', models: [{ id: 'bai-model', name: 'Bai Model' }, { id: 'bai-2', name: 'Bai Two' }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-model' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  selectItem(tree, 'provider:bai')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'bai', model: 'bai-model' }])
+})
+
+test('picker: choosing another provider without a default there writes its first model', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-model' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-model', name: 'Ark Model' }] },
+        { id: 'bai', name: 'B.AI', models: [{ id: 'bai-first', name: 'Bai First' }, { id: 'bai-second', name: 'Bai Second' }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-model' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  selectItem(tree, 'provider:bai')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'bai', model: 'bai-first' }])
+})
+
+test('picker: choosing the same provider keeps the current model', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'codemaker', model: 'deepseek-v4-flash' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-one', name: 'Ark One' }, { id: 'ark-two', name: 'Ark Two' }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-two' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  selectItem(tree, 'provider:ark')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'ark', model: 'ark-two' }])
+})
+
+test('picker: choosing a provider auto-enters the model pane', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-model' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-model', name: 'Ark Model' }] },
+        { id: 'bai', name: 'B.AI', models: [{ id: 'bai-model', name: 'Bai Model' }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-model' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  selectItem(tree, 'provider:bai')
+  await env.flush()
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  assert.ok(itemById(tree, 'model:bai:bai-model'), 'the model pane is showing')
+  assert.ok(!itemById(tree, 'provider:bai'), 'the provider pane is left behind')
+})
+
+test('picker: choosing a provider keeps an effort the new model still supports', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-high' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-high', name: 'Ark High', reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } }] },
+        { id: 'bai', name: 'B.AI', models: [{ id: 'bai-high', name: 'Bai High', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-high', reasoningEffort: 'high' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  selectItem(tree, 'provider:bai')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'bai', model: 'bai-high', reasoningEffort: 'high' }])
+})
+
+test('picker: choosing a provider drops an effort the new model does not support', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({
+      default: { provider: 'ark', model: 'ark-high' },
+      groups: [
+        { id: 'ark', name: 'ARK', models: [{ id: 'ark-high', name: 'Ark High', reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'low', name: 'Low' }] } }] },
+        { id: 'bai', name: 'B.AI', models: [{ id: 'bai-plain', name: 'Bai Plain' }] },
+      ],
+    }),
+  })
+  const route = { provider: 'ark', model: 'ark-high', reasoningEffort: 'low' }
+  let tree = await openPicker(env, projectionOf(route))
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  selectItem(tree, 'provider:bai')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'bai', model: 'bai-plain' }])
+})
+
+test('picker: model pane in "all" scope groups by provider with headings', async () => {
+  const env = pickerBoot()
+  let tree = await openPicker(env)
+  selectItem(tree, 'model')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  const headings = itemsOf(tree).filter((entry) => entry.type === 'label')
+  assert.ok(headings.length >= 4, 'one heading per advertised provider')
+  assert.match(headings[0].text, /office · DeepSeek/)
+  const item = itemById(tree, 'model:ark:deepseek-v4-flash')
+  assert.ok(item)
+  assert.match(textOf(item.label), /DeepSeek-V4-Flash/)
+  assert.ok(menuProps(tree).selectedIds.includes('model:ark:deepseek-v4-flash'))
+})
+
+test('picker: model pane in "provider" scope lists only that provider, no headings', async () => {
+  const env = pickerBoot({ storage: makeStorage({ [STORE_KEY]: JSON.stringify({ scope: 'provider' }) }) })
+  let tree = await openPicker(env)
+  selectItem(tree, 'model')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.deepEqual(itemsOf(tree).filter((entry) => entry.type === 'label'), [])
+  const modelIds = itemsOf(tree).filter((entry) => entry.id.startsWith('model:')).map((entry) => entry.id)
+  assert.deepEqual(modelIds, ['model:ark:deepseek-v4-flash'])
+})
+
+test('picker: the scope toggle persists and is restored on the next mount', async () => {
+  const storage = makeStorage()
+  const env = pickerBoot({ storage })
+  let tree = await openPicker(env)
+  assert.ok(footerOf(tree).some((entry) => entry.id === 'scope:all'))
+  assert.ok(footerOf(tree).some((entry) => entry.id === 'scope:provider'))
+  assert.ok(menuProps(tree).selectedIds.includes('scope:all'))
+  selectItem(tree, 'scope:provider')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.deepEqual(JSON.parse(storage.getItem(STORE_KEY)), { scope: 'provider' })
+  assert.ok(menuProps(tree).selectedIds.includes('scope:provider'))
+  assert.deepEqual(env.writes, [], 'the scope toggle never writes a selection')
+
+  const second = pickerBoot({ storage })
+  const secondTree = await openPicker(second)
+  assert.ok(menuProps(secondTree).selectedIds.includes('scope:provider'), 'preference restored')
+})
+
+test('picker: "provider" scope with no models shows the empty state and a switch-back', async () => {
+  const env = pickerBoot({
+    catalog: () => catalogOf({ groups: [{ id: 'ark', name: 'ARK', models: [] }] }),
+    storage: makeStorage({ [STORE_KEY]: JSON.stringify({ scope: 'provider' }) }),
+  })
+  let tree = await openPicker(env)
+  selectItem(tree, 'model')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  const empty = itemById(tree, 'empty')
+  assert.ok(empty)
+  assert.equal(empty.disabled, true)
+  assert.match(textOf(empty.label), /该提供方暂无可用模型/)
+  const switchBack = itemById(tree, 'scope:all')
+  assert.ok(switchBack, 'a one-click switch back to all providers')
+  selectItem(tree, 'scope:all')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.ok(menuProps(tree).selectedIds.includes('scope:all'))
+})
+
+test('picker: choosing a model writes the pair and closes the menu', async () => {
+  const env = pickerBoot()
+  let tree = await openPicker(env)
+  selectItem(tree, 'model')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  selectItem(tree, 'model:codemaker:deepseek-v4-flash')
+  await env.flush()
+  assert.deepEqual(env.writes, [{ sessionId: 's1', provider: 'codemaker', model: 'deepseek-v4-flash' }])
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.equal(menuProps(tree).open, false, 'the menu closed after a successful write')
+})
+
+test('picker: the entry reports busy while a write is in flight', async () => {
+  let release
+  const env = pickerBoot({
+    selectModel: () => new Promise((resolve) => { release = () => resolve({ ok: true, value: {} }) }),
+  })
+  let tree = await openPicker(env)
+  selectItem(tree, 'model')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  selectItem(tree, 'model:codemaker:deepseek-v4-flash')
+  await env.flush()
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.equal(buttonOf(tree).props['aria-busy'], true)
+  assert.equal(typeof release, 'function', 'the write reached the session remote')
+  release()
+  await env.flush()
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.equal(buttonOf(tree).props['aria-busy'], undefined)
+})
+
+test('picker: a rejected write shows the error indicator and keeps the route', async () => {
+  const env = pickerBoot({
+    selectModel: async () => ({ ok: false, error: { code: 'session/model-unavailable', message: 'no route' } }),
+  })
+  let tree = await openPicker(env)
+  selectItem(tree, 'model')
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  selectItem(tree, 'model:codemaker:deepseek-v4-flash')
+  await env.flush()
+  tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  const label = labelOf(tree)
+  assert.match(label.tooltip, /切换失败: session\/model-unavailable: no route/)
+  assert.equal(label.text, 'ARK', 'the route did not change')
+  const children = buttonOf(tree).props.children
+  assert.ok(
+    Array.isArray(children) && children.some((child) => child && child.props && child.props.style
+      && child.props.style.background === 'var(--dsw-alias-state-error-primary)'),
+    'an inline error indicator is rendered',
+  )
+})
+
+test('picker: a subagent session disables selection rows and writes nothing', async () => {
+  const env = pickerBoot({
+    sessions: { subagentAddress: (id) => (id === 'sub-1' ? { sessionId: 'parent' } : undefined) },
+  })
+  let tree = await openPicker(env, projectionOf(SESS), 'sub-1')
+  assert.ok(itemById(tree, 'unavailable'), 'the reason is stated')
+  selectItem(tree, 'provider')
+  tree = env.rerender(compProps('sub-1', projectionOf(SESS)))
+  assert.equal(itemById(tree, 'provider:ark').disabled, true)
+  selectItem(tree, 'provider:ark')
+  await env.flush()
+  assert.deepEqual(env.writes, [], 'a disabled row never writes')
+})
+
+test('picker: a catalog failure with a known route keeps the raw id and offers retry', async () => {
+  const env = pickerBoot({ failCatalog: true })
+  const route = { provider: 'ark', model: 'deepseek-v4-flash' }
+  env.render(compProps('s1', projectionOf(route)))
+  await env.flush()
+  let tree = env.rerender(compProps('s1', projectionOf(route)))
+  assert.equal(labelOf(tree).text, 'ark', 'falls back to the raw provider id')
+  clickEntry(tree)
+  tree = env.rerender(compProps('s1', projectionOf(route)))
+  const retry = itemById(tree, 'retry')
+  assert.ok(retry, 'the menu offers a retry row')
+  assert.ok(!retry.disabled, 'the retry row is actionable')
+  const before = env.catalogCalls.count
+  selectItem(tree, 'retry')
+  await env.flush()
+  assert.ok(env.catalogCalls.count > before, 'retrying requests the catalog again')
+})
+
+test('picker: a catalog failure without a known route renders a retry entry', async () => {
+  const env = pickerBoot({ failCatalog: true })
+  env.render(compProps('s1', projectionOf(null, null)))
+  await env.flush()
+  const tree = env.rerender(compProps('s1', projectionOf(null, null)))
+  const button = buttonOf(tree)
+  assert.ok(button, 'an error-state entry appears')
+  assert.equal(textOf(button), '!')
+  const before = env.catalogCalls.count
+  button.props.onClick()
+  await env.flush()
+  assert.ok(env.catalogCalls.count > before, 'the entry requests the catalog again')
+})
+
+test('picker: without the Menu primitive the entry degrades to the v1 read-only label', async () => {
+  const env = boot({
+    withMenu: false,
+    remote: { session: { modelCatalog: async () => ({ ok: true, value: catalogOf() }) } },
+  })
+  env.render(compProps('s1', projectionOf(SESS)))
+  await env.flush()
+  const tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.equal(menuOf(tree), null)
+  assert.equal(buttonOf(tree), null, 'no interactive button without the primitive')
+  const label = labelOf(tree)
+  assert.equal(label.text, 'ARK')
+  assert.match(label.tooltip, /ARK \(Coding Plan\)/)
+})
+
+test('pure: chooseSelection keeps, defaults, or takes the first model', () => {
+  const env = boot()
+  const pure = env.window.__cpl.pure
+  const catalog = catalogOf({
+    default: { provider: 'bai', model: 'b2' },
+    groups: [
+      { id: 'ark', name: 'ARK', models: [{ id: 'a1', name: 'A1' }, { id: 'a2', name: 'A2' }] },
+      { id: 'bai', name: 'B.AI', models: [{ id: 'b1', name: 'B1' }, { id: 'b2', name: 'B2', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] },
+    ],
+  })
+  assert.deepEqual(pure.chooseSelection('ark', { provider: 'ark', model: 'a2' }, catalog), { provider: 'ark', model: 'a2' })
+  assert.deepEqual(pure.chooseSelection('bai', { provider: 'ark', model: 'a1' }, catalog), { provider: 'bai', model: 'b2' })
+  assert.deepEqual(pure.chooseSelection('ark', { provider: 'bai', model: 'b2' }, catalog), { provider: 'ark', model: 'a1' })
+  assert.deepEqual(
+    pure.chooseSelection('bai', { provider: 'ark', model: 'a1', reasoningEffort: 'high' }, catalog),
+    { provider: 'bai', model: 'b2', reasoningEffort: 'high' },
+  )
+  assert.deepEqual(
+    pure.chooseSelection('bai', { provider: 'ark', model: 'a1', reasoningEffort: 'low' }, catalog),
+    { provider: 'bai', model: 'b2' },
+  )
+  assert.equal(pure.chooseSelection('nope', { provider: 'ark', model: 'a1' }, catalog), null)
+  assert.equal(pure.chooseSelection('ark', null, { groups: [{ id: 'ark', name: 'ARK', models: [] }] }), null)
+})
+
+test('pure: providerRows and modelRows shape the two levels', () => {
+  const env = boot()
+  const pure = env.window.__cpl.pure
+  const catalog = catalogOf({
+    failures: [{ id: 'bai', name: 'B.AI', message: 'boom' }],
+    groups: [
+      { id: 'ark', name: 'ARK', models: [{ id: 'a1', name: 'A1' }, { id: 'a2', name: 'A2' }] },
+      { id: 'codemaker', name: 'codemaker', models: [{ id: 'c1', name: 'C1' }] },
+    ],
+  })
+  const rows = pure.providerRows(catalog, 'ark', {})
+  assert.deepEqual(rows.map((row) => row.id), ['ark', 'codemaker', 'bai'])
+  assert.equal(rows[0].current, true)
+  assert.equal(rows[2].disabled, true)
+  assert.equal(rows[2].failure, 'boom')
+  const withGhost = pure.providerRows(catalog, 'ghost', {})
+  assert.equal(withGhost[0].id, 'ghost')
+  assert.equal(withGhost[0].synthetic, true)
+
+  const all = pure.modelRows(catalog, { provider: 'ark', model: 'a2' }, 'all', {})
+  assert.deepEqual(all.filter((row) => row.kind === 'heading').map((row) => row.id), ['heading:ark', 'heading:codemaker'])
+  assert.equal(all.find((row) => row.id === 'model:ark:a2').selected, true)
+  const only = pure.modelRows(catalog, { provider: 'ark', model: 'a2' }, 'provider', {})
+  assert.deepEqual(only.map((row) => row.id), ['model:ark:a1', 'model:ark:a2'])
+})
+
+test('pure: the scope helpers round-trip through storage and survive garbage', () => {
+  const env = boot()
+  const pure = env.window.__cpl.pure
+  const storage = makeStorage()
+  assert.equal(pure.readScope(storage), 'all')
+  pure.writeScope(storage, 'provider')
+  assert.deepEqual(JSON.parse(storage.getItem(pure.STORE_KEY)), { scope: 'provider' })
+  assert.equal(pure.readScope(storage), 'provider')
+  assert.equal(pure.parseScope('bogus'), 'all')
+  assert.equal(pure.readScope({ getItem: () => 'not json' }), 'all')
+  assert.equal(pure.readScope(null), 'all')
+  assert.equal(pure.writeScope(null, 'provider'), undefined, 'a missing storage must not throw')
+})
+
+test('picker: the menu is scoped and long lists are height-capped instead of overflowing', async () => {
+  const env = pickerBoot()
+  const tree = await openPicker(env)
+  assert.equal(menuProps(tree).className, 'cpl-picker', 'the card carries our scope class')
+  assert.equal(env.styles.length, 1, 'exactly one stylesheet is injected')
+  const sheet = env.styles[0]
+  assert.equal(sheet.id, 'dsh-composer-provider-label-style')
+  assert.ok(sheet.textContent.includes('.cpl-picker [role="menu"] > div:first-child'), 'selector is scoped')
+  assert.ok(sheet.textContent.includes('overflow-y: auto'), 'the list scrolls')
+  assert.match(sheet.textContent, /max-height: 224px/)
+  assert.match(sheet.textContent, /overflow-y: auto/)
+  env.rerender(compProps('s1', projectionOf(SESS)))
+  env.rerender(compProps('s1', projectionOf(SESS)))
+  assert.equal(env.styles.length, 1, 're-rendering never injects a second sheet')
+})
+
+test('pure: the list cap fits five dense rows plus the back row', () => {
+  const env = boot()
+  const pure = env.window.__cpl.pure
+  const ROW = 34 // dense menu row height
+  assert.ok(pure.LIST_MAX_HEIGHT >= 5 * ROW, 'at least five model rows stay visible')
+  assert.ok(pure.LIST_MAX_HEIGHT <= 5 * ROW + ROW + 9 + 8 + 4, 'the cap stays near five rows')
+  assert.equal(pure.PICKER_CLASS, 'cpl-picker')
+})
+// --- capability audit (spec: write scope limited to model selection) --------
+
+test('capability audit: the only state-changing call is session.selectModel', () => {
   const clientSource = fs.readFileSync(bundlePath, 'utf8')
   const nodeSource = fs.readFileSync(indexPath, 'utf8')
-  // Every session remote that changes session/model state; a display-only
-  // plugin must never reach any of them. `modelCatalog` (read) is allowed.
+  // Whitelisted write: exactly one call site, inside the picker's write path.
+  const codeOnly = clientSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const writeCalls = codeOnly.match(/\.selectModel\(/g) || []
+  assert.equal(writeCalls.length, 1, 'exactly one selectModel call site')
+  // Every other state-changing session remote stays forbidden.
   const forbidden = [
-    'selectModel', 'session/selectModel', 'updateQueue', 'prompt(', 'rename(',
+    'session/selectModel', 'updateQueue', 'prompt(', 'rename(',
     'fork(', 'create(', 'attachment(', 'cancel(', 'control(', 'rewind(', 'follow(',
   ]
   for (const token of forbidden) {
