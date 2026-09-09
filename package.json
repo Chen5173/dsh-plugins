@@ -1,7 +1,7 @@
 {
   "name": "dsh-local-plugins",
   "version": "0.1.0",
-  "description": "Umbrella bundle for all locally-developed DSH plugins in this monorepo. Install once via `dsh plugin --profile <name> add <this dir>`: one profile dependency + one bundle layer activates every plugin below. Adding a plugin = add its folder here, one dependency row below and one insert row in ./cordis.patch.yml — the profile is never touched again.",
+  "description": "DEPRECATED (retired 2026-09-09) umbrella bundle of this monorepo — superseded by dsh-plugin-manager. Historical reference only: do NOT install this as a profile bundle and do NOT add new plugin rows/dependencies here. The manager (one profile dependency + one bundle layer) scans the repo root and keeps each dsh-* sibling's activation row in the profile's own cordis.patch.yml (live HMR). Kept in place so old backups/profiles can still resolve it; the dependency rows below are the historical roster.",
   "private": true,
   "type": "module",
   "dsh": {

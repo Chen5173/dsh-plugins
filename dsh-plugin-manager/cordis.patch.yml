@@ -1,0 +1,7 @@
+# dsh-plugin-manager bundle layer: inserts the manager's own row only.
+# The plugins it manages are NOT rows here — their activation rows live in the
+# profile's cordis.patch.yml, maintained by this manager (so toggles apply live
+# via DSH's patch HMR instead of at boot only).
+- insert:
+    - id: dsh-plugin-manager
+      name: 'dsh-plugin-manager'
