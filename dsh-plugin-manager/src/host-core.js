@@ -307,17 +307,32 @@ export function mergeIntent(intents, intent) {
 }
 
 /**
+ * 功能作用：把多条「目标开关状态」一次套用到 patch 行上（批量开关的单次落盘用）。
+ * 参数：
+ *   rows: Array -- 已解析的 patch 行数组，例如 [{ insert: [{ id: 'aaa', name: 'dsh-aaa' }] }]
+ *   entries: Array -- 多个 { id, name, enabled } 意图，例如 [{ id: 'aaa', name: 'dsh-aaa', enabled: false }]
+ * 返回值：
+ *   Array -- 新的行数组（不修改入参）；逐条语义与 upsertManaged 完全一致
+ * 调用样例：
+ *   const next = upsertManagedMany(rows, targets.map((t) => ({ id: t.rowId, name: t.name, enabled: false })))
+ */
+export function upsertManagedMany(rows, entries) {
+  let out = rows
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (!e || typeof e.id !== 'string' || e.id === '') continue
+    out = upsertManaged(out, e.id, e.name || e.id, e.enabled !== false)
+  }
+  return out
+}
+
+/**
  * Apply pending intents onto parsed patch rows (pure). An empty list is the
  * identity transform; unknown ids become new canonical insert items, so a
  * queued intent is exactly what a later flush writes.
+ * (Thin alias of upsertManagedMany — one implementation, two readings of it.)
  */
 export function applyIntents(rows, intents) {
-  let out = rows
-  for (const it of Array.isArray(intents) ? intents : []) {
-    if (!it || typeof it.id !== 'string' || it.id === '') continue
-    out = upsertManaged(out, it.id, it.name || it.id, it.enabled !== false)
-  }
-  return out
+  return upsertManagedMany(rows, intents)
 }
 
 /** Drop plain override rows (non-insert) whose id is in the given set. */
@@ -378,6 +393,93 @@ export function deriveStates({ repoPlugins, manifest, rows }) {
       state,
     }
   })
+}
+
+// --- batch switch planning (全部开启 / 全部关闭) ------------------------------
+
+/**
+ * 批量跳过原因的机器可读取值（宿主逐项回报与面板文案共用同一套词表）。
+ */
+export const BATCH_REASONS = {
+  alreadyActive: 'already-active',
+  alreadyDisabled: 'already-disabled',
+  inactiveDepOnly: 'inactive-dep-only',
+  notInstalled: 'not-installed',
+  legacyLayout: 'legacy-layout',
+  invalidDir: 'invalid-dir',
+  /** 兜底：出现了 deriveStates 之外的未知状态。 */
+  unsupportedState: 'unsupported-state',
+}
+
+/**
+ * 功能作用：按面板派生状态算出一次批量动作的目标集与跳过集（纯函数；宿主执行与面板按钮计数共用同一口径，
+ *           避免「按钮写 6 实际只动 4」）。
+ * 参数：
+ *   derived: Array -- deriveStates() 的结果，例如 [{ dir, rowId, name, state: 'active', valid: true, ... }]
+ *   enabled: boolean -- true=全部开启（disabled + uninstalled），false=全部关闭（仅 active）
+ * 返回值：
+ *   { targets: [{ dir, rowId, name, hasClient, state, dirPath, needsInstall }], skipped: [{ dir, name, reason }], count: number }
+ *   例：batchPlan(states, false) → { targets: [6 个 active], skipped: [legacy/invalid/inactive 项], count: 6 }
+ * 调用样例：
+ *   const plan = batchPlan(s.derived, false); if (plan.count === 0) return noop()
+ */
+export function batchPlan(derived, enabled) {
+  const list = Array.isArray(derived) ? derived : []
+  const open = enabled !== false
+  const targets = []
+  const skipped = []
+  const skip = (p, reason) => skipped.push({
+    dir: p.dir,
+    name: p.name || p.dir,
+    hasClient: Boolean(p.hasClient),
+    reason,
+  })
+
+  for (const p of list) {
+    if (!p || typeof p.dir !== 'string' || p.dir === '') continue
+    const state = p.state
+    if (!p.valid || state === 'invalid') { skip(p, BATCH_REASONS.invalidDir); continue }
+    if (state === 'legacy' || p.legacyBundle === true) { skip(p, BATCH_REASONS.legacyLayout); continue }
+    if (open) {
+      // 开启方向：只动「已有行但停用」与「从未安装」两类；已激活无事可做，
+      // 「未激活(仅依赖)」按约定不凭空补行。
+      if (state === 'disabled' || state === 'uninstalled') {
+        targets.push({
+          dir: p.dir,
+          rowId: p.rowId,
+          name: p.name || p.dir,
+          hasClient: Boolean(p.hasClient),
+          dirPath: p.dirPath,
+          state,
+          needsInstall: state === 'uninstalled',
+        })
+        continue
+      }
+      if (state === 'active') { skip(p, BATCH_REASONS.alreadyActive); continue }
+      if (state === 'inactive') { skip(p, BATCH_REASONS.inactiveDepOnly); continue }
+      skip(p, BATCH_REASONS.unsupportedState)
+      continue
+    }
+    // 关闭方向：只写「已激活」的行；其余保持原样。
+    if (state === 'active') {
+      targets.push({
+        dir: p.dir,
+        rowId: p.rowId,
+        name: p.name || p.dir,
+        hasClient: Boolean(p.hasClient),
+        dirPath: p.dirPath,
+        state,
+        needsInstall: false,
+      })
+      continue
+    }
+    if (state === 'disabled') { skip(p, BATCH_REASONS.alreadyDisabled); continue }
+    if (state === 'inactive') { skip(p, BATCH_REASONS.inactiveDepOnly); continue }
+    if (state === 'uninstalled') { skip(p, BATCH_REASONS.notInstalled); continue }
+    skip(p, BATCH_REASONS.unsupportedState)
+  }
+
+  return { enabled: open, targets, skipped, count: targets.length }
 }
 
 // --- migration planning ------------------------------------------------------

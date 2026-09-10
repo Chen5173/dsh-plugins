@@ -34,6 +34,9 @@ import {
   INTENT_DEBOUNCE_MS,
   mergeIntent,
   applyIntents,
+  upsertManagedMany,
+  batchPlan,
+  BATCH_REASONS,
 } from '../src/host-core.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -352,6 +355,115 @@ function samplePlugins(root) {
   const fresh = applyIntents(rows, [{ id: 'ccc', name: 'dsh-ccc', enabled: true }])
   assert.equal(fresh.length, 2, 'an intent for an unknown row becomes a new canonical insert item')
   assert.deepEqual(fresh[1].insert[0], { id: 'ccc', name: 'dsh-ccc' })
+}
+
+// --- batch switch planning (全部开启 / 全部关闭) ------------------------------
+
+{
+  const repo = path.join(tmpRoot, 'batch')
+  fs.mkdirSync(repo, { recursive: true })
+  writeRepo(repo, ['dsh-aaa', 'dsh-bbb', 'dsh-ccc', 'dsh-ddd', 'dsh-old'])
+  fs.mkdirSync(path.join(repo, 'dsh-notreal'), { recursive: true }) // no package.json → invalid
+  const plugins = listRepoPluginDirs(repo).map((d) => readPluginMeta(repo, d))
+
+  // 一份刻意混合的现场：aaa 已激活、bbb 已停用（有行）、ccc 仅依赖（无行）、
+  // ddd 从未安装（无行无依赖）、old 旧布局（bundles + 依赖）、notreal 非插件目录。
+  const manifest = {
+    dependencies: {
+      'dsh-aaa': 'link:./dsh-aaa',
+      'dsh-bbb': 'link:./dsh-bbb',
+      'dsh-ccc': 'link:./dsh-ccc',
+      'dsh-old': 'link:./dsh-old',
+    },
+    dsh: { profile: { bundles: ['dsh-old'] } },
+  }
+  const rows = [
+    { insert: [{ id: 'aaa', name: 'dsh-aaa' }] },
+    { insert: [{ id: 'bbb', name: 'dsh-bbb', disabled: true }] },
+  ]
+  const states = deriveStates({ repoPlugins: plugins, manifest, rows })
+  const byDir = Object.fromEntries(states.map((s) => [s.dir, s.state]))
+  assert.deepEqual(byDir, {
+    'dsh-aaa': 'active',
+    'dsh-bbb': 'disabled',
+    'dsh-ccc': 'inactive',
+    'dsh-ddd': 'uninstalled',
+    'dsh-notreal': 'invalid',
+    'dsh-old': 'legacy',
+  }, 'fixture covers all six states')
+
+  // 全部开启：只动「已停用」与「未安装」，其余全部跳过。
+  const on = batchPlan(states, true)
+  assert.equal(on.count, 2, 'enable counts disabled + not-installed only')
+  assert.deepEqual(on.targets.map((t) => [t.dir, t.state, t.needsInstall]), [
+    ['dsh-bbb', 'disabled', false],
+    ['dsh-ddd', 'uninstalled', true],
+  ])
+  const onSkip = Object.fromEntries(on.skipped.map((s) => [s.dir, s.reason]))
+  assert.deepEqual(onSkip, {
+    'dsh-aaa': BATCH_REASONS.alreadyActive,
+    'dsh-ccc': BATCH_REASONS.inactiveDepOnly,
+    'dsh-notreal': BATCH_REASONS.invalidDir,
+    'dsh-old': BATCH_REASONS.legacyLayout,
+  }, 'skipped rows carry machine-readable reasons')
+  assert.ok(on.targets.every((t) => t.valid !== false), 'invalid dirs never become targets')
+
+  // 全部关闭：只动「已激活」；不给从未启用过的插件凭空补行。
+  const off = batchPlan(states, false)
+  assert.equal(off.count, 1, 'disable counts active only')
+  assert.deepEqual(off.targets.map((t) => [t.dir, t.needsInstall]), [['dsh-aaa', false]])
+  const offSkip = Object.fromEntries(off.skipped.map((s) => [s.dir, s.reason]))
+  assert.deepEqual(offSkip, {
+    'dsh-bbb': BATCH_REASONS.alreadyDisabled,
+    'dsh-ccc': BATCH_REASONS.inactiveDepOnly,
+    'dsh-ddd': BATCH_REASONS.notInstalled,
+    'dsh-notreal': BATCH_REASONS.invalidDir,
+    'dsh-old': BATCH_REASONS.legacyLayout,
+  })
+
+  // 纯函数：不改输入，容忍空/非法入参。
+  assert.equal(states.length, 6, 'batchPlan does not modify its input')
+  assert.deepEqual(batchPlan([], true), { enabled: true, targets: [], skipped: [], count: 0 })
+  assert.equal(batchPlan(undefined, false).count, 0)
+  assert.equal(batchPlan([{ dir: 'dsh-weird', name: 'dsh-weird', valid: true, state: 'who-knows' }], true).targets.length, 0)
+  assert.equal(batchPlan([{ dir: 'dsh-weird', name: 'dsh-weird', valid: true, state: 'who-knows' }], true).skipped[0].reason, BATCH_REASONS.unsupportedState)
+
+  // 全部已激活 → 关闭 N=6、开启 N=0（按钮置灰的判据）。
+  const allActive = deriveStates({
+    repoPlugins: plugins.filter((p) => p.dir !== 'dsh-notreal' && p.dir !== 'dsh-old'),
+    manifest: { dependencies: { 'dsh-aaa': 'x', 'dsh-bbb': 'x', 'dsh-ccc': 'x', 'dsh-ddd': 'x' } },
+    rows: ['aaa', 'bbb', 'ccc', 'ddd'].map((id) => ({ insert: [{ id, name: `dsh-${id}` }] })),
+  })
+  assert.equal(batchPlan(allActive, false).count, 4)
+  assert.equal(batchPlan(allActive, true).count, 0, 'nothing to enable when everything is active')
+}
+
+// --- one-pass row transform for a batch --------------------------------------
+
+{
+  const rows = [
+    { id: 'dsh-liquid-glass', disabled: false },
+    { insert: [{ id: 'mcp-CodeMap', name: '@deepseek-ai/dsh-mcp-client' }] },
+    { insert: [{ id: 'aaa', name: 'dsh-aaa' }] },
+    { insert: [{ id: 'bbb', name: 'dsh-bbb', disabled: true }] },
+  ]
+  const entries = [
+    { id: 'aaa', name: 'dsh-aaa', enabled: false },
+    { id: 'bbb', name: 'dsh-bbb', enabled: true },
+    { id: 'ccc', name: 'dsh-ccc', enabled: true }, // brand-new row
+  ]
+  const batch = upsertManagedMany(rows, entries)
+  const sequential = entries.reduce((acc, e) => upsertManaged(acc, e.id, e.name, e.enabled), rows)
+  assert.deepEqual(batch, sequential, 'batch transform equals step-by-step upsertManaged')
+  assert.equal(findRow(batch, 'aaa').item.disabled, true)
+  assert.equal('disabled' in findRow(batch, 'bbb').item, false)
+  assert.deepEqual(findRow(batch, 'ccc').item, { id: 'ccc', name: 'dsh-ccc' })
+  assert.equal(findRow(batch, 'mcp-CodeMap').item.name, '@deepseek-ai/dsh-mcp-client', 'foreign rows untouched')
+  assert.equal(batch.some((r) => r.id === 'dsh-liquid-glass'), true, 'plain override rows untouched')
+  assert.equal('disabled' in rows[2].insert[0], false, 'input rows are never mutated')
+  assert.equal(rows[3].insert[0].disabled, true, 'other input rows keep their own state')
+  assert.deepEqual(upsertManagedMany(rows, []), rows, 'empty batch = identity')
+  assert.deepEqual(upsertManagedMany(rows, undefined), rows, 'missing batch = identity')
 }
 
 // --- yaml engine with a real parser is constructible (js-yaml optional) ------

@@ -1,16 +1,21 @@
 # dsh-plugin-manager
 
-**本地插件管理器**：只安装这一个 bundle，就能在 DSH Web 设置页的「本地插件」面板里，管理本仓库（`dsh-plugins` monorepo）内的**全部 `dsh-*` 子插件**（`sub-plugins/` 与仓库根两个扫描根的并集）——查看激活状态、开关（激活/停用）、移除、以及把旧的「逐个 `dsh plugin add` + dependencies/bundles」布局**一键迁移**到管理器模型。
+**本地插件管理器**：只安装这一个 bundle，就能在 DSH Web 设置页的「本地插件」面板里，管理本仓库（`dsh-plugins` monorepo）内的**全部 `dsh-*` 子插件**（`sub-plugins/` 与仓库根两个扫描根的并集）——查看激活状态、逐个或**一键批量**开关（激活/停用）、移除、以及把旧的「逐个 `dsh plugin add` + dependencies/bundles」布局**一键迁移**到管理器模型。
 
-它取代了仓库根的聚合伞包 `dsh-local-plugins`（**2026-09-10 已物理删除**，含根 `package.json` 与根 `cordis.patch.yml`）与「每加一个插件就手工 `dsh plugin add`、改两处清单」的流程。子插件包自同日起也**不再声明 `dsh.bundle`**、不再带包自带 `cordis.patch.yml` —— 安装路径只有「管理器面板」一条（原因见下）。
+它取代了仓库根的聚合伞包 `dsh-local-plugins`（**2026-09-10 已物理删除**，含旧的根清单与聚合 `cordis.patch.yml`）与「每加一个插件就手工 `dsh plugin add`、改两处清单」的流程；仓库根现在只有**本管理器的安装外壳**（同名转发，见「安装」）。子插件包自同日起也**不再声明 `dsh.bundle`**、不再带包自带 `cordis.patch.yml` —— 安装路径只有「管理器面板」一条（原因见下）。
 
 ## 安装（一次）
 
 ```bash
-dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
-# 或相对路径：
+# 推荐：装仓库根 —— 根 package.json 就是本管理器的「安装外壳」
+dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins
+# 等价写法（直接装包目录，路径换盘/换目录时用）：
 dsh plugin --profile web add ./dsh-plugin-manager
 ```
+
+两条命令**完全等价**：都让 `dsh-plugin-manager` 进入 profile `dependencies`（`link:`）与 `dsh.profile.bundles`，激活行 id 相同，互相替换不产生第二个 bundle 层或第二行（隔离 profile 实测）。
+
+> 为什么根清单要与本包**同名**：包名就是插件身份 —— profile bundle 层名、激活行 id、浏览器模块表 id 都是它。客户端产物里 `window.__ModuleLoader__.load({ id: 'dsh-plugin-manager' })` 是写死的，而 DSH 的客户端模块系统按「离行入口文件最近的、名字等于该行 specifier 的 manifest」定位包，所以外壳必须同名、且同时转发 `main`/`exports["./client"]`/`dsh.bundle.patch` 到本包。源码、测试、patch、README/ACCEPTANCE 都在 `dsh-plugin-manager/`，外壳不含被复制的代码。
 
 然后**重启 `dsh web`**（新 bundle 层在启动时装载），打开设置页 → 左侧出现「本地插件」入口。
 
@@ -23,12 +28,25 @@ dsh plugin --profile web add ./dsh-plugin-manager
 | 唯一本地 bundle | profile `dsh.profile.bundles` | 只保留 `dsh-plugin-manager` 一个本地条目 |
 | 子插件可解析 | profile `devDependencies`（`link:` 到 `sub-plugins/<子包>` 的绝对路径） | pnpm 安装后从 profile `node_modules` 解析；子插件包**不声明 `dsh.bundle`**（2026-09-10 起），所以 `dsh plugin` 的 reconcile 在任何路径下都**不会**把它们塞进 bundles |
 | 激活清单（真相源） | profile `cordis.patch.yml` 中由管理器维护的稳定 id 行 | `- insert: [{ id: <rowId>, name: '<pkg>' }]`，停用=行内 `disabled: true`；该文件被 DSH 的 patch HMR **实时热重载**，宿主行为即时启停 |
-| 面板 | 设置页一级入口「本地插件」（`settings.section`，order 16） | 行 = 状态点 + 包名/目录 + 描述 + 主开关 + 移除；顶部 = 仓库路径 / 子插件目录 / 目标 profile / 刷新 / 一键迁移 |
+| 面板 | 设置页一级入口「本地插件」（`settings.section`，order 16） | 行 = 状态点 + 包名/目录 + 描述 + 主开关 + 移除；顶部 = 仓库路径 / 子插件目录 / 目标 profile / **全部开启·全部关闭** / 刷新 / 一键迁移 |
 
 - **启用**：自动补 `devDependencies` 的 `link:`（必要时跑 `pnpm install`）→ 写激活行 → 实时生效。
 - **停用**：行保留、写 `disabled: true` → 实时停止宿主行为。
 - **移除**：删激活行 + 从 `devDependencies` 摘除该 `link:`（仓库里的源码目录**保留**，随时可再启用）。
 - **生效提示**：带浏览器界面的子插件，其客户端 UI 只在**页面刷新**后进/出 `__DSH_BOOT__` 引导图——开关后宿主侧即时变化，面板会提示「刷新页面使界面生效」并提供刷新按钮，**不会自动刷新**。
+- **批量开关**：顶部「全部开启 (N)」/「全部关闭 (N)」，N = 这一步真能改动的子插件数（N=0 时置灰）。
+
+## 批量开关（全部开启 / 全部关闭）
+
+- **作用范围**：只作用于面板列出的受管仓库子插件，**排除管理器自身**；profile 激活清单里其它插件的行（`mcp-*`、`dsh-liquid-glass` …）一行都不碰。
+- **谁能被批量动**：
+  - 全部开启 = `已停用`（去掉行内 `disabled`）+ `未安装`（补 `link:` devDependency、装依赖、写激活行）；
+  - 全部关闭 = `已激活`（写 `disabled: true`，**保留行与依赖**，随时可再开）；
+  - `未激活(仅依赖)`、`旧布局`、`非插件目录` 一律**跳过**（前两类不凭空写行；旧布局请先「一键接管/迁移」，面板会在确认框与结果里点明跳过了几个）。
+- **一次点击 = 一次落盘 + 一次安装**：批量把所有目标（以及仍在 400 ms 合并窗口里的单行点击意图）合并成**一次** `cordis.patch.yml` 写入——即一次核心配置重应用，而不是 N 次；需要为多个未安装子插件补依赖时，先一次写齐全部 `link:` 再跑**一次** `pnpm install`。
+- **失败逐项回报**：尽力而为——安装失败只让「未安装」那部分失败（原因可见、状态不变、可重试），已安装项的开关照常生效；失败项在面板提示条里逐条列出。
+- **执行期锁定**：批量进行中（可能正在装依赖）每行的开关/移除与「一键接管/迁移」都禁用并显示「处理中…」，完成后解锁并提示是否要刷新页面。
+- **不做**：没有撤销按钮（再点另一个按钮即可恢复，但「4 开 2 停」这类混合状态不会被精确还原）、没有「全部移除」、不做旧布局的自动迁移。
 
 ## 目录布局（\`sub-plugins/\`）
 
@@ -52,7 +70,9 @@ dsh plugin --profile web add ./dsh-plugin-manager
 
 ## HTTP 端点（浏览器面板使用）
 
-`/__dsh-plugin-manager/status`（诊断）、`/list`（列表+状态）、`/set-enabled`、`/remove`、`/migrate`。JSON in/out；错误带 `error` 文案与 4xx/5xx。
+`/__dsh-plugin-manager/status`（诊断）、`/list`（列表 + 状态 + 两个批量按钮的 `batchCounts`）、`/set-enabled`、`/set-all-enabled`、`/remove`、`/migrate`。JSON in/out；错误带 `error` 文案与 4xx/5xx。
+
+`POST /set-all-enabled { enabled: boolean }` → `{ ok, data, results, counts, noop?, warning? }`：`results` 逐项给出 `{dir,rowId,name,hasClient,outcome:'applied'|'skipped'|'failed',reason?,error?}`，`counts` 给出 `{total,applied,skipped,failed,installed,ranPnpm,wrotePatch}`；`/status` 的 `lastBatch` 记录最近一次批量结果。
 
 ## 回滚 / 卸载
 
@@ -76,6 +96,7 @@ dsh plugin --profile web remove dsh-plugin-manager
 node dsh-plugin-manager/test/host-core.test.mjs   # 宿主纯逻辑（扫描/行变换/状态/迁移规划/意图合并）
 node dsh-plugin-manager/test/bundle.test.mjs      # 客户端注册与面板逻辑（React shim + fetch stub）
 node dsh-plugin-manager/test/debounce.test.mjs    # 真 handler + 临时 DSH_HOME：连点只写一次 patch
+node dsh-plugin-manager/test/batch-toggle.test.mjs # 真 handler + 临时 DSH_HOME：批量一次落盘 + 一次安装 + 逐项失败回报
 ```
 
 真机验收项（需浏览器与真实 profile）见 `ACCEPTANCE.md`。

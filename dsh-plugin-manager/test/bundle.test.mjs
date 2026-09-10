@@ -35,20 +35,29 @@ Object.defineProperty(globalThis, 'navigator', {
 const factories = new Map()
 const fetchCalls = []
 const confirms = []
+let confirmAnswer = true
 let reloaded = false
 const windowObj = {
   __DSH_TEST__: true,
   location: { reload: () => { reloaded = true } },
-  confirm: (msg) => { confirms.push(msg); return true },
+  confirm: (msg) => { confirms.push(msg); return confirmAnswer },
 }
 windowObj.__ModuleLoader__ = { load: ({ id, factory }) => factories.set(id, factory) }
 globalThis.window = windowObj
 globalThis.document = { addEventListener() {}, removeEventListener() {} }
 
 // Stateful server stub the bundle's `fetch` parameter talks to.
+const BATCH_COUNTS = () => ({
+  enable: { count: 1, needsInstall: 1, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+  disable: { count: 1, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+})
 const state = {
   legacyDetected: false,
   pendingWrites: 0,
+  batchCounts: BATCH_COUNTS(),
+  batchResults: null,
+  holdBatch: false,
+  releaseBatch: null,
   plugins: [
     { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false },
     { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'uninstalled', active: false, legacyBundle: false },
@@ -56,7 +65,7 @@ const state = {
   ],
 }
 function payload() {
-  return { ok: true, data: { repoRoot: 'D:/repo', pluginsRoot: 'D:/repo/sub-plugins', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins } }
+  return { ok: true, data: { repoRoot: 'D:/repo', pluginsRoot: 'D:/repo/sub-plugins', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins, batchCounts: state.batchCounts } }
 }
 async function fetchStub(url, opts) {
   fetchCalls.push({ url, opts })
@@ -72,6 +81,29 @@ async function fetchStub(url, opts) {
       p.state = p.active ? 'active' : 'disabled'
     }
     return { ok: true, json: async () => payload() }
+  }
+  if (url === '/__dsh-plugin-manager/set-all-enabled') {
+    const body = JSON.parse((opts && opts.body) || '{}')
+    const enabled = body.enabled !== false
+    const respond = () => {
+      state.plugins = state.plugins.map((p) => (p.state === 'invalid' ? p : { ...p, active: enabled, state: enabled ? 'active' : 'disabled' }))
+      const res = payload()
+      const results = state.batchResults || []
+      res.results = results
+      res.counts = {
+        total: results.length,
+        applied: results.filter((r) => r.outcome === 'applied').length,
+        skipped: results.filter((r) => r.outcome === 'skipped').length,
+        failed: results.filter((r) => r.outcome === 'failed').length,
+        installed: 0,
+        ranPnpm: false,
+        wrotePatch: true,
+      }
+      return { ok: true, json: async () => res }
+    }
+    // Deferred mode lets a test observe the panel while the batch is in flight.
+    if (state.holdBatch) return new Promise((resolve) => { state.releaseBatch = () => resolve(respond()) })
+    return respond()
   }
   if (url === '/__dsh-plugin-manager/remove') {
     const body = JSON.parse((opts && opts.body) || '{}')
@@ -349,6 +381,199 @@ test('legacy rows show migrate banner; migrate asks confirmation', async () => {
   ]
 })
 
+// --- batch switch (全部开启 / 全部关闭) -------------------------------------
+
+test('batch toolbar renders both buttons with the host-provided counts', async () => {
+  fetchCalls.length = 0
+  state.batchCounts = BATCH_COUNTS()
+  state.batchResults = null
+  state.plugins = [
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'uninstalled', active: false, legacyBundle: false },
+    { dir: 'dsh-bad', rowId: 'bad', name: 'dsh-bad', description: '', valid: false, state: 'invalid', active: false, legacyBundle: false },
+  ]
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  const tree = section()
+  const enableBtn = byType(tree, 'button').find((b) => /全部开启/.test(textOf(b)))
+  const disableBtn = byType(tree, 'button').find((b) => /全部关闭/.test(textOf(b)))
+  assert.ok(enableBtn && disableBtn, 'both batch buttons render in the toolbar')
+  assert.equal(textOf(enableBtn), '全部开启 (1)', 'count comes from /list batchCounts, not from the panel')
+  assert.equal(textOf(disableBtn), '全部关闭 (1)')
+  assert.ok(!enableBtn.props.disabled && !disableBtn.props.disabled)
+
+  // N = 0 → greyed out, so an empty batch can never be fired.
+  state.batchCounts = {
+    enable: { count: 0, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+    disable: { count: 0, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+  }
+  const section2 = mountSection()
+  fresh()
+  section2()
+  await flush()
+  begin()
+  const tree2 = section2()
+  const enable2 = byType(tree2, 'button').find((b) => /全部开启/.test(textOf(b)))
+  const disable2 = byType(tree2, 'button').find((b) => /全部关闭/.test(textOf(b)))
+  assert.equal(textOf(enable2), '全部开启 (0)')
+  assert.ok(enable2.props.disabled, 'enable-all is greyed out at N=0')
+  assert.ok(disable2.props.disabled, 'disable-all is greyed out at N=0')
+  state.batchCounts = BATCH_COUNTS()
+})
+
+test('全部关闭 confirms with the count, posts the batch endpoint and hints a reload', async () => {
+  fetchCalls.length = 0
+  confirms.length = 0
+  reloaded = false
+  confirmAnswer = true
+  state.batchResults = [
+    { dir: 'dsh-aaa', name: 'dsh-aaa', hasClient: true, outcome: 'applied', reason: null },
+    { dir: 'dsh-bbb', name: 'dsh-bbb', hasClient: true, outcome: 'applied', reason: null },
+    { dir: 'dsh-old', name: 'dsh-old', hasClient: false, outcome: 'skipped', reason: 'legacy-layout' },
+  ]
+  state.batchCounts = {
+    enable: { count: 1, needsInstall: 1, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+    disable: { count: 2, needsInstall: 0, skippedLegacy: 1, skippedInactive: 0, skippedInvalid: 1 },
+  }
+  state.plugins = [
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'uninstalled', active: false, legacyBundle: false },
+    { dir: 'dsh-bad', rowId: 'bad', name: 'dsh-bad', description: '', valid: false, state: 'invalid', active: false, legacyBundle: false },
+  ]
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  const btn = byType(section(), 'button').find((b) => /全部关闭/.test(textOf(b)))
+  assert.equal(textOf(btn), '全部关闭 (2)')
+  btn.props.onClick()
+  await flush()
+  await flush()
+  assert.equal(confirms.length, 1, 'the batch asks for confirmation exactly once')
+  assert.match(confirms[0], /2/, 'the confirmation carries the affected count')
+  assert.match(confirms[0], /旧布局/, 'the confirmation warns about skipped legacy rows')
+  const calls = fetchCalls.filter((c) => c.url === '/__dsh-plugin-manager/set-all-enabled')
+  assert.equal(calls.length, 1)
+  assert.equal(JSON.parse(calls[0].opts.body).enabled, false)
+  begin()
+  const after = textOf(section())
+  assert.match(after, /已停用 2 个本地插件/, 'notice reports how many rows were disabled')
+  assert.match(after, /旧布局/, 'the legacy skip is surfaced in the notice too')
+  assert.match(after, /刷新页面使界面生效/, 'a client plugin was touched → reload hint')
+  assert.equal(reloaded, false, 'never auto-reloads')
+  state.batchResults = null
+  state.batchCounts = BATCH_COUNTS()
+})
+
+test('cancelling the batch confirmation sends nothing', async () => {
+  fetchCalls.length = 0
+  confirms.length = 0
+  confirmAnswer = false
+  state.plugins = [
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'uninstalled', active: false, legacyBundle: false },
+    { dir: 'dsh-bad', rowId: 'bad', name: 'dsh-bad', description: '', valid: false, state: 'invalid', active: false, legacyBundle: false },
+  ]
+  state.batchCounts = {
+    enable: { count: 1, needsInstall: 1, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+    disable: { count: 1, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+  }
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  byType(section(), 'button').find((b) => /全部关闭/.test(textOf(b))).props.onClick()
+  await flush()
+  assert.equal(confirms.length, 1)
+  assert.equal(fetchCalls.filter((c) => c.url.indexOf('set-all-enabled') >= 0).length, 0, 'cancel sends no request')
+  confirmAnswer = true
+  state.batchCounts = BATCH_COUNTS()
+})
+
+test('the panel locks rows and migrate while a batch is still in flight', async () => {
+  fetchCalls.length = 0
+  confirms.length = 0
+  confirmAnswer = true
+  state.legacyDetected = true
+  state.holdBatch = true
+  state.releaseBatch = null
+  state.plugins = [
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'uninstalled', active: false, legacyBundle: false },
+    { dir: 'dsh-bad', rowId: 'bad', name: 'dsh-bad', description: '', valid: false, state: 'invalid', active: false, legacyBundle: false },
+  ]
+  state.batchCounts = {
+    enable: { count: 1, needsInstall: 1, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+    disable: { count: 1, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+  }
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  byType(section(), 'button').find((b) => /全部关闭/.test(textOf(b))).props.onClick()
+  await flush()
+  begin()
+  const during = section()
+  assert.match(textOf(during), /处理中…/, 'the batch button reports progress while in flight')
+  const switches = walk(during, (n) => n.props && n.props.role === 'switch')
+  assert.ok(switches.length >= 1)
+  assert.ok(switches.every((s) => s.props.disabled), 'every row switch is locked during the batch')
+  const migrateBtn = byType(during, 'button').find((b) => /一键接管/.test(textOf(b)))
+  assert.ok(migrateBtn && migrateBtn.props.disabled, 'migrate is locked during the batch too')
+  state.releaseBatch()
+  await flush()
+  await flush()
+  begin()
+  const after = section()
+  assert.doesNotMatch(textOf(after), /处理中…/, 'lock is released once the batch settles')
+  assert.ok(walk(after, (n) => n.props && n.props.role === 'switch').every((s) => !s.props.disabled))
+  state.holdBatch = false
+  state.releaseBatch = null
+  state.legacyDetected = false
+  state.batchCounts = BATCH_COUNTS()
+})
+
+test('batch failures are listed per plugin in the notice', async () => {
+  fetchCalls.length = 0
+  confirms.length = 0
+  confirmAnswer = true
+  state.batchCounts = {
+    enable: { count: 1, needsInstall: 1, skippedLegacy: 0, skippedInactive: 0, skippedInvalid: 1 },
+    disable: { count: 0, needsInstall: 0, skippedLegacy: 0, skippedInactive: 0, skippedInvalid: 1 },
+  }
+  state.batchResults = [
+    { dir: 'dsh-aaa', name: 'dsh-aaa', hasClient: true, outcome: 'applied', reason: null },
+    { dir: 'dsh-bbb', name: 'dsh-bbb', hasClient: true, outcome: 'failed', reason: 'install-failed', error: 'registry unreachable' },
+  ]
+  state.plugins = [
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'uninstalled', active: false, legacyBundle: false },
+    { dir: 'dsh-bad', rowId: 'bad', name: 'dsh-bad', description: '', valid: false, state: 'invalid', active: false, legacyBundle: false },
+  ]
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  byType(section(), 'button').find((b) => /全部开启/.test(textOf(b))).props.onClick()
+  await flush()
+  await flush()
+  begin()
+  const after = textOf(section())
+  assert.match(after, /已开启 1 个本地插件/)
+  assert.match(after, /失败 1 项/)
+  assert.match(after, /dsh-bbb/, 'the failing plugin is named')
+  assert.match(after, /registry unreachable/, 'the failure reason is shown, not just a count')
+  state.batchResults = null
+  state.batchCounts = BATCH_COUNTS()
+})
+
 test('pure helper exports map every state', () => {
   factoryApi()
   const t = windowObj.__dshPluginManagerTest
@@ -360,6 +585,17 @@ test('pure helper exports map every state', () => {
   assert.equal(t.stateText('inactive'), '未激活(仅依赖)')
   assert.equal(t.stateText('invalid'), '非插件目录')
   assert.equal(t.API, '/__dsh-plugin-manager')
+  // Client-side fallback counter (used only when an older host half sends no batchCounts).
+  const counts = t.localBatchCounts([
+    { dir: 'a', valid: true, state: 'active' },
+    { dir: 'b', valid: true, state: 'disabled' },
+    { dir: 'c', valid: true, state: 'uninstalled' },
+    { dir: 'd', valid: true, state: 'inactive' },
+    { dir: 'e', valid: true, state: 'legacy' },
+    { dir: 'f', valid: false, state: 'invalid' },
+  ])
+  assert.deepEqual(counts.enable, { count: 2, skippedLegacy: 1, skippedInactive: 1, skippedInvalid: 1 })
+  assert.deepEqual(counts.disable, { count: 1, skippedLegacy: 1, skippedInactive: 1, skippedInvalid: 1 })
 })
 
 // --- run ---------------------------------------------------------------------

@@ -78,3 +78,57 @@
 - [x] 隔离 profile 实测（陈旧布局的红能力对照）：把该子插件塞回 `bundles` → exit 1，报 `dsh: profile bundle "dsh-esc-rewind" declares no dsh.bundle in its package.json`（比改造前的 `duplicate loader entry id` 自解释得多）。
 - [x] 改造前复现（同一隔离手法）：真 bundle 层 + 真 profile 层同 id → `duplicate loader entry id: esc-rewind`，exit 1；改造后该构造已不可能（没有包自带 patch 可被合并）。
 - [x] 需真机：重启 `dsh web` 后 6 个子插件仍正常加载、面板仍显示「已激活」（本次只改 manifest 与文档，未改激活行与依赖）。2026-09-10 重启后实测：`GET /list` → 6 个全 `state=active`、`installWhere=devDependencies`、`valid=true`、`legacyDetected=false`、`yamlError=null`；宿主启动未报 `failed to import loader entry`（行解析不到会让启动直接失败，故无报错即可判为加载正常）。
+
+## A10 批量全部开启 / 全部关闭（2026-09-10）
+
+对照 `openspec/specs/plugin-manager/spec.md`「批量全部开启 / 全部关闭」相关 Requirement（delta 原稿见 `openspec/changes/archive/2026-09-10-add-batch-toggle-all/`）。
+
+### 作用范围与计数口径
+
+- [x] 自动化：`batchPlan` 六态全覆盖——开启方向 = `disabled` + `uninstalled`（后者带 `needsInstall`），关闭方向 = 仅 `active`；`inactive`/`legacy`/`invalid` 一律跳过并带机器可读 reason（host-core.test「batch switch planning」用例，含未知状态的兜底 reason）。
+- [x] 自动化：`N` 口径——全激活时 关闭 N=全部、开启 N=0；混合现场 开启 N=2、关闭 N=1（同上用例）。
+- [x] 自动化：非插件目录不计入 N、也不会成为目标（host-core 用例 + harness 里 `batchCounts.*.skippedInvalid` 断言）。
+- [x] 自动化：不触碰其它插件的行——批量关闭后 `mcp-CodeMap`（insert 行的 config）、`cmhub-mcp-gcp`、`dsh-liquid-glass`（普通覆盖行 `disabled: false`）逐项结构性比对不变，且 profile `package.json` 与操作前逐字节一致（batch-toggle.test 用例 2）。
+- [ ] 需真机：面板上两个按钮显示的数量与真实可作用项一致（重启 `dsh web` 后打开设置 → 本地插件，对照行状态数一遍）。
+
+### 一次落盘、一次安装
+
+- [x] 自动化：批量关闭 N 项 = 对 `cordis.patch.yml` **恰好 1 次** `writeFileSync`（harness 在共享的 `node:fs` 对象上计数，非采样估计），且 N 行 `disabled: true` 在同一次写入里落盘（batch-toggle.test 用例 2）。
+- [x] 自动化：批量开启 N 项同样只写 1 次、且用不着安装时 `ranPnpm=false`（用例 3）。
+- [x] 自动化：两个未安装子插件 → `pnpm` **恰好被调用 1 次**（`install`），两个 `link:` 一次写齐（用例 4）。
+- [x] 自动化：合并窗口内的单行意图被「接管」——先 `set-enabled`（意图仍在队列）再批量，全程只写 1 次文件，最终状态 = 批量语义，`/status.pendingWrites` 归零（用例 7；同一次写入里既有排队意图也有批量目标）。
+- [x] 自动化：无可作用项时不写文件（`noop=true`、写入次数 +0、N 项 `already-active` 逐条回报，用例 6）。
+- [x] 红能力：把批量改回「逐项写文件」→ harness 精确失败在 `batch disable = exactly ONE patch-file write`（actual 7 / expected 1）；把安装改回「逐项安装」→ 精确失败在 `two missing plugins cost exactly ONE pnpm install`（actual 2 / expected 1）。两次演示后均还原代码并复跑全绿（2026-09-10）。
+
+### 失败逐项回报
+
+- [x] 自动化：`pnpm` 失败时未安装项报 `outcome=failed / reason=install-failed` 且带原因文案，已安装项照常落盘（`applied = N-1`），profile `package.json` 逐字节回滚（用例 5）。
+- [x] 自动化：失败项在面板提示条里逐条呈现（插件名 + 原因），不是只给一个失败总数（bundle.test「batch failures are listed per plugin」）。
+- [x] 自动化：写入失败路径走 `write-error` 分支并把 `lastFlushError` 写进诊断（代码路径审查 + `/status` 字段断言）。
+
+### 面板交互与生效提示
+
+- [x] 自动化：两个按钮渲染、N 文案取自 `/list` 的 `batchCounts`、N=0 时两个按钮都 `disabled`（bundle.test「batch toolbar…」）。
+- [x] 自动化：确认框文案含数量与「旧布局跳过」提示；取消则**不发任何请求**（bundle.test 两处断言）。
+- [x] 自动化：批量进行中（响应被挂起）每行开关 + 「一键接管/迁移」全部 `disabled` 且按钮显示「处理中…」，响应返回后自动解锁（bundle.test「the panel locks rows and migrate…」）。
+- [x] 自动化：带 client 的子插件被批量改动后给出「刷新页面使界面生效」提示与刷新按钮，且**不**自动刷新（bundle.test「全部关闭…hints a reload」，`reloaded === false`）。
+- [x] 自动化：旧布局插件在批量中被跳过并逐条回报 `legacy-layout`，`batchCounts.disable.count = N-1`、`skippedLegacy = 1`（batch-toggle.test 用例 8）。
+- [ ] 需真机：点「全部关闭 (6)」→ 确认框 → 全部变「已停用」且只卡顿一次（对照逐行点 6 次的 6 次卡顿）；点「全部开启 (6)」→ 全部回来；面板顶部刷新提示出现，刷新后 6 个子插件界面全部消失/恢复。
+- [ ] 需真机：`dsh --profile web --dump-config` 中 6 行 `disabled: true/false` 与面板一致，且 `mcp-*` 等其它行原样保留。
+- [ ] 需真机：拖一个未安装的子插件目录进 `sub-plugins/`，点「全部开启」→ 只跑一次 `pnpm install`（观察耗时明显短于逐个启用），完成后该插件为「已激活」。
+## A11 仓库根安装外壳与 `add <仓库根>`（2026-09-10）
+
+对照 `openspec/specs/plugin-manager/spec.md`「仓库根提供管理器的安装外壳」（delta 原稿见 `openspec/changes/add-repo-root-install-entry/`）。
+
+- [x] 自动化：`dsh-plugin-manager/test/root-install-shell.test.mjs` —— 外壳 `name` === 管理器包名、`main`/`exports["."]` 转发到 `dsh-plugin-manager/src/index.js`（realpath 比较）、`exports["./client"]` + `dsh.client` 与包内一致、客户端产物注册 id === 包名。
+- [x] 自动化：外壳 `dsh.bundle.patch` 与包内 `cordis.patch.yml` 是同一文件，且该 patch **只有一行**（`id`/`name` 均为 `dsh-plugin-manager`）——伞包事故（多插一行同 id）的回归锁。
+- [x] 自动化：6 个子插件都不声明 `dsh.bundle`、目录内无 `cordis.patch.yml`、不复用管理器包名；仓库根无 `cordis.patch.yml`；外壳不声明任何子插件依赖、无 `dsh.profile.bundles`。
+- [x] 红能力：把外壳 `name` 临时改成 `dsh-local-plugins` → 上述测试 2 条精确判红（`shell name === manager name`、`the bundle registers exactly the package name`），改回后复绿（2026-09-10）。
+- [x] 隔离 profile 实测（`DSH_HOME` 指向临时目录，**未触碰运行中的 web profile**）：`dsh plugin --profile probe add <仓库根>` → `dependencies` = `{"dsh-plugin-manager":"link:<仓库根>"}`、`dsh.profile.bundles` = `["@deepseek-ai/dsh-base","dsh-plugin-manager"]`、**无** `declares no dsh.bundle` 警告（对照改造前：装成 `dsh-plugins` 普通依赖 + 打警告 + bundles 不变）。
+- [x] 隔离 profile 实测：该 profile 启动成功 —— base-only（无 web app、不占端口）进程存活 15 s（`timeout` 124）且零输出，无 `duplicate loader entry id`、无 `Cannot find package`。
+- [x] 隔离 profile 实测：`dsh --profile probe --dump-config` 的组合结果含 `- id: dsh-plugin-manager / name: dsh-plugin-manager`，无任何子插件行。
+- [x] 红能力对照：同 profile 加一行坏行 `{id: bogus, name: 'dsh-nonexistent-xyz'}` → exit 1，报 `failed to import loader entry bogus (dsh-nonexistent-xyz): Cannot find package … imported from <profile dir>`（证明该构造能暴露坏行，且行名解析锚点就是 profile 目录）。
+- [x] 等价性实测：先 `add <仓库根>/dsh-plugin-manager` 再 `add <仓库根>` → 依赖键不变、spec 被改写为仓库根、`dsh.profile.bundles` 仍是同一条（不重复）、启动正常。
+- [x] 浏览器半定位实测：按 `@deepseek-ai/dsh-client-modules` 的两条定位分支（`nearestPackage` / `exports["./package.json"]` 兜底）各跑一遍真实算法，10/10 断言通过：定位包名 `dsh-plugin-manager`、产物 `dsh-plugin-manager/src/client.js`、注册 id === 包名。
+- [ ] 需真机：在自己的机器上执行 `dsh plugin --profile web add <仓库根>`（例如 `E:\GitHubProjects\ChenSir5173\dsh-plugins`）→ 重启 `dsh web` → 设置页出现「本地插件」面板、`GET /list` 6 个子插件状态正常、启动日志无 `duplicate loader entry id` / `Cannot find package`。
+

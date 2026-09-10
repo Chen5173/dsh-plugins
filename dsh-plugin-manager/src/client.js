@@ -44,6 +44,18 @@ window.__ModuleLoader__.load({
       remove: '移除',
       removeConfirm: '将删除激活行并从 devDependencies 摘除该插件（可随时重新启用）。继续？',
       busy: '处理中…',
+      enableAll: '全部开启',
+      disableAll: '全部关闭',
+      workingAll: '处理中…',
+      batchConfirmOn: '将开启全部 {n} 个本地插件（未安装的会先自动装依赖，可能需要几秒到几十秒）。继续？',
+      batchConfirmOff: '将停用全部 {n} 个本地插件（激活行与依赖保留，可随时再开启）。继续？',
+      batchSkipLegacy: '另有 {n} 个插件仍以旧布局安装，会被跳过——请先「一键接管/迁移」。',
+      batchDoneOn: '已开启 {n} 个本地插件',
+      batchDoneOff: '已停用 {n} 个本地插件',
+      batchInstalled: '（其中 {n} 个为新装依赖）',
+      batchFailed: '失败 {n} 项：',
+      enableAllHint: '把本仓库全部受管本地插件打开（未安装的会自动装依赖，只跑一次安装）',
+      disableAllHint: '把本仓库全部受管本地插件停用（保留激活行与依赖，可随时再开启）',
       applying: '正在应用（宿主正在重应用配置树，界面可能短暂无响应）…',
       stateActive: '已激活',
       stateDisabled: '已停用',
@@ -71,6 +83,18 @@ window.__ModuleLoader__.load({
       remove: 'Remove',
       removeConfirm: 'This deletes the activation row and drops the devDependency (can be re-enabled anytime). Continue?',
       busy: 'Working…',
+      enableAll: 'Enable all',
+      disableAll: 'Disable all',
+      workingAll: 'Working…',
+      batchConfirmOn: 'Enable all {n} local plugins (missing ones install their dependency first; this can take a while). Continue?',
+      batchConfirmOff: 'Disable all {n} local plugins (rows and dependencies are kept, re-enable anytime). Continue?',
+      batchSkipLegacy: '{n} plugin(s) still use the legacy layout and will be skipped — migrate first.',
+      batchDoneOn: 'Enabled {n} local plugin(s)',
+      batchDoneOff: 'Disabled {n} local plugin(s)',
+      batchInstalled: ' ({n} newly installed)',
+      batchFailed: '{n} failed: ',
+      enableAllHint: 'Enable every managed local plugin of this repo (missing ones install their dependency first, in a single install pass)',
+      disableAllHint: 'Disable every managed local plugin of this repo (rows and dependencies are kept, re-enable anytime)',
       applying: 'Applying (the host is re-applying its config tree; the UI may briefly stall)…',
       stateActive: 'Active',
       stateDisabled: 'Disabled',
@@ -116,6 +140,8 @@ window.__ModuleLoader__.load({
           : st === 'invalid' ? 'var(--dsw-alias-state-error-primary)'
             : 'var(--dsw-alias-label-tertiary)',
       actions: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' },
+      toolbar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+      toolbarGroup: { display: 'flex', alignItems: 'center', gap: 8 },
       button: { font: 'inherit', cursor: 'pointer', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-1)', border: '.5px solid var(--dsw-alias-border-l3)', borderRadius: 8, padding: '4px 12px', fontSize: 12 },
       buttonPrimary: { background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-3)', border: 'none' },
       buttonDanger: { color: 'var(--dsw-alias-state-error-primary)', borderColor: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent)' },
@@ -139,6 +165,28 @@ window.__ModuleLoader__.load({
       inactive: t('stateInactive'),
       invalid: t('stateInvalid'),
     }[st] || st)
+
+    // 批量按钮上的数量：宿主 /list 已带 batchCounts（权威口径，由 host-core 的
+    // batchPlan 算出）；这里保留一个同规则的本地兜底，只在拿到旧宿主半（没有该
+    // 字段）时使用。规则改动必须与 host-core 的 batchPlan 同步。
+    const localBatchCounts = (plugins) => {
+      const one = (enabled) => {
+        let count = 0
+        let skippedLegacy = 0
+        let skippedInactive = 0
+        let skippedInvalid = 0
+        for (const p of Array.isArray(plugins) ? plugins : []) {
+          if (!p || typeof p.dir !== 'string') continue
+          if (!p.valid || p.state === 'invalid') { skippedInvalid += 1; continue }
+          if (p.state === 'legacy' || p.legacyBundle === true) { skippedLegacy += 1; continue }
+          if (p.state === 'active') { if (!enabled) count += 1; continue }
+          if (p.state === 'disabled' || p.state === 'uninstalled') { if (enabled) count += 1; continue }
+          if (p.state === 'inactive') skippedInactive += 1
+        }
+        return { count, skippedLegacy, skippedInactive, skippedInvalid }
+      }
+      return { enable: one(true), disable: one(false) }
+    }
 
     const API = '/__dsh-plugin-manager'
     // 「应用生效」判据：写请求返回 ≠ 变更已生效。主机把连点合并成一次
@@ -263,8 +311,53 @@ window.__ModuleLoader__.load({
 
       const plugins = (data && data.plugins) || []
       const legacyDetected = data ? data.legacyDetected : false
+      const batchCounts = (data && data.batchCounts) || localBatchCounts(plugins)
 
-      const isBusy = (p) => busy === p.dir || busy === 'migrate'
+      // 批量动作：宿主一次安装 + 一次写入；这里只负责确认、发起与逐项结果呈现。
+      const runBatch = (enabled) => {
+        const info = (enabled ? batchCounts.enable : batchCounts.disable) || { count: 0 }
+        const n = info.count || 0
+        if (n === 0) return
+        let msg = (enabled ? t('batchConfirmOn') : t('batchConfirmOff')).replace('{n}', String(n))
+        if (info.skippedLegacy > 0) msg += `\n${t('batchSkipLegacy').replace('{n}', String(info.skippedLegacy))}`
+        if (typeof window !== 'undefined' && window.confirm && !window.confirm(msg)) return
+        run(API + '/set-all-enabled', { enabled }, enabled ? 'all:on' : 'all:off').then((json) => {
+          if (!json) return
+          const results = json.results || []
+          const counts = json.counts || {}
+          const applied = results.filter((r) => r.outcome === 'applied')
+          const failed = results.filter((r) => r.outcome === 'failed')
+          const skippedLegacy = results.filter((r) => r.outcome === 'skipped' && r.reason === 'legacy-layout').length
+          const lines = [(enabled ? t('batchDoneOn') : t('batchDoneOff')).replace('{n}', String(applied.length))]
+          if (counts.installed > 0) lines[0] += t('batchInstalled').replace('{n}', String(counts.installed))
+          if (skippedLegacy > 0) lines.push(t('batchSkipLegacy').replace('{n}', String(skippedLegacy)))
+          // 带浏览器界面的子插件被改动后，界面要刷新一次才会出现/消失（沿用既有约定，不自动刷新）。
+          if (applied.some((r) => r.hasClient)) {
+            setNeedReload(true)
+            lines.push(t('reload'))
+          }
+          if (failed.length > 0) {
+            lines.push(`${t('batchFailed').replace('{n}', String(failed.length))}${failed.map((f) => `${f.name}（${f.error || f.reason}）`).join('、')}`)
+          }
+          setNotice({ type: failed.length > 0 ? 'err' : 'ok', text: lines.join(' ') })
+        })
+      }
+
+      const batchButton = (enabled) => {
+        const info = (enabled ? batchCounts.enable : batchCounts.disable) || { count: 0 }
+        const n = info.count || 0
+        const label = `${enabled ? t('enableAll') : t('disableAll')} (${n})`
+        // 只有被点的那一个显示「处理中…」，另一个保持置灰可读。
+        const running = busy === (enabled ? 'all:on' : 'all:off')
+        return React.createElement('button', {
+          style: { ...S.button, ...(n === 0 ? S.buttonDisabled : {}) },
+          disabled: Boolean(busy) || n === 0,
+          title: enabled ? t('enableAllHint') : t('disableAllHint'),
+          onClick: () => runBatch(enabled),
+        }, running ? t('workingAll') : label)
+      }
+
+      const isBusy = (p) => busy === p.dir || busy === 'migrate' || (typeof busy === 'string' && busy.indexOf('all') === 0)
 
       return React.createElement('div', { style: S.page },
         React.createElement('h3', { style: S.heading }, t('nav')),
@@ -288,11 +381,12 @@ window.__ModuleLoader__.load({
           React.createElement('span', { style: { flex: 1, fontSize: 13 } }, t('migrateNeed')),
           React.createElement('button', {
             style: { ...S.button, ...S.buttonPrimary },
-            disabled: busy === 'migrate',
+            disabled: Boolean(busy),
             onClick: migrate,
           }, busy === 'migrate' ? t('migrateBusy') : t('migrate')),
         ),
-        React.createElement('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
+        React.createElement('div', { style: S.toolbar },
+          React.createElement('div', { style: S.toolbarGroup }, batchButton(true), batchButton(false)),
           React.createElement('button', { style: S.button, onClick: load, disabled: Boolean(busy) }, t('refresh')),
         ),
         plugins.length === 0
@@ -353,7 +447,7 @@ window.__ModuleLoader__.load({
 
     // Test-only hooks (window.__DSH_TEST__ is set by test/bundle.test.mjs only).
     if (typeof window !== 'undefined' && window.__DSH_TEST__) {
-      window.__dshPluginManagerTest = { stateText, API, NS }
+      window.__dshPluginManagerTest = { stateText, API, NS, localBatchCounts }
     }
 
     return { apply, inject: ['slots'] }

@@ -42,6 +42,8 @@ import {
   YAML_PKG,
   YAML_PKG_RANGE,
   applyIntents,
+  upsertManagedMany,
+  batchPlan,
   mergeIntent,
   dshHome,
   profileDirOf,
@@ -54,7 +56,6 @@ import {
   makeYamlEngine,
   readPatchRows,
   writePatchRows,
-  upsertManaged,
   removeManaged,
   deriveStates,
   planMigration,
@@ -83,6 +84,8 @@ export const HOST_DIAG = {
   pendingWrites: 0,
   /** Last debounced-flush failure (null when the last flush succeeded). */
   lastFlushError: null,
+  /** Last 全部开启/全部关闭 batch outcome (null until one runs). */
+  lastBatch: null,
 }
 
 // --- tiny HTTP helpers -------------------------------------------------------
@@ -135,6 +138,29 @@ function execPnpm(profileDir, args, timeoutMs = 180000) {
       resolve({ ok: code === 0, code: code == null ? 1 : code, error: code === 0 ? null : stderr.trim(), stdout, stderr })
     })
   })
+}
+
+/**
+ * 功能作用：真正执行 pnpm 的函数（模块级变量，便于测试替换成桩）。
+ * 参数：
+ *   profileDir: string -- 目标 profile 目录，例如 'C:/Users/x/.dsh/profiles/web'
+ *   args: string[] -- pnpm 参数，例如 ['install']
+ *   timeoutMs?: number -- 超时毫秒数，默认 180000
+ * 返回值：
+ *   Promise<{ ok: boolean, code: number, error: string|null, stdout: string, stderr: string }>
+ * 调用样例：
+ *   const res = await pnpmRunner(profileDir, ['install'])
+ */
+let pnpmRunner = execPnpm
+
+/**
+ * 功能作用：替换 pnpm 执行器（仅测试使用：真实 handler harness 里避免真的跑 pnpm）。
+ * 参数：fn: Function|null -- 新的执行器；传 null/非函数恢复默认实现
+ * 返回值：undefined
+ * 调用样例：__setPnpmRunner(async () => ({ ok: true, code: 0, error: null, stdout: '', stderr: '' }))
+ */
+export function __setPnpmRunner(fn) {
+  pnpmRunner = typeof fn === 'function' ? fn : execPnpm
 }
 
 function backupFile(file) {
@@ -197,7 +223,7 @@ function requireProfileYaml(profileDir) {
 async function ensureYaml(profileDir) {
   const first = requireProfileYaml(profileDir)
   if (first.jsyaml) return { engine: makeYamlEngine(first.jsyaml), error: null, installed: false }
-  const res = await execPnpm(profileDir, ['add', '-D', `${YAML_PKG}@${YAML_PKG_RANGE}`])
+  const res = await pnpmRunner(profileDir, ['add', '-D', `${YAML_PKG}@${YAML_PKG_RANGE}`])
   if (!res.ok) return { engine: null, error: `js-yaml unavailable and install failed: ${res.error || res.stderr}` }
   const second = requireProfileYaml(profileDir)
   if (!second.jsyaml) return { engine: null, error: `js-yaml still unavailable after install: ${second.error}` }
@@ -255,8 +281,7 @@ async function flushPending(ctx, config) {
   HOST_DIAG.yamlResolved = true
   HOST_DIAG.yamlError = null
   try {
-    let rows = readPatchRows(y.engine, c.patchFile)
-    for (const it of intents) rows = upsertManaged(rows, it.id, it.name, it.enabled)
+    const rows = upsertManagedMany(readPatchRows(y.engine, c.patchFile), intents)
     writePatchRows(y.engine, c.patchFile, rows)
     HOST_DIAG.lastFlushError = null
   } catch (e) {
@@ -274,8 +299,7 @@ function flushPendingSync(c) {
     const probe = requireProfileYaml(c.profileDir)
     if (!probe.jsyaml) return
     const engine = makeYamlEngine(probe.jsyaml)
-    let rows = readPatchRows(engine, c.patchFile)
-    for (const it of intents) rows = upsertManaged(rows, it.id, it.name, it.enabled)
+    const rows = upsertManagedMany(readPatchRows(engine, c.patchFile), intents)
     writePatchRows(engine, c.patchFile, rows)
     pendingIntents = []
     HOST_DIAG.pendingWrites = 0
@@ -285,7 +309,20 @@ function flushPendingSync(c) {
   }
 }
 
-function snapshot(ctx, config) {
+/**
+ * 功能作用：读一次磁盘现场（仓库扫描 + profile manifest + patch 行）并推导每个子插件的状态。
+ * 参数：
+ *   ctx: object -- DSH 插件上下文（取 ctx.baseUrl 定位 profile）
+ *   config: object -- 插件行 config（可用 profile 覆盖）
+ *   extraIntents?: Array -- 显式指定「视作已生效」的待写意图；默认用模块级 pendingIntents。
+ *                          批量开关会先接管队列再计算，所以需要显式传入它刚取走的意图。
+ * 返回值：
+ *   { c, manifest, rows, plugins, derived, legacyDetected, yamlError }
+ * 调用样例：
+ *   const s = snapshot(ctx, cfg)                       // 常规路径（含排队意图）
+ *   const s2 = snapshot(ctx, cfg, queuedIntents)       // 批量：队列已被自己取走
+ */
+function snapshot(ctx, config, extraIntents) {
   const c = resolveContext(config, ctx && ctx.baseUrl)
   const plugins = readPlugins(c.repoRoot)
   const manifest = readManifest(c.manifestFile)
@@ -293,9 +330,32 @@ function snapshot(ctx, config) {
   const rows = yaml.jsyaml ? readPatchRows(makeYamlEngine(yaml.jsyaml), c.patchFile) : []
   // Queued intents are what the user asked for: report them as the current
   // state (the flush makes them durable a few hundred ms later).
-  const derived = deriveStates({ repoPlugins: plugins, manifest, rows: applyIntents(rows, pendingIntents) })
+  const intents = Array.isArray(extraIntents) ? extraIntents : pendingIntents
+  const derived = deriveStates({ repoPlugins: plugins, manifest, rows: applyIntents(rows, intents) })
   const legacyDetected = derived.some((p) => p.legacyBundle)
   return { c, manifest, rows, plugins, derived, legacyDetected, yamlError: yaml.error }
+}
+
+/**
+ * 功能作用：把一次快照转成 /list 的响应体，并顺带算出两个批量按钮的可作用数量与跳过数量。
+ * 参数：s: object -- snapshot() 的结果
+ * 返回值：{ ok: true, data: { ..., plugins, batchCounts } }；batchCounts.enable/disable = { count, skippedLegacy, skippedInactive, skippedInvalid }
+ * 调用样例：sendJson(res, 200, listPayload(snapshot(ctx, cfg)))
+ */
+function batchCountsOf(derived) {
+  /** 同一个 batchPlan 口径算出某一方向的「可作用数 + 分类跳过数」。 */
+  const one = (enabled) => {
+    const plan = batchPlan(derived, enabled)
+    const byReason = (reason) => plan.skipped.filter((x) => x.reason === reason).length
+    return {
+      count: plan.count,
+      needsInstall: plan.targets.filter((t) => t.needsInstall).length,
+      skippedLegacy: byReason('legacy-layout'),
+      skippedInactive: byReason('inactive-dep-only'),
+      skippedInvalid: byReason('invalid-dir'),
+    }
+  }
+  return { enable: one(true), disable: one(false) }
 }
 
 function listPayload(s) {
@@ -311,6 +371,7 @@ function listPayload(s) {
       legacyDetected: s.legacyDetected,
       yamlError: s.yamlError,
       plugins: s.derived,
+      batchCounts: batchCountsOf(s.derived),
     },
   }
 }
@@ -333,12 +394,58 @@ async function ensureDevDep(c, pkgName, absDir) {
   delete manifest2.dependencies[pkgName]
   manifest2.devDependencies = { ...(manifest.devDependencies || {}), [pkgName]: spec }
   writeJsonPretty(c.manifestFile, manifest2)
-  const res = await execPnpm(c.profileDir, ['install'])
+  const res = await pnpmRunner(c.profileDir, ['install'])
   if (!res.ok) {
     try { fs.copyFileSync(backup, c.manifestFile) } catch { /* best effort */ }
     return { installed: false, ranPnpm: true, error: res.error || 'pnpm install failed' }
   }
   return { installed: true, ranPnpm: true, error: null, backup }
+}
+
+/**
+ * 功能作用：批量确保多个子插件可解析——把所有缺失/陈旧的 link: devDependency 一次性写进 profile package.json，
+ *           然后只执行一次 pnpm install（批量开启时用；逐项安装会 N 次改写 + N 次安装，慢且没必要）。
+ * 参数：
+ *   c: object -- resolveContext() 的结果（用到 manifestFile / profileDir）
+ *   entries: Array -- [{ name, dirPath }]，例如 [{ name: 'dsh-esc-rewind', dirPath: 'C:/repo/sub-plugins/dsh-esc-rewind' }]
+ * 返回值：
+ *   { installed: string[], failed: [{ name, error }], ranPnpm: boolean, backup: string|null }
+ *   例：{ installed: ['dsh-aaa'], failed: [], ranPnpm: true, backup: '.../package.json.bak-...' }
+ * 调用样例：
+ *   const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name, dirPath: t.dirPath })))
+ */
+async function ensureDevDeps(c, entries) {
+  const wanted = (Array.isArray(entries) ? entries : []).filter((e) => e && e.name && e.dirPath)
+  if (wanted.length === 0) return { installed: [], failed: [], ranPnpm: false, backup: null }
+
+  const manifest = readManifest(c.manifestFile)
+  const next = { ...manifest }
+  next.dependencies = { ...(manifest.dependencies || {}) }
+  next.devDependencies = { ...(manifest.devDependencies || {}) }
+  const changed = []
+  for (const e of wanted) {
+    const spec = linkSpecOf(e.dirPath)
+    const alreadyLinked = next.devDependencies[e.name] === spec
+      && !Object.prototype.hasOwnProperty.call(next.dependencies, e.name)
+    if (alreadyLinked) continue
+    delete next.dependencies[e.name]
+    next.devDependencies[e.name] = spec
+    changed.push(e.name)
+  }
+  // 每个 link: 都已指对目录 → 无需改写也无需安装，直接视为可解析。
+  if (changed.length === 0) {
+    return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: false, backup: null }
+  }
+
+  const backup = backupFile(c.manifestFile)
+  writeJsonPretty(c.manifestFile, next)
+  const res = await pnpmRunner(c.profileDir, ['install'])
+  if (!res.ok) {
+    try { fs.copyFileSync(backup, c.manifestFile) } catch { /* best effort */ }
+    const error = res.error || 'pnpm install failed'
+    return { installed: [], failed: wanted.map((e) => ({ name: e.name, error })), ranPnpm: true, backup }
+  }
+  return { installed: wanted.map((e) => e.name), failed: [], ranPnpm: true, backup }
 }
 
 async function dropDevDep(c, pkgName) {
@@ -353,7 +460,7 @@ async function dropDevDep(c, pkgName) {
   delete manifest2.dependencies[pkgName]
   delete manifest2.devDependencies[pkgName]
   writeJsonPretty(c.manifestFile, manifest2)
-  const res = await execPnpm(c.profileDir, ['install'])
+  const res = await pnpmRunner(c.profileDir, ['install'])
   if (!res.ok) {
     try { fs.copyFileSync(backup, c.manifestFile) } catch { /* best effort */ }
     return { removed: false, ranPnpm: true, error: res.error || 'pnpm install failed' }
@@ -387,6 +494,7 @@ function registerHttp(ctx, host, config) {
           yamlError: HOST_DIAG.yamlError,
           pendingWrites: pendingIntents.length,
           lastFlushError: HOST_DIAG.lastFlushError,
+          lastBatch: HOST_DIAG.lastBatch,
         })
         return
       }
@@ -396,12 +504,119 @@ function registerHttp(ctx, host, config) {
         return
       }
 
-      if ((url === `${HTTP_PREFIX}/set-enabled` || url === `${HTTP_PREFIX}/remove` || url === `${HTTP_PREFIX}/migrate`) && method === 'POST') {
+      if ((url === `${HTTP_PREFIX}/set-enabled` || url === `${HTTP_PREFIX}/remove` || url === `${HTTP_PREFIX}/migrate` || url === `${HTTP_PREFIX}/set-all-enabled`) && method === 'POST') {
         let args = {}
         const body = await readBody(req)
         if (body) {
           try { args = JSON.parse(body) } catch { sendJson(res, 400, { ok: false, error: 'bad json body' }); return }
         }
+        // 全部开启 / 全部关闭 —— 一次安装 + 一次写入（design.md D3/D4/D5）。
+        if (url === `${HTTP_PREFIX}/set-all-enabled`) {
+          const enabled = args.enabled !== false
+          // 接管仍在 400 ms 合并窗口里的单行意图：与批量目标并进同一次写入，
+          // 既不吞掉用户的点击，也不额外多一次核心配置重应用。
+          const queued = pendingIntents
+          pendingIntents = []
+          HOST_DIAG.pendingWrites = 0
+          if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
+
+          const s = snapshot(ctx, __cfg, queued)
+          const c = s.c
+          const plan = batchPlan(s.derived, enabled)
+          const results = plan.skipped.map((x) => ({
+            dir: x.dir,
+            name: x.name,
+            hasClient: x.hasClient,
+            outcome: 'skipped',
+            reason: x.reason,
+          }))
+
+          if (plan.count === 0 && queued.length === 0) {
+            const payload = listPayload(snapshot(ctx, __cfg, []))
+            payload.noop = true
+            payload.results = results
+            payload.counts = { total: 0, applied: 0, skipped: results.length, failed: 0, installed: 0, ranPnpm: false, wrotePatch: false }
+            sendJson(res, 200, payload)
+            return
+          }
+
+          const y = await ensureYaml(c.profileDir)
+          if (!y.engine) { sendJson(res, 500, { ok: false, error: y.error }); return }
+          HOST_DIAG.yamlResolved = true
+          HOST_DIAG.yamlError = null
+
+          // ① 需要安装的目标：一次写齐全部 link: 后只跑一次 pnpm install
+          const needInstall = enabled ? plan.targets.filter((t) => t.needsInstall) : []
+          const failedInstall = new Map()
+          let ranPnpm = false
+          if (needInstall.length > 0) {
+            const ins = await ensureDevDeps(c, needInstall.map((t) => ({ name: t.name, dirPath: t.dirPath })))
+            ranPnpm = ins.ranPnpm
+            for (const f of ins.failed) failedInstall.set(f.name, f.error)
+          }
+
+          // ② 一次写入：排队意图 + 全部批量目标
+          const applied = plan.targets.filter((t) => !failedInstall.has(t.name))
+          let writeError = null
+          let wrote = false
+          try {
+            const diskRows = readPatchRows(y.engine, c.patchFile)
+            const nextRows = upsertManagedMany(
+              upsertManagedMany(diskRows, queued),
+              applied.map((t) => ({ id: t.rowId, name: t.name, enabled })),
+            )
+            if (JSON.stringify(nextRows) !== JSON.stringify(diskRows)) {
+              writePatchRows(y.engine, c.patchFile, nextRows)
+              wrote = true
+            }
+            HOST_DIAG.lastFlushError = null
+          } catch (e) {
+            writeError = (e && e.message) || String(e)
+            HOST_DIAG.lastFlushError = writeError
+          }
+
+          for (const t of plan.targets) {
+            const installError = failedInstall.get(t.name)
+            if (installError) {
+              results.push({ dir: t.dir, rowId: t.rowId, name: t.name, hasClient: t.hasClient, outcome: 'failed', reason: 'install-failed', error: installError })
+            } else if (writeError) {
+              results.push({ dir: t.dir, rowId: t.rowId, name: t.name, hasClient: t.hasClient, outcome: 'failed', reason: 'write-failed', error: writeError })
+            } else {
+              results.push({ dir: t.dir, rowId: t.rowId, name: t.name, hasClient: t.hasClient, outcome: 'applied', reason: null })
+            }
+          }
+
+          const failedList = results.filter((r) => r.outcome === 'failed')
+          const counts = {
+            total: plan.count,
+            applied: results.filter((r) => r.outcome === 'applied').length,
+            skipped: results.filter((r) => r.outcome === 'skipped').length,
+            failed: failedList.length,
+            installed: needInstall.length - failedInstall.size,
+            ranPnpm,
+            wrotePatch: wrote,
+          }
+          const payload = listPayload(snapshot(ctx, __cfg, []))
+          payload.results = results
+          payload.counts = counts
+          payload.noop = counts.applied === 0 && !wrote
+          if (failedList.length > 0) {
+            payload.warning = `批量${enabled ? '开启' : '关闭'}有 ${failedList.length} 项失败：${failedList.map((r) => `${r.name}（${r.error || r.reason}）`).join('、')}`
+          }
+          HOST_DIAG.lastBatch = {
+            enabled,
+            at: Date.now(),
+            applied: counts.applied,
+            skipped: counts.skipped,
+            failed: counts.failed,
+            installed: counts.installed,
+            wrotePatch: wrote,
+            error: writeError,
+          }
+          sendJson(res, 200, payload)
+          return
+        }
+
         if (url === `${HTTP_PREFIX}/set-enabled` || url === `${HTTP_PREFIX}/remove`) {
           const dir = String(args.dir || '').trim()
           const snap0 = snapshot(ctx, __cfg)
@@ -498,7 +713,7 @@ function registerHttp(ctx, host, config) {
         try {
           writeJsonPretty(c.manifestFile, plan.newManifest)
           writePatchRows(y.engine, c.patchFile, plan.finalRows)
-          const resPnpm = await execPnpm(c.profileDir, ['install'])
+          const resPnpm = await pnpmRunner(c.profileDir, ['install'])
           if (!resPnpm.ok) {
             throw new Error(`pnpm install failed: ${resPnpm.error || resPnpm.stderr.trim()}`)
           }

@@ -14,9 +14,13 @@
 ### 安装
 
 ```bash
-dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
+# 推荐：装仓库根（根 package.json 是“管理器的安装外壳”）
+dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins
+# 等价写法（直接装包目录）：dsh plugin --profile web add <仓库根>/dsh-plugin-manager
 # 重启 dsh web → 设置 → 本地插件 → 若提示旧布局，先点「一键接管/迁移」
 ```
+
+> 两条命令**完全等价**（隔离 profile 实测）：都让 `dsh-plugin-manager` 进入 profile `dependencies` 与 `dsh.profile.bundles`，激活行 id 相同，互相替换不产生第二个 bundle 层或第二行。根清单的 `name` **必须**等于 `dsh-plugin-manager` —— 包名就是插件身份（profile bundle 层名 / 激活行 id / 浏览器模块表 id）；它只是**转发外壳**（`main` → `dsh-plugin-manager/src/index.js`，`dsh.bundle.patch` → `dsh-plugin-manager/cordis.patch.yml`），源码、测试、README/ACCEPTANCE 都仍在 `dsh-plugin-manager/`。
 
 > 旧布局 = 子插件仍逐个挂在 `dependencies` + `dsh.profile.bundles`（每个子插件自己的 bundle 层在启动时读一次）。迁移会备份 profile 的 `package.json`/`cordis.patch.yml`，收敛为 devDependencies + 管理器维护行，**迁移前后激活集合不变**。
 
@@ -38,16 +42,20 @@ dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugi
 | `dsh plugin --profile web add <子插件目录>` | 子插件包已不声明 `dsh.bundle`，于是只把它装成 profile 的**普通依赖**并打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer` 警告：**不进 bundles、也不会激活它**。激活请用面板开关（管理器会把它改写成 `devDependencies` 的 `link:` 并写入激活行）。 |
 | `dsh plugin --profile web remove <子插件包名>` | 只摘依赖、**不删管理器写的激活行** → 留下指向不存在包的悬空行，下次 `dsh web` 启动失败：`failed to import loader entry <rowId> (<pkg>): Cannot find package …`（实测 exit 1）。卸载请用面板「移除」。 |
 
-证据与逐条实测：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/design.md`。
+> 上表只针对**子插件目录**。`dsh plugin --profile web add <仓库根>` 是**允许且推荐**的（装的是管理器本身，见「安装」）；`remove dsh-plugin-manager` 也是卸载管理器的正确命令（会一并从 `dsh.profile.bundles` 摘掉该层）。
+
+证据与逐条实测：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/design.md`；安装外壳的实测见 `openspec/changes/add-repo-root-install-entry/design.md`。
 
 ## 新增一个插件到本仓库
 
 1. 在 `sub-plugins/` 下建 `dsh-xxx/`（`package.json` 含 `dsh.client`、`exports["./client"]`、`main`、README/ACCEPTANCE；**不要**声明 `dsh.bundle`、**不要**放包自带 `cordis.patch.yml` —— 激活行由管理器写）。管理器也接受仓库根的旧扁平位置。
 2. 管理器**自动扫描**到它（`sub-plugins/dsh-*` 与仓库根 `dsh-*` 的并集），在设置「本地插件」里点启用即完成安装+激活——**无需**再改 profile 或本 README 的清单。
 
-## 已删除：聚合伞包 `dsh-local-plugins`（2026-09-10）
+## 仓库根：管理器的安装外壳（不是聚合伞包）
 
-根 `package.json` 与根 `cordis.patch.yml` 已**物理删除**（2026-09-09 起只标 DEPRECATED，2026-09-10 正式删除）。删除理由：它仍是一个**可被 `dsh plugin add` 装进 `dsh.profile.bundles` 的包**，而它插入的 5 个 row id 与管理器维护的行**完全相同** → 谁再装一次就 `duplicate loader entry id` 启动失败。旧文档里「伞包只装一次装全部、根 `cordis.patch.yml` 是唯一激活清单」的模型彻底作废；要查历史内容用 git 历史（`git log -- package.json cordis.patch.yml`）。
+根 `package.json` 现在是**管理器的安装外壳**：与包内清单同名（`dsh-plugin-manager`）、`private: true`、不声明任何依赖、不列 `dsh.profile.bundles`，只把 `main`/`exports["."]`/`exports["./client"]` 转发到 `dsh-plugin-manager/src/*`，并让 `dsh.bundle.patch` 指向 `dsh-plugin-manager/cordis.patch.yml`（激活行的唯一真相源，只插管理器自己那一行）。它的唯一作用：让「装这个仓库」= 「装管理器」。仓库根**仍然没有** `cordis.patch.yml`，子插件的激活行仍然只由管理器写；一旦有人往外壳里加子插件依赖/激活行，`dsh-plugin-manager/test/root-install-shell.test.mjs` 直接判红。
+
+**聚合伞包 `dsh-local-plugins` 仍然已删除**（旧的根 `package.json` + 根 `cordis.patch.yml`：2026-09-09 起只标 DEPRECATED，2026-09-10 物理删除）。删除理由：那个包插入的 5 个 row id 与管理器维护的行**完全相同** → 谁再装一次就 `duplicate loader entry id` 启动失败。旧文档里「伞包只装一次装全部、根 `cordis.patch.yml` 是唯一激活清单」的模型彻底作废；要查历史内容用 git 历史（`git log -- package.json cordis.patch.yml`）。
 
 - 若某个 profile 的 `dsh.profile.bundles` 里仍列着 `dsh-local-plugins`：该条目现在**不可解析**，这个 profile 启动会报 `cannot resolve profile bundle "dsh-local-plugins"`；修法是手工从该 profile 的 `package.json` 摘掉它（管理器救不了——启动已经失败）。
 - 历史迁移备份（2026-09-06 伞包实验）：`~/.dsh/profiles/web/package.json.bak-2026-09-06-umbrella`、`pnpm-lock.yaml.bak-2026-09-06-umbrella`（回滚 = 还原备份后 `dsh plugin --profile web install`）。
@@ -56,7 +64,7 @@ dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugi
 
 | 插件 | 作用 |
 |---|---|
-| `dsh-plugin-manager` | **本地插件管理器**（先装它）——设置「本地插件」面板管理仓库内全部 `dsh-*` |
+| `dsh-plugin-manager` | **本地插件管理器**（先装它）——设置「本地插件」面板管理仓库内全部 `dsh-*`（逐个开关 + **全部开启/全部关闭**批量 + 一键迁移） |
 | `dsh-session-title-regenerate` | 会话标题「重新生成标题」（最低推理档摘要） |
 | `dsh-session-time-bucket` | 侧栏会话按时间桶分组（今天/昨天/…） |
 | `dsh-composer-history-recall` | 输入框 `↑`/`↓` 召回自己发过的消息 |
