@@ -43,7 +43,7 @@
 
 ## A7 子插件目录布局（sub-plugins/）
 
-对照 `openspec/changes/move-plugins-to-sub-plugins/specs/plugin-manager/spec.md`（布局与行 id 稳定性）。
+对照 `openspec/specs/plugin-manager/spec.md`「子插件目录布局与行 id 稳定性」（delta 已归档于 `openspec/changes/archive/2026-09-10-move-plugins-to-sub-plugins/`）。
 
 - [x] 自动化：`pluginRootsOf` 在 `sub-plugins/` 存在时返回「嵌套根 + 仓库根」，不存在时只返回仓库根；`pluginAbsDirOf` 嵌套优先、未知目录回退扁平路径。
 - [x] 自动化：`planMigration` 在嵌套仓库下写出的 devDep `link:` 指向 `sub-plugins/<子包>`（而非仓库根）。

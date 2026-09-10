@@ -25,4 +25,4 @@
 - [x] 4.2 `openspec validate move-plugins-to-sub-plugins` 通过
 - [x] 4.3 同步 `dsh-plugin-manager/README.md`（目录布局节）、`ACCEPTANCE.md`（A1/A3/A7）、根 `README.md`、`AGENTS.md`（旧伞包描述已纠正）
 - [x] 4.4 新增 `docs/knowledge/2026-09-10-sub-plugins-layout.md` 并登记索引
-- [ ] 4.5 归档本变更到 `openspec/changes/archive/` 并同步 `openspec/specs/plugin-manager/spec.md`
+- [x] 4.5 归档本变更到 `openspec/changes/archive/` 并同步 `openspec/specs/plugin-manager/spec.md`

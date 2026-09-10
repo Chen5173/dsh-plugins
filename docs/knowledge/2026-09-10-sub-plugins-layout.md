@@ -1,6 +1,6 @@
 # DSH 插件：子插件收拢到 sub-plugins/（布局与双根扫描）
 
-日期：2026-09-10 · 涉及：`dsh-plugin-manager/{src/host-core.js, src/index.js, src/client.js, test/*}`、profile web 的 6 条 devDependencies `link:`、OpenSpec change `move-plugins-to-sub-plugins`。
+日期：2026-09-10 · 涉及：`dsh-plugin-manager/{src/host-core.js, src/index.js, src/client.js, test/*}`、profile web 的 6 条 devDependencies `link:`、OpenSpec change `move-plugins-to-sub-plugins`（2026-09-10 已归档）。
 
 ## 一句话
 
@@ -20,7 +20,7 @@
 ```bash
 node dsh-plugin-manager/test/host-core.test.mjs   # 嵌套/双根/同名去重/staleLinkSpec 用例
 node dsh-plugin-manager/test/bundle.test.mjs      # 头部 pluginsRoot 渲染断言
-openspec validate move-plugins-to-sub-plugins
+openspec validate --specs                          # plugin-manager 主 spec（change 已归档）
 # 迁移后逐包验证解析 + 行不变：
 cd ~/.dsh/profiles/web && node --input-type=module -e "await import('dsh-session-time-bucket')"
 dsh --dump-config --profile web | grep -A1 'session-time-bucket'
@@ -42,6 +42,6 @@ dsh --dump-config --profile web | grep -A1 'session-time-bucket'
 
 ## 相关文件
 
-- 变更：`openspec/changes/move-plugins-to-sub-plugins/`（proposal / design / tasks / spec delta）
+- 变更：`openspec/changes/archive/2026-09-10-move-plugins-to-sub-plugins/`（proposal / design / tasks / spec delta，已归档）；行为契约已并入 `openspec/specs/plugin-manager/spec.md`
 - 代码：`dsh-plugin-manager/src/{host-core.js,index.js,client.js}`、`test/{host-core,bundle}.test.mjs`
 - 文档：`dsh-plugin-manager/README.md`（目录布局节）、`dsh-plugin-manager/ACCEPTANCE.md`（A7）
