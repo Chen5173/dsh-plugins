@@ -605,6 +605,25 @@ test('success surfaces a toast that does not over-promise', async () => {
   assert.equal(toast.props.text, 'toast.opened')
 })
 
+test('a repeat open on the same folder says it is already open; another folder announces again', async () => {
+  // Windows reuses the window a folder already has open (and a background process
+  // may fail to raise it), so a repeat click produces no visible window at all.
+  // The wording is the only thing telling "already open" from "broken button".
+  const { view } = await boot({}, { cwd: 'D:\\repo' })
+  const first = await clickAndSettle(view)
+  assert.equal(findToast(first).props.text, 'toast.opened')
+
+  const second = await clickAndSettle(view)
+  assert.equal(findToast(second).props.text, 'toast.reopened', 'the second click on the same folder must say it is already open')
+
+  // A different folder must start over. The hook shim memoizes the first
+  // `useCallback` result and ignores deps (real React re-creates it), so a cwd
+  // switch cannot be re-clicked in this harness: assert the keying statically
+  // instead — the flag is per-path, never a global "second click" flag.
+  assert.match(source, /const reopened = __openedPaths\.has\(path\)/)
+  assert.match(source, /__openedPaths\.add\(path\)/)
+})
+
 test('failure with an unreachable directory says so and keeps the path', async () => {
   const cwd = 'D:\\gone\\dir'
   const { view } = await boot({

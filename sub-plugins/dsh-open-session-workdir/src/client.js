@@ -73,6 +73,7 @@ window.__ModuleLoader__.load({
       'button.title': '打开工作目录',
       'button.busy': '正在打开…',
       'toast.opened': '已交给系统打开',
+      'toast.reopened': '该目录已在文件管理器中打开',
       'card.unreachable': '该目录当前无法访问（可能已被删除或移动）',
       'card.timeout': '打开请求超时，宿主未响应',
       'card.failed': '打开失败',
@@ -90,6 +91,7 @@ window.__ModuleLoader__.load({
       'button.title': 'Open working directory',
       'button.busy': 'Opening…',
       'toast.opened': 'Handed to the system to open',
+      'toast.reopened': 'That folder is already open in the file manager',
       'card.unreachable': 'This directory is currently unreachable (it may have been deleted or moved)',
       'card.timeout': 'The open request timed out with no host response',
       'card.failed': 'Opening failed',
@@ -296,6 +298,15 @@ window.__ModuleLoader__.load({
     * no expressions to type, no guessing which build is loaded.
     */
     var __logged = new Set()
+
+    /**
+    * Paths this page has already handed to the desktop, so a repeat click can say
+    * "that folder is already open" instead of re-announcing the hand-off. Windows
+    * reuses the window a folder already has open — and a background process may
+    * fail to raise it — so a second click on the same directory shows nothing at
+    * all, which reads as a broken button.
+    */
+    var __openedPaths = new Set()
     /**
     * Every click logs its argument and its outcome. Deduplicating the success
     * line looked like the tidy choice and cost a debugging round: the only way
@@ -796,7 +807,13 @@ window.__ModuleLoader__.load({
             : hostMessage !== '' ? 'FAILED — ' + hostMessage : 'host confirmed'))
 
         if (!timedOut && hostMessage === '') {
-          showToast(t('toast.opened'), React.createElement(IconCheckOutline16, { size: 14 }))
+          // Two different successes deserve two different sentences: the desktop
+          // reuses the window a folder already has open (and may not raise it), so
+          // a repeat click produces no visible window at all. Without this, the
+          // user cannot tell "already open" from "the button is broken".
+          const reopened = __openedPaths.has(path)
+          __openedPaths.add(path)
+          showToast(t(reopened ? 'toast.reopened' : 'toast.opened'), React.createElement(IconCheckOutline16, { size: 14 }))
           return
         }
 

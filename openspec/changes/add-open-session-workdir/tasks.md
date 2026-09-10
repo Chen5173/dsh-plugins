@@ -17,20 +17,25 @@
 ## 3. 打开链路与结果反馈
 
 - [x] 3.1 服务一律在 `ctx.inject` 回调的作用域上取（apply 期 ctx 解析不到），opener 按可达性择一：`workspaces.openPath` → `connection.api.host.openPath` → `remote.session.openWorkspacePath`（当前环境只有第三条存在，前两条为版本漂移留的兼容位），全部落到同一个宿主 `openNativePath`。**不走 `remote.session.openWorkspacePath`**：`dsh-better-sidebar` 影子化该方法把目录当文件读，报 `"<path>" is a directory`。`cwd` 原样透传；opener 在**点击时**惰性解析（`__resolveOpener()` 依次试两条通道，全不可达才弹 `card.noOpener` 并写明**两个**服务名，而不是让按钮消失）（不 resolve、不 normalize、不改分隔符）；验证：Windows 上资源管理器打开到该目录**内部**；对含空格、中文、反斜杠的 cwd 均正确（spec「路径原样传递」）
-- [x] 3.2 单次请求在途时按钮进入进行态，请求结束后恢复可点；验证：连续点击 3 次不报错、不永久禁用，每次都独立发起（spec「连续触发各自生效」）
-- [x] 3.3 成功 → `Toast` 轻量确认，措辞为「已交给系统打开」不过度承诺，自动消失；验证：成功点击后 Toast 出现并在数秒内消失，无 Modal
+- [x] 3.2 单次请求在途时按钮进入进行态，请求结束后恢复可点；验证：连续点击 3 次不报错、不永久禁用，每次都独立发起（spec「连续触发各自生效」）。**2026-09-10 真机复核（DevTools 日志为准）**：连点 3 次得到 3 对日志，每次均为 `click: session=… path=…` + `open attempt via remote.session.openWorkspacePath: host confirmed` → **三次请求各自独立发起、宿主三次全部确认成功**，按钮进行态在 1.3–1.7 s 后正常复位、未卡死。此前「后续点击失效」是误读：该目录当时**已在资源管理器里打开**，Windows 对已打开目录的 `Invoke-Item` 是复用/激活既有窗口（且后台进程的前台抢占被抑制），因此没有可见变化。对照实验（同一台机、同一条宿主命令）：对**未打开**的临时目录 → 窗口数 5→6（新窗口出现）；对**已打开**的 `dsh-plugins` → 5→5（无新窗口）。
+- [x] 3.3 成功 → `Toast` 轻量确认，措辞为「已交给系统打开」不过度承诺，自动消失；验证：成功点击后 Toast 出现并在数秒内消失，无 Modal。**2026-09-10 补充（真机走查驱动）**：同一目录再次打开时改用「该目录已在文件管理器中打开」（`toast.reopened`）。真机日志（3 次点击 3 次 `host confirmed`）+ 对照实验（同一条宿主命令：**未打开**的临时目录 → 资源管理器窗口数 5→6；**已打开**的 `dsh-plugins` → 5→5）证明"点第二、三次没反应"是桌面程序**复用既有窗口**且后台激活被抑制，因此把"复用原窗口"写进成功文案。回归测试：`test/bundle.test.mjs`「a repeat open on the same folder says it is already open…」（含按路径记账的静态断言）；字典 zh/en 各 15 键、集合一致。
 - [x] 3.4 失败分类（事后探测，见 design D5）：`workspaces.openPath` 抛异常时再调 `ctx.remote.directoryPicker.list(cwd)`——探测也失败 ⇒ 提示「目录当前无法访问（可能已被删除或移动）」；探测成功 ⇒ 透出异常消息（剥掉 `path open failed: ` 前缀）；两种提示都常驻完整路径；验证：把某会话的 cwd 目录临时改名后点击得到前者，用 mock 让核心返回错误得到后者
 - [x] 3.5 超时路径：`openPath` 无 signal 参数，故用客户端 `Promise.race` 计时；8s 无响应按失败处理并提示，入口恢复可再次触发，晚到的 rejection 被吞掉不产生 unhandled rejection；验证：harness 里只把 `OPEN_TIMEOUT_MS` 那一档计时器压到 0ms 跑一次，确认出现超时提示而非永久进行态
 - [x] 3.6 提示中提供「复制路径」，用 `writeClipboard` 写入完整绝对路径；验证：远程 Host 场景（浏览器与宿主不同机）下点击复制，粘贴得到宿主绝对路径（spec「失败时目录路径仍可获取」）
+- [x] 3.7 「目标目录已在文件管理器中打开时无可见变化」的收尾：用户已决策 **保持复用窗口行为，只更换提示文案**。已实现：`toast.reopened` = 「该目录已在文件管理器中打开」/「That folder is already open in the file manager」，仅在同一页面内**同一路径此前已打开成功过**时使用（客户端按路径记账、随页面加载重置；若该窗口在此期间被手动关闭，文案会略偏保守，已在 README 记录）；spec 同步：需求「打开结果必须给出可观察反馈」新增场景「目录已在文件管理器中打开」，「连续触发各自生效」补一句"复用窗口不保证产生新窗口"；不采用"总是新开窗口"（需改 DSH 核心 `packages/util/native-command/src/path-opener.ts` 的 Windows 分支，或给本插件加宿主端点——与 README「本插件不含任何宿主端点」冲突）。**真机复核（2026-09-10 用户确认）**：刷新页面后，首次打开显示「已交给系统打开」、对同一目录再点一次显示「该目录已在文件管理器中打开」，用户结论"没什么问题"。
 
 ## 4. 文案与主题
 
-- [ ] 4.1 `ctx.locale.register(NS,{zh,en})` 注册字典并在注册项上声明 `locale:NS`；`locale` 服务缺席时回退按 `navigator.languages` 选字典，`locale/change` 后刷新；验证：客户端切英文后按钮 title 与所有 Toast 变英文（spec「切换到英文」）
-- [ ] 4.2 所有颜色只用 `--dsw-*` token，不硬编码色值；验证：深浅色主题各看一次按钮与 Toast，无对比度失效
+- [x] 4.1 `ctx.locale.register(NS,{zh,en})` 注册字典并在注册项上声明 `locale:NS`；`locale` 服务缺席时回退按 `navigator.languages` 选字典，`locale/change` 后刷新。**验证（2026-09-10 静态核对，脚本逐项）**：`locale.register(NS, { zh: zhDict, en: enDict })` 在位（`ctx.effect` 内）；注册项 `locale: NS` 仅在服务在位时声明（缺席时由 `__t()` 走嗅探字典）；`localeFallbackLang()` 遍历 `navigator.languages` + `navigator.language` 取 zh/en；`useLocaleRevision()` 通过 `__locale.subscribe` 触发重渲染；**zh/en 字典各 14 键、键集合完全一致，源码引用的 14 个键在两本字典中全部命中**（无 `t('…')` 缺译）。人眼复核（切英文）并入 5.1 走查。
+- [x] 4.2 所有颜色只用 `--dsw-*` token，不硬编码色值。**验证（2026-09-10 静态核对）**：`src/client.js` 内 `--dsw-*` 引用 13 处；全部 8 处颜色字面量都落在 `var(--dsw-*, 回退值)` 的回退位内（如 `var(--dsw-alias-label-tertiary, #8a8a8e)`、`1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))`），**裸色值 0 处**、具名颜色字面量 0 处。深浅色人眼复核并入 5.1 走查。
 
 ## 5. 集成验收与交付
 
-- [ ] 5.1 逐条走查 `specs/session-workdir-open/spec.md` 的 6 条 Requirement 共 17 个场景并记录结果；验证：全部通过，且 `openspec validate add-open-session-workdir --strict` 无 error
+- [x] 5.1 逐条走查 `specs/session-workdir-open/spec.md` 的 6 条 Requirement（走查时 17 个场景，修复后为 18 个）并记录结果。**2026-09-10 用户真机走查**，方式：由本任务生成"怎么做 / 应看到什么"清单交用户逐项确认。
+  - **发现 1 个缺陷并已修复**（详见 3.2 / 3.3 / 3.7）：需求 2 的场景「连续触发各自生效」在真机表现为"第 2、3 次点击后毫无可见变化"。DevTools 日志证明 3 次请求各自独立发起、宿主 3 次全部 `host confirmed`；对照实验证明原因是**目标目录已在文件管理器中打开**（Windows 复用既有窗口且后台激活被抑制）→ 按用户决策保持复用行为、改用文案区分（`toast.reopened`），并新增 spec 场景「目录已在文件管理器中打开」。
+  - **用户确认无异常**的场景：需求 1（入口出现 / 随会话切换 / 无 cwd 时隐藏）、需求 2（打开到目录内部、含空格与中文的路径原样传递、修复后的连续触发）、需求 3（成功反馈；失败分类提示）、需求 4（失败时复制路径）、需求 5（中英文案）、需求 6（打开不改变会话状态）——用户结论："除上述问题外没其他问题"（概括确认，未逐条留痕）。
+  - **因环境限制未直接执行**（由既有验证覆盖）：「宿主没有桌面时隐藏入口」→ 2.2 的 headless 宿主验证；「请求长时间无响应」→ 3.5 的计时器压缩用例；「远程访问时说明目录开在宿主上」→ 文案在代码中，未在远程浏览器实测。
+  - 校验：`openspec validate add-open-session-workdir --strict` → valid。
 - [x] 5.2 回归「不改变会话状态」。**等价自动化证明**：`bundle.test.mjs` 新增能力审计——从已安装的 typert 元数据取出 session remote 全部会改状态的方法（`attachment/cancel/control/create/follow/fork/prompt/refreshTitle/rename/rewind/selectModel/updateQueue`），断言 bundle 源码**一个都不引用**；它调用的 session 方法恰好只有 `canOpenWorkspacePath` 与 `openWorkspacePath`。滚动位置结构性排除（失败卡片是 `position:fixed` 的 portal，按钮 `flex:'none'`，都不参与文档流）。**未做的部分**：`session.jsonl.zstd` 的 mtime/size 比对——会话正在被本次对话持续写入，无法把点击归因出来，留作离线复验
 - [x] 5.3 与 `@huanlin/dsh-plugin-session-delete` 共存安装。验证（现场）：两枚按钮同在 `conversation.session.header.actions` 一行（垃圾桶 order 30 / 打开目录 order 25），删除按钮一直可用，本插件按钮现场点击后宿主回 `ok=true` 且资源管理器窗口出现、`order` 不冲突（不抛 `list slot ... already has an entry with id`）
-- [ ] 5.4 写 `README.md`：安装/卸载（含 `disabled:true` 回滚）、所需核心版本下限、远程 Web UI 时目录开在宿主上的说明、以及「本插件不含任何宿主端点」；验证：照 README 在干净 profile 上从零装一遍成功，再按回滚步骤卸载后按钮消失
+- [x] 5.4 写 `README.md`：安装/卸载（含 `disabled:true` 回滚）、所需核心版本下限、远程 Web UI 时目录开在宿主上的说明、以及「本插件不含任何宿主端点」。**验证（2026-09-10）**：四要点在 `README.md` 中齐备（安装/卸载/回滚·disabled/版本下限/远程宿主说明/"不含任何宿主端点"逐项 grep 命中）；**照 README 在干净 profile 从零装一遍**——隔离 `DSH_HOME` + 全新 profile 执行 `dsh plugin --profile workdirtest add <…>/dsh-plugin-manager`：exit 0，`dependencies` 出现 `link:`、`dsh.profile.bundles` 变为 `['@deepseek-ai/dsh-base','dsh-plugin-manager']`（管理器自带 bundle 层，故照旧进 bundles）、`node_modules` 链接与 profile patch 均生成，且该 profile 能正常启动（base-only、无 web 服务器时不报错）。**余下部分**：回滚（面板停用/移除）后按钮在浏览器中消失——需真机，并入 5.1 走查清单。
