@@ -36,7 +36,7 @@ dsh --dump-config --profile web | grep -A1 'session-time-bucket'
 
 ## 未采用方案（记录理由，避免重复讨论）
 
-- **伞包复活当安装点**（根 `dsh-local-plugins` 插 manager 行）：根 `cordis.patch.yml` 的 5 个旧 id 与 profile 中管理器维护的 5 行**同 id** → 启用即 `duplicate loader entry id` 拒绝整次刷新；且 bundle 层只在启动读一次，收益仅「安装路径改名」。
+- **伞包复活当安装点**（根 `dsh-local-plugins` 插 manager 行）：根 `cordis.patch.yml` 的 5 个旧 id 与 profile 中管理器维护的 5 行**同 id** → 启用即 `duplicate loader entry id`；且 bundle 层只在启动读一次，收益仅「安装路径改名」。**2026-09-10 后续：伞包已连同 6 个子插件的 `dsh.bundle` 声明一起删除（见 [2026-09-10-retire-bundle-install.md](2026-09-10-retire-bundle-install.md)），这条路径从此不可能再出现。**
 - **把管理器移到仓库根**：`REPO_ROOT = path.resolve(src, '..', '..')` 等路径推导与全部文档路径都要重写，收益仅是安装点更短，是三个方案里改动面最大的。
 - **`POST /relink` 端点 + 面板按钮**：改为「启用即自愈」，复用既有 UI 与回滚路径（理由见 change 的 `design.md` R3）。
 

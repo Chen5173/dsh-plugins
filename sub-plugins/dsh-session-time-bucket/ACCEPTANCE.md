@@ -6,12 +6,15 @@
 
 ## 0. 前置
 
+安装一律走管理器面板（先装 `dsh-plugin-manager` 一次 → 重启 `dsh web` → 设置 →「本地插件」→ 打开本插件主开关）。**不要**用 `dsh plugin --profile web add` 装本子插件（不会激活，见 README 警示）。
+
 ```bash
-cd <dsh-plugins 仓库根>
-dsh plugin --profile web install
+# 面板启用后应能查到本插件的激活行（管理器写入，rowId = session-time-bucket）
+dsh --dump-config --profile web | grep -n session-time-bucket
 ```
 
-- [ ] 0.1 `[B]` 重启/强刷后，Console 无报错；核心侧栏一切如常（**没有任何额外入口图标**——本插件无独立入口）
+- [ ] 0.0 `[B]` 面板启用后：profile `devDependencies` 出现本插件的 `link:`、`dsh.profile.bundles` 里本地条目仍**只有 `dsh-plugin-manager`**、`cordis.patch.yml` 里 `session-time-bucket` 行**只有一行**
+- [ ] 0.1 `[B]` 刷新/强刷后，Console 无报错；核心侧栏一切如常（**没有任何额外入口图标**——本插件无独立入口）
 - [ ] 0.2 `[B]` 核心“视图选项”菜单 = 核心原生内容（分组方式/排序方式），**无任何插件注入项**
 
 ## 1. 跟随激活（单列表 + 最近更新）

@@ -17,17 +17,18 @@ dsh --version
 
 ## 1. 安装与加载
 
+安装一律走管理器面板（先装 `dsh-plugin-manager` 一次 → 重启 `dsh web` → 设置 →「本地插件」→ 打开本插件主开关）。**不要**用 `dsh plugin --profile web add` 装本子插件（不会激活，见 README 警示）。
+
 ```bash
-cd <本仓库>
-dsh plugin --profile web add ./dsh-session-title-regenerate
 dsh --dump-config --profile web | grep -n session-title-regenerate   # 应看到一行
 ```
 
-- [ ] 1.1 `[B]` 重启 `dsh web` 无报错、无插件加载失败提示
-- [ ] 1.2 `[B]` Console 无 `slot "conversation.session.header.actions" is not declared`、无 `list slot ... already has an entry with id`
-- [ ] 1.3 重复执行 add → `dsh.profile.bundles` 与 `cordis.patch.yml` 各**只有一行** `session-title-regenerate`
-- [ ] 1.4 `[H]` `grep -rnE "from '@deepseek-ai/|require\('@deepseek-ai/" dsh-session-title-regenerate/src/index.js` 无输出（宿主半零宿主包 import；注释里提到包名不算）
-- [ ] 1.5 `[B]` link 安装可直接加载（无 `node_modules`、默认解析）：`cd ~/.dsh/profiles/web && node --input-type=module -e "await import('dsh-session-title-regenerate')"` → 打印 `OK`
+- [ ] 1.1 `[B]` 装好管理器、重启后 `dsh web` 无报错、无插件加载失败提示，面板里本插件显示为「已启用」
+- [ ] 1.2 `[B]` 面板启用后：profile `devDependencies` 出现本插件的 `link:`、`dsh.profile.bundles` 里本地条目仍**只有 `dsh-plugin-manager`**
+- [ ] 1.3 `[B]` Console 无 `slot "conversation.session.header.actions" is not declared`、无 `list slot ... already has an entry with id`
+- [ ] 1.4 在面板里把主开关**关→开**一次 → profile `cordis.patch.yml` 里 `session-title-regenerate` 行**始终只有一行**（不产生第二条），且开回后功能恢复
+- [ ] 1.5 `[H]` `grep -rnE "from '@deepseek-ai/|require\('@deepseek-ai/" dsh-session-title-regenerate/src/index.js` 无输出（宿主半零宿主包 import；注释里提到包名不算）
+- [ ] 1.6 `[B]` link 安装可直接加载（无 `node_modules`、默认解析）：`cd ~/.dsh/profiles/web && node --input-type=module -e "await import('dsh-session-title-regenerate')"` → 打印 `OK`
 
 ## 2. 头部按钮入口（spec：会话头部提供重新生成标题入口）
 
@@ -80,12 +81,10 @@ dsh --dump-config --profile web | grep -n session-title-regenerate   # 应看到
 ## 9. 回滚
 
 ```bash
-# 方式 A：禁用（编辑 ~/.dsh/profiles/web/cordis.patch.yml）
-#   - id: session-title-regenerate
-#     disabled: true
-# 方式 B：卸载
-dsh plugin --profile web remove dsh-session-title-regenerate
+# 在管理器面板里操作，不要用 dsh plugin remove（会留下悬空激活行）
+# 方式 A：停用 —— 关掉本插件主开关（profile 行写 disabled: true，行保留）
+# 方式 B：卸载 —— 点本插件行上的「移除」（删激活行 + 摘 devDependency；源码目录保留）
 ```
 
-- [ ] 9.1 `[B]` 重启后按钮与菜单项消失，无残留报错
-- [ ] 9.2 插件不写任何持久数据（只追加 `session/title` 事件）→ 卸载后 `~/.dsh/` 下无本插件目录
+- [ ] 9.1 `[B]` 停用后（宿主侧即时生效，刷新页面）按钮与菜单项消失，无残留报错；再开回主开关恢复
+- [ ] 9.2 插件不写任何持久数据（只追加 `session/title` 事件）→ 卸载后 `~/.dsh/` 下无本插件目录，且 profile 里无指向本包的悬空行

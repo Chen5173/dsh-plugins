@@ -5,6 +5,8 @@
 - [x] 1.3 写**包自带** `cordis.patch.yml` 的 `- insert:` 单行（`id: open-session-workdir`）。验证（实测）：`dsh.profile.bundles` 里恰好 1 次；bundle 确实被 combo 加载（按钮已渲染）。**注意 profile 的 `cordis.patch.yml` 里 0 行是正确的**——那一版任务描述把「包自带 patch」误写成「profile patch」，`dsh plugin add` 只登记包，行由包自己贡献
 - [x] 1.4 `npm pack --dry-run` 检查产物只含 `src/` 与 `cordis.patch.yml`；验证：命令输出无 `node_modules`/`openspec` 泄漏
 
+> ℹ️ 2026-09-10 后续变更（`retire-local-plugin-bundle-install`）：本节记录的「包自带 `cordis.patch.yml` + `dsh.bundle` 声明」形态**已删除**——该 bundle 层会让 CLI `dsh plugin add <子插件>` 把包塞进 `dsh.profile.bundles`，与管理器写的激活行**同 id 撞车** → `dsh web` 启动失败 `duplicate loader entry id`。上面 1.1 / 1.3 / 1.4 保留为当时的事实记录；**当前形态**见根 `README.md`「⚠️ 这两条 `dsh plugin` 命令不要用」与 `docs/knowledge/2026-09-10-retire-bundle-install.md`。
+
 ## 2. 客户端注册与可见性门控
 
 - [x] 2.1 `src/client.js` 建立 bundle 协议：`window.__ModuleLoader__.load({ id:'<pkg>', factory })`，classic script、无 JSX、`React.createElement`，factory 返回 `{ apply, inject:['slots'] }`。验证（等价自动化形式）：`test/bundle.test.mjs` 用 `new Function('window','navigator','document', source)` 加载**真实产物**，断言 `__ModuleLoader__.load` 的 id/factory 形状与 `exports.inject === ['slots']`；现场侧由「按钮已渲染」证明——槽位未声明时 `ctx.slots.register` 会抛，而控制台没有任何 `slot "..." is not declared`

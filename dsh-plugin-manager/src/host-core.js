@@ -30,6 +30,12 @@ export const YAML_PKG = 'js-yaml'
 export const YAML_PKG_RANGE = '^4.1.0'
 /** HTTP endpoints namespace. */
 export const HTTP_PREFIX = '/__dsh-plugin-manager'
+/**
+ * How long switch requests are merged before one patch-file write. Each write
+ * costs DSH core a full config-tree re-application that blocks the host event
+ * loop (~0.7-1.2 s measured), so N quick clicks must collapse into one write.
+ */
+export const INTENT_DEBOUNCE_MS = 400
 
 // --- path helpers ------------------------------------------------------------
 
@@ -283,6 +289,33 @@ export function removeManaged(rows, id) {
       continue
     }
     out.push(row)
+  }
+  return out
+}
+
+/**
+ * Merge one requested switch state into the pending-intent list: intents are
+ * keyed by row id, so re-clicking a row replaces its earlier intent instead of
+ * queueing a second write. Returns a NEW list; never mutates input.
+ */
+export function mergeIntent(intents, intent) {
+  const list = Array.isArray(intents) ? intents : []
+  const id = String(intent && intent.id || '')
+  const name = String(intent && intent.name || id)
+  const enabled = !(intent && intent.enabled === false)
+  return [...list.filter((it) => it && it.id !== id), { id, name, enabled }]
+}
+
+/**
+ * Apply pending intents onto parsed patch rows (pure). An empty list is the
+ * identity transform; unknown ids become new canonical insert items, so a
+ * queued intent is exactly what a later flush writes.
+ */
+export function applyIntents(rows, intents) {
+  let out = rows
+  for (const it of Array.isArray(intents) ? intents : []) {
+    if (!it || typeof it.id !== 'string' || it.id === '') continue
+    out = upsertManaged(out, it.id, it.name || it.id, it.enabled !== false)
   }
   return out
 }

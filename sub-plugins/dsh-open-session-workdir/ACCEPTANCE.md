@@ -18,16 +18,17 @@ dsh --version
 
 ## 1. 安装与加载
 
+安装一律走管理器面板（先装 `dsh-plugin-manager` 一次 → 重启 `dsh web` → 设置 →「本地插件」→ 打开本插件主开关）。**不要**用 `dsh plugin --profile web add` 装本子插件（不会激活，见 README 警示）。
+
 ```bash
-cd <本仓库>
-dsh plugin --profile web add ./dsh-open-session-workdir
 dsh --dump-config --profile web | grep -n open-session-workdir   # 应看到一行
 ```
 
-- [ ] 1.1 `[B]` 重启 `dsh web` 无报错、无插件加载失败提示
-- [ ] 1.2 `[B]` DevTools → Network 过滤 `/plugins/`，能看到本插件 bundle 返回 **200**
-- [ ] 1.3 `[B]` Console 无 `slot "conversation.session.header.actions" is not declared`、无 `list slot ... already has an entry with id`
-- [ ] 1.4 重复执行 `dsh plugin --profile web add ./dsh-open-session-workdir`：`package.json` 的 `dsh.profile.bundles` 与 `cordis.patch.yml` 各**只有一行**，不产生第二条 `open-session-workdir`
+- [ ] 1.1 `[B]` 装好管理器、重启后 `dsh web` 无报错、无插件加载失败提示，面板里本插件显示为「已启用」
+- [ ] 1.2 `[B]` 面板启用后：profile `devDependencies` 出现本插件的 `link:`、`dsh.profile.bundles` 里本地条目仍**只有 `dsh-plugin-manager`**
+- [ ] 1.3 `[B]` DevTools → Network 过滤 `/plugins/`，刷新页面后能看到本插件 bundle 返回 **200**
+- [ ] 1.4 `[B]` Console 无 `slot "conversation.session.header.actions" is not declared`、无 `list slot ... already has an entry with id`
+- [ ] 1.5 在面板里把主开关**关→开**一次：profile `cordis.patch.yml` 里 `open-session-workdir` 行**始终只有一行**（不产生第二条），且开回后按钮恢复
 
 ## 2. 入口可见性（spec：会话视图提供打开工作目录的入口）
 
@@ -93,16 +94,13 @@ node sub-plugins/dsh-open-session-workdir/test/interception.test.mjs
 ## 10. 回滚
 
 ```bash
-# 方式 A：禁用
-#   编辑 ~/.dsh/profiles/web/cordis.patch.yml：
-#     - id: open-session-workdir
-#       disabled: true
-# 方式 B：卸载
-dsh plugin --profile web remove dsh-open-session-workdir
+# 在管理器面板里操作，不要用 dsh plugin remove（会留下悬空激活行）
+# 方式 A：停用 —— 关掉本插件主开关（profile 行写 disabled: true，行保留）
+# 方式 B：卸载 —— 点本插件行上的「移除」（删激活行 + 摘 devDependency；源码目录保留）
 ```
 
-- [ ] 10.1 `[B]` 重启后按钮消失，无残留报错
-- [ ] 10.2 插件不写任何持久数据 → 卸载后 `~/.dsh/` 下无本插件目录
+- [ ] 10.1 `[B]` 停用后（宿主侧即时生效，刷新页面）按钮消失，无残留报错；再开回主开关按钮恢复
+- [ ] 10.2 插件不写任何持久数据 → 卸载后 `~/.dsh/` 下无本插件目录，且 profile 里无指向本包的悬空行
 
 ---
 

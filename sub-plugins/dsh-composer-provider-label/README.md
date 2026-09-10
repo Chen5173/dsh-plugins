@@ -14,15 +14,24 @@ office · DeepSeek-V4-Flash · high
 
 核心的模型选择器只显示**模型名**（`ModelSelect` 触发器文案是 `model.name · 推理档`；只有模型不在目录里才退回 `provider/model`）。而同一模型名可以同时来自多个提供方——它们各自的计费、限流、上下文窗口与可用性都不同，只显示模型名根本看不出打的是哪条线。核心其实早就具备全部所需数据（会话的 `modelSelection` 投影 + 宿主的 `session/modelCatalog`），缺的只是一个把 provider 说出来的触点，以及一个「先选提供方、再选模型」的入口。
 
-## 安装
+## 安装 / 启停
 
-```bash
-dsh plugin --profile web add ./dsh-composer-provider-label
-# 或发布后：
-dsh plugin --profile web add dsh-composer-provider-label
-```
+本插件由仓库的**本地插件管理器**（`dsh-plugin-manager`）统一安装与启停，**不要**单独用 `dsh plugin add` 装它：
 
-然后重启 `dsh web`。安装会写入 profile `package.json` 的 `dsh.profile.bundles`，并应用插件自带的 `cordis.patch.yml`（一行 `insert`，行 id `composer-provider-label` 稳定，重复 add 不会产生第二条）。
+1. 只装管理器一次：
+   ```bash
+   dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
+   ```
+2. 重启 `dsh web`，打开设置 →「本地插件」。
+3. 在面板里打开本插件的主开关：管理器自动把本包以 `link:<本插件目录>` 写进 profile `devDependencies`（按需跑 `pnpm install`），并写入激活行 `- insert: [{ id: composer-provider-label, name: 'dsh-composer-provider-label' }]`。profile patch 被 DSH **实时热重载**，宿主侧即时生效；本插件带界面，**刷新页面**后界面才进引导图。
+
+- **停用**：面板里关掉主开关（行内写 `disabled: true`；行与依赖都保留，可随时再开）。
+- **卸载**：面板里点「移除」（删激活行 + 摘 devDependency；**仓库里的源码目录保留**，可随时再启用）。
+
+### ⚠️ 不要用 `dsh plugin add` 装/卸本子插件
+
+- **装**：本子插件包不声明 `dsh.bundle`，`dsh plugin --profile web add <本子插件目录或包名>` 只会把它装成 profile 的普通依赖并打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer`，**不会激活它**。激活一律走管理器面板。
+- **卸**：`dsh plugin --profile web remove <本子插件包名>` 只摘依赖、**不会删除管理器写的激活行**——残留的悬空行会让下次 `dsh web` 启动直接失败（`failed to import loader entry <id> (<name>): Cannot find package …`）。卸载请用面板「移除」。
 
 **版本要求**：需要核心 **≥ 0.1.2-rc.1**。`session/modelCatalog`、`session/selectModel` 与 `modelSelection` 投影都自 `0.1.2-alpha.1` 起才有（槽位 `conversation.input.right` 本身 0.1.0-rc.7 就有）。版本不够时标签**自动不出现**，不报错；若客户端的 UI 原语里没有 `Menu`，标签会退化为只读形态。
 
@@ -99,17 +108,21 @@ tooltip 文案跟随客户端语言（zh/en）；标签文本是 provider 名字
 - **菜单用核心原语**：`Menu`（`@deepseek-ai/dsh-client-ui-primitives`）+ 自己管理的 pane 状态。不用它的 submenu：子卡片无法用代码展开、不带勾选、还会关掉卡片滚动上限。原地渲染（`side=top`）与核心模型座位同策略。
 - **宿主依赖可缺失**：node 半经动态 import 加载 `@deepseek-ai/schemastery` 来注册 settings 段；导入失败/无 settings 服务时**静默跳过**，标签仍按内置表工作（见上面「已知限制」）。
 
-## 卸载 / 回滚
+## 停用 / 卸载 / 回滚
+
+在管理器面板里关掉主开关即停用（profile 里该行写 `disabled: true`），点「移除」即卸载（删激活行 + 摘 devDependency）。两者都被 DSH 实时热重载，宿主侧立即生效；**刷新页面**后标签消失。
 
 ```yaml
-# 方式 A：禁用（编辑 profile 的 cordis.patch.yml）
-- id: composer-provider-label
-  disabled: true
-# 方式 B：卸载
-dsh plugin --profile web remove dsh-composer-provider-label
+# 面板停用后 profile cordis.patch.yml 中的形态（行保留，可随时再开）
+- insert:
+    - id: composer-provider-label
+      name: 'dsh-composer-provider-label'
+      disabled: true
 ```
 
-重启后标签消失。插件不写会话数据。若你在 `settings.yaml` 里手写过 `dsh-composer-provider-label:` 段，卸载后它**残留无害**（没有注册方时 `describe()` 不含该 ns），想清理就手动删掉那几行。localStorage 里的 `dsh.composer-provider-label.v1` 也可以留着，卸载后无人读取。
+> 不要用 `dsh plugin --profile web remove dsh-composer-provider-label` 卸载：它只摘依赖、留下悬空激活行，下次 `dsh web` 启动会失败。见上方警示。
+
+插件不写会话数据。若你在 `settings.yaml` 里手写过 `dsh-composer-provider-label:` 段，卸载后它**残留无害**（没有注册方时 `describe()` 不含该 ns），想清理就手动删掉那几行。localStorage 里的 `dsh.composer-provider-label.v1` 也可以留着，卸载后无人读取。
 
 ## 与既有插件共存
 

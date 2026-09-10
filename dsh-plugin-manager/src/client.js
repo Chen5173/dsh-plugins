@@ -44,6 +44,7 @@ window.__ModuleLoader__.load({
       remove: '移除',
       removeConfirm: '将删除激活行并从 devDependencies 摘除该插件（可随时重新启用）。继续？',
       busy: '处理中…',
+      applying: '正在应用（宿主正在重应用配置树，界面可能短暂无响应）…',
       stateActive: '已激活',
       stateDisabled: '已停用',
       stateLegacy: '旧布局',
@@ -70,6 +71,7 @@ window.__ModuleLoader__.load({
       remove: 'Remove',
       removeConfirm: 'This deletes the activation row and drops the devDependency (can be re-enabled anytime). Continue?',
       busy: 'Working…',
+      applying: 'Applying (the host is re-applying its config tree; the UI may briefly stall)…',
       stateActive: 'Active',
       stateDisabled: 'Disabled',
       stateLegacy: 'Legacy',
@@ -139,6 +141,13 @@ window.__ModuleLoader__.load({
     }[st] || st)
 
     const API = '/__dsh-plugin-manager'
+    // 「应用生效」判据：写请求返回 ≠ 变更已生效。主机把连点合并成一次
+    // cordis.patch.yml 写入，写入会让 DSH 核心重应用整棵配置树并独占宿主
+    // 事件循环约 1 秒（实测 681–1184 ms），期间所有请求都在排队。因此只要
+    // 「还有未落盘的意图」或「探测往返仍然很慢」，就继续显示正在应用。
+    const HOST_IDLE_RTT_MS = 250
+    const APPLY_POLL_MS = 120
+    const APPLY_MAX_MS = 12000
 
     // --- panel component ----------------------------------------------------
     function LocalPluginsSection() {
@@ -147,7 +156,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(null) // 'migrate' | dir name
       const [notice, setNotice] = useState(null) // {type:'ok'|'err'|'warn', text}
       const [needReload, setNeedReload] = useState(false)
+      const [applying, setApplying] = useState(false)
       const seq = useRef(0)
+      const applySeq = useRef(0)
 
       const load = useCallback(async () => {
         const id = ++seq.current
@@ -166,6 +177,30 @@ window.__ModuleLoader__.load({
 
       useEffect(() => { load() }, [load])
 
+      const settle = useCallback(async () => {
+        const id = ++applySeq.current
+        setApplying(true)
+        try {
+          const t0 = Date.now()
+          for (;;) {
+            let queued = 0
+            let rtt = Infinity
+            const s = Date.now()
+            try {
+              const res = await fetch(`${API}/status`, { cache: 'no-store' })
+              const json = await res.json()
+              rtt = Date.now() - s
+              queued = Number(json.pendingWrites || 0)
+            } catch { /* host busy or restarting: keep waiting */ }
+            if (queued === 0 && rtt <= HOST_IDLE_RTT_MS) return
+            if (Date.now() - t0 > APPLY_MAX_MS) return
+            await new Promise((r) => setTimeout(r, APPLY_POLL_MS))
+          }
+        } finally {
+          if (id === applySeq.current) setApplying(false)
+        }
+      }, [])
+
       const run = useCallback(async (path, body, what) => {
         setBusy(what)
         setNotice(null)
@@ -180,6 +215,11 @@ window.__ModuleLoader__.load({
             throw new Error(json.error || `HTTP ${res.status}`)
           }
           setData(json.data || null)
+          // The response already carries the requested state (the host overlays
+          // queued intents); the flush and the core re-application behind it are
+          // what the user experiences as the stall.
+          await settle()
+          void load()
           return json
         } catch (e) {
           setNotice({ type: 'err', text: `${t('error')}: ${(e && e.message) || String(e)}` })
@@ -187,7 +227,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(null)
         }
-      }, [])
+      }, [settle, load])
 
       const toggle = (plugin) => {
         const target = !plugin.active
@@ -237,6 +277,9 @@ window.__ModuleLoader__.load({
         ),
         err && React.createElement('p', { style: S.err }, `${t('error')}: ${err}`),
         data && data.yamlError && React.createElement('p', { style: { ...S.err, marginTop: 0 } }, `YAML: ${data.yamlError}`),
+        applying && React.createElement('div', { style: S.banner },
+          React.createElement('span', { style: { flex: 1, fontSize: 13 } }, t('applying')),
+        ),
         notice && React.createElement('div', { style: { ...S.banner, ...(notice.type === 'err' ? S.bannerWarn : S.bannerOk) } },
           React.createElement('p', { style: S.notice }, notice.text),
           needReload && React.createElement('button', { style: S.button, onClick: () => { if (typeof window !== 'undefined') window.location.reload() } }, t('refresh')),

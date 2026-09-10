@@ -10,15 +10,24 @@
 
 核心其实早就具备打开原生路径的能力，缺的只是触点。本插件补的就是这个触点，因此核心将来换 opener、加平台，插件零跟随成本。
 
-## 安装
+## 安装 / 启停
 
-```bash
-dsh plugin --profile web add dsh-open-session-workdir
-# 本地开发：
-dsh plugin --profile web add ./dsh-open-session-workdir
-```
+本插件由仓库的**本地插件管理器**（`dsh-plugin-manager`）统一安装与启停，**不要**单独用 `dsh plugin add` 装它：
 
-然后重启 `dsh web`。安装会写入 profile `package.json` 的 `dsh.profile.bundles`，并应用插件自带的 `cordis.patch.yml`（一行 `insert`）。
+1. 只装管理器一次：
+   ```bash
+   dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
+   ```
+2. 重启 `dsh web`，打开设置 →「本地插件」。
+3. 在面板里打开本插件的主开关：管理器自动把本包以 `link:<本插件目录>` 写进 profile `devDependencies`（按需跑 `pnpm install`），并写入激活行 `- insert: [{ id: open-session-workdir, name: 'dsh-open-session-workdir' }]`。profile patch 被 DSH **实时热重载**，宿主侧即时生效；本插件带界面，**刷新页面**后界面才进引导图。
+
+- **停用**：面板里关掉主开关（行内写 `disabled: true`；行与依赖都保留，可随时再开）。
+- **卸载**：面板里点「移除」（删激活行 + 摘 devDependency；**仓库里的源码目录保留**，可随时再启用）。
+
+### ⚠️ 不要用 `dsh plugin add` 装/卸本子插件
+
+- **装**：本子插件包不声明 `dsh.bundle`，`dsh plugin --profile web add <本子插件目录或包名>` 只会把它装成 profile 的普通依赖并打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer`，**不会激活它**。激活一律走管理器面板。
+- **卸**：`dsh plugin --profile web remove <本子插件包名>` 只摘依赖、**不会删除管理器写的激活行**——残留的悬空行会让下次 `dsh web` 启动直接失败（`failed to import loader entry <id> (<name>): Cannot find package …`）。卸载请用面板「移除」。
 
 **版本要求**：需要 `@deepseek-ai/dsh-api-session-controller` ≥ `0.1.1-rc.2`（能力门控用的 `session.canOpenWorkspacePath` 从该版本起存在）。核心版本不够时按钮**自动不出现**，不会报错。
 
@@ -40,14 +49,19 @@ dsh plugin --profile web add ./dsh-open-session-workdir
 
 本插件因此不走那条漏斗，改走 `workspaces.openPath`（同一个宿主 `openNativePath`，只是没人劫持）。**两个插件可同时启用，互不影响**：聊天文件链接仍然进侧边栏，本按钮仍然开资源管理器。`test/interception.test.mjs` 会把 better-sidebar 真实产物里的 `wrapOpenWorkspacePath` 挂上来复现这件事；它没装时该测试自动 SKIP。
 
-## 卸载 / 回滚
+## 停用 / 卸载 / 回滚
 
-把 profile `cordis.patch.yml` 里那一行置为禁用，或直接 `dsh plugin --profile web remove dsh-open-session-workdir`，然后重启。插件不写任何持久数据，回滚无残留。
+在管理器面板里关掉主开关即停用（profile 里该行写 `disabled: true`），点「移除」即卸载（删激活行 + 摘 devDependency）。两者都被 DSH 实时热重载，宿主侧立即生效；**刷新页面**后按钮消失。插件不写任何持久数据，回滚无残留。
 
 ```yaml
-- id: open-session-workdir
-  disabled: true
+# 面板停用后 profile cordis.patch.yml 中的形态（行保留，可随时再开）
+- insert:
+    - id: open-session-workdir
+      name: 'dsh-open-session-workdir'
+      disabled: true
 ```
+
+> 不要用 `dsh plugin --profile web remove dsh-open-session-workdir` 卸载：它只摘依赖、留下悬空激活行，下次 `dsh web` 启动会失败。见上方警示。
 
 ## 行为
 

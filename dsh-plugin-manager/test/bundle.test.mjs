@@ -48,6 +48,7 @@ globalThis.document = { addEventListener() {}, removeEventListener() {} }
 // Stateful server stub the bundle's `fetch` parameter talks to.
 const state = {
   legacyDetected: false,
+  pendingWrites: 0,
   plugins: [
     { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false },
     { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'uninstalled', active: false, legacyBundle: false },
@@ -60,6 +61,9 @@ function payload() {
 async function fetchStub(url, opts) {
   fetchCalls.push({ url, opts })
   if (url === '/__dsh-plugin-manager/list') return { ok: true, json: async () => payload() }
+  if (url === '/__dsh-plugin-manager/status') {
+    return { ok: true, json: async () => ({ ok: true, pendingWrites: state.pendingWrites || 0, lastFlushError: null }) }
+  }
   if (url === '/__dsh-plugin-manager/set-enabled') {
     const body = JSON.parse((opts && opts.body) || '{}')
     const p = state.plugins.find((x) => x.dir === body.dir)
@@ -280,6 +284,38 @@ test('toggling a client plugin posts set-enabled and shows a reload hint (no aut
   assert.equal(JSON.parse(setCalls[0].opts.body).enabled, true)
   assert.match(textOf(after), /刷新页面使界面生效/, 'reload hint shown after client-plugin toggle')
   assert.equal(reloaded, false, 'no automatic reload after toggle')
+})
+
+test('shows 「正在应用」 while the host still owes a write, without locking other rows', async () => {
+  fetchCalls.length = 0
+  const pump = async () => { for (let i = 0; i < 8; i += 1) await flush() }
+
+  state.pendingWrites = 1
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  let tree = section()
+  const bbbEl = byType(tree, 'li').find((li) => /dsh-bbb/.test(textOf(li)))
+  walk(bbbEl, (n) => n.props && n.props.role === 'switch')[0].props.onClick()
+  await pump()
+  begin()
+  tree = section()
+  assert.ok(
+    fetchCalls.some((c) => c.url === '/__dsh-plugin-manager/status'),
+    'host is probed for unflushed writes',
+  )
+  assert.match(textOf(tree), /正在应用/, 'applying banner while the queued write is not on disk yet')
+  const aaaSwitch = walk(byType(tree, 'li').find((li) => /dsh-aaa/.test(textOf(li))), (n) => n.props && n.props.role === 'switch')[0]
+  assert.ok(!aaaSwitch.props.disabled, 'other rows stay clickable so the host can merge the burst')
+
+  // Host drains the queue: the banner must clear on its own (no manual refresh).
+  state.pendingWrites = 0
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  await pump()
+  begin()
+  assert.doesNotMatch(textOf(section()), /正在应用/, 'banner clears once pendingWrites is back to zero')
 })
 
 test('legacy rows show migrate banner; migrate asks confirmation', async () => {

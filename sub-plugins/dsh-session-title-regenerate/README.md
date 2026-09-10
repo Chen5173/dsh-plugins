@@ -17,30 +17,28 @@
 4. **写入**：`ctx.sessionTitle.rename(session, title)` ——与核心 `remote.session.rename` 同一公共 API：新标题进入日志、固定标题（来源记为 `user`）、客户端列表经标题投影即时刷新。
 5. **反馈**：成功 Toast「标题已更新：<新标题>」，失败 Toast 透出原因。
 
-## 安装
+## 安装 / 启停
 
-```bash
-# 在本仓库内（dsh-plugins）
-dsh plugin --profile web add ./dsh-session-title-regenerate
-```
+本插件由仓库的**本地插件管理器**（`dsh-plugin-manager`）统一安装与启停，**不要**单独用 `dsh plugin add` 装它：
 
-或手动接入（**当前仓库统一由 `dsh-plugin-manager` 管理本地子插件**：装好管理器后在设置页「本地插件」里启用本插件即可；下面这段是已退役的旧布局写法，仅作参考）：
+1. 只装管理器一次：
+   ```bash
+   dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
+   ```
+2. 重启 `dsh web`，打开设置 →「本地插件」。
+3. 在面板里打开本插件的主开关：管理器自动把本包以 `link:<本插件目录>` 写进 profile `devDependencies`（按需跑 `pnpm install`），并写入激活行 `- insert: [{ id: session-title-regenerate, name: 'dsh-session-title-regenerate' }]`。profile patch 被 DSH **实时热重载**，宿主侧即时生效；本插件带界面，**刷新页面**后界面才进引导图。
 
-```jsonc
-// ~/.dsh/profiles/web/package.json
-{
-  "dsh": { "profile": { "bundles": [ /* ... */, "dsh-session-title-regenerate" ] } },
-  "dependencies": {
-    "dsh-session-title-regenerate": "link:C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/sub-plugins/dsh-session-title-regenerate"
-  }
-}
-```
+- **停用**：面板里关掉主开关（行内写 `disabled: true`；行与依赖都保留，可随时再开）。
+- **卸载**：面板里点「移除」（删激活行 + 摘 devDependency；**仓库里的源码目录保留**，可随时再启用）。
 
-新管理器布局下：子插件放 profile `devDependencies`（`link:` 到本仓库子目录），激活行由管理器写进 `cordis.patch.yml`（live 热重载）；`dsh.profile.bundles` 只留 `dsh-plugin-manager`。插件自身的 `cordis.patch.yml` 提供稳定行 `session-title-regenerate`，重复 add 不产生重复行。
+### ⚠️ 不要用 `dsh plugin add` 装/卸本子插件
+
+- **装**：本子插件包不声明 `dsh.bundle`，`dsh plugin --profile web add <本子插件目录或包名>` 只会把它装成 profile 的普通依赖并打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer`，**不会激活它**。激活一律走管理器面板。
+- **卸**：`dsh plugin --profile web remove <本子插件包名>` 只摘依赖、**不会删除管理器写的激活行**——残留的悬空行会让下次 `dsh web` 启动直接失败（`failed to import loader entry <id> (<name>): Cannot find package …`）。卸载请用面板「移除」。
 
 ## 配置
 
-`/regenerate-title` 命令的默认策略见 `src/index.js` 的 `DEFAULTS`，可在 profile 的 cordis patch 行上用 `config:` 覆盖（示例）：
+`/regenerate-title` 命令的默认策略见 `src/index.js` 的 `DEFAULTS`，可在 profile 的 cordis patch 行上用 `config:` 覆盖（示例）。该行由管理器面板写入（规范形态 = `- insert: [{ id, name, config?, disabled? }]`）；**在管理器写的这行 insert 项上**手工补的 `config:` 会被保留——开关切换只改 `disabled`（`upsertManaged` 对已存在的 insert 项做 `{ ...item, name }` 后仅增删 `disabled`），所以不要改它的 `id`/`name`。反之，若自己另写一条顶层覆盖行（`- id: session-title-regenerate` + `config:`），首次开关会把它规范化成 insert 项并丢掉那些额外字段 —— 要覆盖配置请直接写在下面这条 insert 项上：
 
 ```yaml
 - insert:

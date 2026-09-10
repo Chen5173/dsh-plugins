@@ -31,6 +31,9 @@ import {
   pluginRootsOf,
   pluginAbsDirOf,
   staleLinkSpec,
+  INTENT_DEBOUNCE_MS,
+  mergeIntent,
+  applyIntents,
 } from '../src/host-core.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -308,6 +311,47 @@ function samplePlugins(root) {
     { from: 'link:D:/repo/dsh-aaa', to: linkSpecOf(meta.dirPath) },
     'a link pointing at the old flat path is reported with both specs',
   )
+}
+
+// --- pending switch intents (debounced writes) -------------------------------
+
+{
+  // One write costs DSH core a full config-tree re-application (~1 s host
+  // stall), so intents are keyed by row id and never queue twice.
+  assert.equal(typeof INTENT_DEBOUNCE_MS, 'number')
+  assert.ok(INTENT_DEBOUNCE_MS > 0 && INTENT_DEBOUNCE_MS <= 1000, 'debounce window is a sane number of ms')
+
+  const empty = []
+  const a = mergeIntent(empty, { id: 'aaa', name: 'dsh-aaa', enabled: true })
+  assert.deepEqual(a, [{ id: 'aaa', name: 'dsh-aaa', enabled: true }])
+  assert.deepEqual(empty, [], 'mergeIntent never mutates the input list')
+
+  const ab = mergeIntent(a, { id: 'bbb', name: 'dsh-bbb', enabled: false })
+  assert.equal(ab.length, 2, 'different rows coexist')
+  assert.deepEqual(ab[1], { id: 'bbb', name: 'dsh-bbb', enabled: false })
+
+  const reclicked = mergeIntent(ab, { id: 'aaa', name: 'dsh-aaa', enabled: false })
+  assert.equal(reclicked.length, 2, 're-clicking a row replaces its intent instead of queueing a second write')
+  assert.deepEqual(reclicked.filter((it) => it.id === 'aaa'), [{ id: 'aaa', name: 'dsh-aaa', enabled: false }])
+  assert.deepEqual(reclicked.filter((it) => it.id === 'bbb'), [{ id: 'bbb', name: 'dsh-bbb', enabled: false }])
+
+  assert.deepEqual(mergeIntent(undefined, { id: 'x', enabled: true }), [{ id: 'x', name: 'x', enabled: true }], 'tolerates a missing list')
+  assert.equal(mergeIntent(a, { id: 'aaa', enabled: true })[0].enabled, true, 'enabled defaults to true unless explicitly false')
+
+  // applyIntents is the identity on an empty list and equals what the flush writes.
+  const rows = [{ insert: [{ id: 'aaa', name: 'dsh-aaa' }] }]
+  assert.deepEqual(applyIntents(rows, []), rows, 'no intents = identity')
+  assert.deepEqual(applyIntents(rows, undefined), rows)
+
+  const off = applyIntents(rows, [{ id: 'aaa', name: 'dsh-aaa', enabled: false }])
+  assert.equal(off[0].insert[0].disabled, true, 'queued off intent lands as disabled')
+  const on = applyIntents(rows, [{ id: 'aaa', name: 'dsh-aaa', enabled: true }])
+  assert.equal('disabled' in on[0].insert[0], false)
+  assert.equal(rows[0].insert[0].disabled, undefined, 'input rows are not mutated')
+
+  const fresh = applyIntents(rows, [{ id: 'ccc', name: 'dsh-ccc', enabled: true }])
+  assert.equal(fresh.length, 2, 'an intent for an unknown row becomes a new canonical insert item')
+  assert.deepEqual(fresh[1].insert[0], { id: 'ccc', name: 'dsh-ccc' })
 }
 
 // --- yaml engine with a real parser is constructible (js-yaml optional) ------

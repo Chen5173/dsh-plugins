@@ -38,8 +38,11 @@ import {
   MANAGER_ID,
   DEFAULT_PROFILE,
   HTTP_PREFIX,
+  INTENT_DEBOUNCE_MS,
   YAML_PKG,
   YAML_PKG_RANGE,
+  applyIntents,
+  mergeIntent,
   dshHome,
   profileDirOf,
   patchPathOf,
@@ -76,6 +79,10 @@ export const HOST_DIAG = {
   endpointsRegistered: false,
   yamlResolved: false,
   yamlError: null,
+  /** Switch intents accepted but not yet written to the patch file. */
+  pendingWrites: 0,
+  /** Last debounced-flush failure (null when the last flush succeeded). */
+  lastFlushError: null,
 }
 
 // --- tiny HTTP helpers -------------------------------------------------------
@@ -201,13 +208,92 @@ function readPlugins(repoRoot) {
   return listRepoPluginDirs(repoRoot).map((dir) => readPluginMeta(repoRoot, dir))
 }
 
+// --- pending switch intents (debounced patch writes) -------------------------
+//
+// ONE patch-file write costs DSH core a full config-tree re-application that
+// blocks the host event loop — measured 681 / 797 / 1021 / 1184 ms with a 5 ms
+// /status probe, while the same write with identical bytes costs nothing (core
+// short-circuits unchanged config). Switch requests therefore merge here for
+// INTENT_DEBOUNCE_MS and reach disk as ONE write: N clicks = one write = one
+// re-application. Responses overlay the queued intents (see snapshot), so the
+// panel shows the requested state immediately without waiting for the flush.
+
+/** Queued {id, name, enabled} switch intents; [] once everything is persisted. */
+let pendingIntents = []
+let flushTimer = null
+let flushChain = Promise.resolve()
+
+function queueIntent(intent) {
+  pendingIntents = mergeIntent(pendingIntents, intent)
+  HOST_DIAG.pendingWrites = pendingIntents.length
+}
+
+function scheduleFlush(ctx, config) {
+  if (flushTimer) clearTimeout(flushTimer)
+  flushTimer = setTimeout(() => {
+    flushTimer = null
+    flushChain = flushChain.then(() => flushPending(ctx, config)).catch(() => {})
+  }, INTENT_DEBOUNCE_MS)
+}
+
+/**
+ * Write every queued intent in one pass, re-reading the disk rows first so a
+ * concurrent writer (hand edit, another tool) is never clobbered by a copy we
+ * captured earlier in the debounce window.
+ */
+async function flushPending(ctx, config) {
+  if (pendingIntents.length === 0) return
+  const intents = pendingIntents
+  pendingIntents = []
+  HOST_DIAG.pendingWrites = 0
+  const c = resolveContext(config, ctx && ctx.baseUrl)
+  const y = await ensureYaml(c.profileDir)
+  if (!y.engine) {
+    HOST_DIAG.lastFlushError = y.error
+    return
+  }
+  HOST_DIAG.yamlResolved = true
+  HOST_DIAG.yamlError = null
+  try {
+    let rows = readPatchRows(y.engine, c.patchFile)
+    for (const it of intents) rows = upsertManaged(rows, it.id, it.name, it.enabled)
+    writePatchRows(y.engine, c.patchFile, rows)
+    HOST_DIAG.lastFlushError = null
+  } catch (e) {
+    // Loud, and disk truth wins: the intents are dropped so the next /list
+    // reports what is actually on disk instead of a state that never landed.
+    HOST_DIAG.lastFlushError = (e && e.message) || String(e)
+  }
+}
+
+/** Best-effort synchronous flush for the dispose path (host shutting down). */
+function flushPendingSync(c) {
+  if (pendingIntents.length === 0) return
+  const intents = pendingIntents
+  try {
+    const probe = requireProfileYaml(c.profileDir)
+    if (!probe.jsyaml) return
+    const engine = makeYamlEngine(probe.jsyaml)
+    let rows = readPatchRows(engine, c.patchFile)
+    for (const it of intents) rows = upsertManaged(rows, it.id, it.name, it.enabled)
+    writePatchRows(engine, c.patchFile, rows)
+    pendingIntents = []
+    HOST_DIAG.pendingWrites = 0
+    HOST_DIAG.lastFlushError = null
+  } catch (e) {
+    HOST_DIAG.lastFlushError = (e && e.message) || String(e)
+  }
+}
+
 function snapshot(ctx, config) {
   const c = resolveContext(config, ctx && ctx.baseUrl)
   const plugins = readPlugins(c.repoRoot)
   const manifest = readManifest(c.manifestFile)
   const yaml = requireProfileYaml(c.profileDir)
   const rows = yaml.jsyaml ? readPatchRows(makeYamlEngine(yaml.jsyaml), c.patchFile) : []
-  const derived = deriveStates({ repoPlugins: plugins, manifest, rows })
+  // Queued intents are what the user asked for: report them as the current
+  // state (the flush makes them durable a few hundred ms later).
+  const derived = deriveStates({ repoPlugins: plugins, manifest, rows: applyIntents(rows, pendingIntents) })
   const legacyDetected = derived.some((p) => p.legacyBundle)
   return { c, manifest, rows, plugins, derived, legacyDetected, yamlError: yaml.error }
 }
@@ -299,6 +385,8 @@ function registerHttp(ctx, host, config) {
           endpointsRegistered: true,
           yamlResolved: HOST_DIAG.yamlResolved,
           yamlError: HOST_DIAG.yamlError,
+          pendingWrites: pendingIntents.length,
+          lastFlushError: HOST_DIAG.lastFlushError,
         })
         return
       }
@@ -356,8 +444,11 @@ function registerHttp(ctx, host, config) {
                 }
               }
             }
-            rows = upsertManaged(rows, meta.rowId, meta.name, enabled)
-            writePatchRows(y.engine, c.patchFile, rows)
+            // Merge instead of writing: one write = one core config-tree
+            // re-application (~1 s host stall), so a burst of clicks has to
+            // collapse into a single write (design.md R1/R4).
+            queueIntent({ id: meta.rowId, name: meta.name, enabled })
+            scheduleFlush(ctx, __cfg)
             sendJson(res, 200, listPayload(snapshot(ctx, __cfg)))
             return
           }
@@ -371,6 +462,9 @@ function registerHttp(ctx, host, config) {
             })
             return
           }
+          // Persist queued intents first, then re-read: the flush rewrote the file.
+          await flushPending(ctx, __cfg)
+          rows = readPatchRows(y.engine, c.patchFile)
           rows = removeManaged(rows, meta.rowId)
           writePatchRows(y.engine, c.patchFile, rows)
           const dropped = await dropDevDep(c, meta.name)
@@ -380,7 +474,9 @@ function registerHttp(ctx, host, config) {
           return
         }
 
-        // migrate
+        // migrate — settle queued switch intents first so the plan is computed
+        // against the file the user's clicks already asked for.
+        await flushPending(ctx, __cfg)
         const s = snapshot(ctx, __cfg)
         const c = s.c
         const y = await ensureYaml(c.profileDir)
@@ -426,7 +522,15 @@ function registerHttp(ctx, host, config) {
     }
   }
 
-  ctx.effect(() => host.register({ kind: 'prefix', path: HTTP_PREFIX, handler: h }))
+  ctx.effect(() => {
+    const registered = host.register({ kind: 'prefix', path: HTTP_PREFIX, handler: h })
+    return () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
+      // A queued switch must not evaporate when the host exits.
+      try { flushPendingSync(resolveContext(__cfg, ctx && ctx.baseUrl)) } catch { /* best effort */ }
+      if (typeof registered === 'function') { try { registered() } catch { /* best effort */ } }
+    }
+  })
   HOST_DIAG.endpointsRegistered = true
 }
 
