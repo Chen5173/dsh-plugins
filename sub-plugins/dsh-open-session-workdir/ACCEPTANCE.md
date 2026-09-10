@@ -87,7 +87,7 @@ stat -c '%y %s' "$S"      # 记下 mtime 与大小
 自动化侧已有一条挂载对方真实代码的探针：
 
 ```bash
-node dsh-open-session-workdir/test/interception.test.mjs
+node sub-plugins/dsh-open-session-workdir/test/interception.test.mjs
 ```
 
 ## 10. 回滚

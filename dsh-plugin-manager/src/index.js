@@ -56,6 +56,8 @@ import {
   deriveStates,
   planMigration,
   linkSpecOf,
+  staleLinkSpec,
+  pluginRootsOf,
 } from './host-core.js'
 
 const name = 'dsh-plugin-manager'
@@ -63,10 +65,13 @@ const inject = []
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = repoRootOfPluginSrc(HERE)
+/** Root actually scanned for plugin packages (sub-plugins/ when present). */
+const PLUGINS_ROOT = pluginRootsOf(REPO_ROOT)[0]
 
 /** Visible diagnostics for the /status endpoint. */
 export const HOST_DIAG = {
   repoRoot: REPO_ROOT,
+  pluginsRoot: PLUGINS_ROOT,
   profileName: DEFAULT_PROFILE,
   endpointsRegistered: false,
   yamlResolved: false,
@@ -164,6 +169,7 @@ function resolveContext(config, baseUrl) {
     patchFile: patchPathOf(home, profileName),
     manifestFile: manifestPathOf(home, profileName),
     repoRoot: REPO_ROOT,
+    pluginsRoot: PLUGINS_ROOT,
   }
 }
 
@@ -211,6 +217,7 @@ function listPayload(s) {
     ok: true,
     data: {
       repoRoot: s.c.repoRoot,
+      pluginsRoot: s.c.pluginsRoot,
       profileName: s.c.profileName,
       profileDir: s.c.profileDir,
       patchFile: s.c.patchFile,
@@ -228,8 +235,12 @@ async function ensureDevDep(c, pkgName, absDir) {
   const manifest = readManifest(c.manifestFile)
   const inDeps = Object.prototype.hasOwnProperty.call(manifest.dependencies || {}, pkgName)
   const inDev = Object.prototype.hasOwnProperty.call(manifest.devDependencies || {}, pkgName)
-  if (inDev) return { installed: true, ranPnpm: false, error: null }
   const spec = linkSpecOf(absDir)
+  // Already linked to the right directory → nothing to do. A devDep pointing
+  // elsewhere (e.g. the pre-move flat path after dirs moved into sub-plugins/)
+  // is repaired below instead of being trusted.
+  const stale = inDev ? staleLinkSpec(manifest, { name: pkgName, dirPath: absDir }) : null
+  if (inDev && !stale) return { installed: true, ranPnpm: false, error: null }
   const backup = backupFile(c.manifestFile)
   const manifest2 = { ...manifest }
   manifest2.dependencies = { ...(manifest.dependencies || {}) }
@@ -281,6 +292,7 @@ function registerHttp(ctx, host, config) {
           ok: true,
           plugin: 'dsh-plugin-manager',
           repoRoot: c.repoRoot,
+          pluginsRoot: c.pluginsRoot,
           profileName: c.profileName,
           profileDir: c.profileDir,
           patchFile: c.patchFile,

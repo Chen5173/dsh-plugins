@@ -23,6 +23,8 @@ export const MANAGER_ID = 'dsh-plugin-manager'
 export const DEFAULT_PROFILE = 'web'
 /** Every local plugin folder in this monorepo starts with this prefix. */
 export const PLUGIN_DIR_PREFIX = 'dsh-'
+/** Sub-directory holding the sibling plugin packages (preferred layout). */
+export const PLUGINS_DIRNAME = 'sub-plugins'
 /** Profile devDependency the host needs for patch-file YAML round-trips. */
 export const YAML_PKG = 'js-yaml'
 export const YAML_PKG_RANGE = '^4.1.0'
@@ -65,25 +67,79 @@ export function linkSpecOf(absDir) {
   return `link:${absDir.replace(/\\/g, '/')}`
 }
 
+/**
+ * Compare one plugin's profile devDependency spec with the spec its CURRENT
+ * directory requires. Returns null when there is nothing to repair (or when the
+ * package is not one of our devDependencies); otherwise {from, to}.
+ * This is what makes enabling a plugin self-heal a link left behind by a layout
+ * move (e.g. dirs relocated into sub-plugins/).
+ */
+export function staleLinkSpec(manifest, meta) {
+  const dev = (manifest && manifest.devDependencies) || {}
+  const current = dev[meta.name]
+  if (typeof current !== 'string') return null
+  const want = linkSpecOf(meta.dirPath)
+  return current === want ? null : { from: current, to: want }
+}
+
 // --- repo scanning -----------------------------------------------------------
 
-/** dsh-* sibling directory names under the repo root (excludes the manager). */
-export function listRepoPluginDirs(repoRoot) {
-  let entries = []
+/**
+ * Candidate roots that may hold plugin packages, most specific first:
+ * `<repo>/sub-plugins` when it exists, then the legacy flat `<repo>` root. Both
+ * are scanned so a half-migrated repo (some dirs still flat) stays fully usable
+ * and the move can be done in any order.
+ */
+export function pluginRootsOf(repoRoot) {
+  const nested = path.join(repoRoot, PLUGINS_DIRNAME)
+  let hasNested = false
   try {
-    entries = fs.readdirSync(repoRoot, { withFileTypes: true })
+    hasNested = fs.statSync(nested).isDirectory()
   } catch {
-    return []
+    hasNested = false
   }
-  return entries
-    .filter((e) => e.isDirectory() && e.name.startsWith(PLUGIN_DIR_PREFIX) && e.name !== MANAGER_DIR)
-    .map((e) => e.name)
-    .sort()
+  return hasNested ? [nested, repoRoot] : [repoRoot]
+}
+
+/** Absolute directory of one plugin, preferring the nested layout when present. */
+export function pluginAbsDirOf(repoRoot, dir) {
+  for (const root of pluginRootsOf(repoRoot)) {
+    const abs = path.join(root, dir)
+    try {
+      if (fs.statSync(abs).isDirectory()) return abs
+    } catch {
+      // try the next root
+    }
+  }
+  return path.join(repoRoot, dir)
+}
+
+/**
+ * dsh-* plugin directory names across the candidate roots, deduped by name
+ * (the nested copy wins) and sorted. The manager's own dir is excluded.
+ */
+export function listRepoPluginDirs(repoRoot) {
+  const seen = new Set()
+  for (const root of pluginRootsOf(repoRoot)) {
+    let entries = []
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      if (!e.name.startsWith(PLUGIN_DIR_PREFIX)) continue
+      if (e.name === MANAGER_DIR) continue
+      seen.add(e.name)
+    }
+  }
+  return [...seen].sort()
 }
 
 /** Read one plugin's package.json metadata; invalid dirs are flagged, never throw. */
 export function readPluginMeta(repoRoot, dir) {
-  const dirPath = path.join(repoRoot, dir)
+  const dirPath = pluginAbsDirOf(repoRoot, dir)
   const pkgPath = path.join(dirPath, 'package.json')
   const base = {
     dir,
@@ -335,12 +391,12 @@ export function planMigration({ repoPlugins, manifest, rows, repoRoot, managerId
       delete deps[p.name]
       moved.push(p.name)
       if (!inDevDeps) {
-        devDeps[p.name] = linkSpecOf(path.join(repoRoot, p.dir))
+        devDeps[p.name] = linkSpecOf(p.dirPath || path.join(repoRoot, p.dir))
         addedDev.push(p.name)
       }
     } else if (inBundles && !inDevDeps) {
       // bundle-only legacy presence without a dependency: link it as a devDep.
-      devDeps[p.name] = linkSpecOf(path.join(repoRoot, p.dir))
+      devDeps[p.name] = linkSpecOf(p.dirPath || path.join(repoRoot, p.dir))
       addedDev.push(p.name)
     }
     if (inBundles) {

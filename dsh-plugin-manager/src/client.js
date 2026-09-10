@@ -30,8 +30,9 @@ window.__ModuleLoader__.load({
     const NS = 'dshPluginManager'
     const zhDict = {
       nav: '本地插件',
-      intro: '管理本仓库根目录下的 dsh-* 子插件在 profile 中的激活状态。',
+      intro: '管理本仓库子插件目录（sub-plugins/）下的 dsh-* 子插件在 profile 中的激活状态。',
       repoRoot: '仓库目录',
+      pluginsRoot: '子插件目录',
       profile: '目标 profile',
       refresh: '刷新',
       reload: '刷新页面使界面生效',
@@ -49,14 +50,15 @@ window.__ModuleLoader__.load({
       stateUninstalled: '未激活',
       stateInactive: '未激活(仅依赖)',
       stateInvalid: '非插件目录',
-      noPlugins: '仓库根没有发现 dsh-* 子插件。',
+      noPlugins: '子插件目录（sub-plugins/）没有发现 dsh-* 子插件。',
       error: '出错',
       hasClientTag: '带界面',
     }
     const enDict = {
       nav: 'Local plugins',
-      intro: 'Manage the dsh-* plugins under this repo root in the current profile.',
+      intro: "Manage the dsh-* plugins under this repo's sub-plugins/ directory in the current profile.",
       repoRoot: 'Repo root',
+      pluginsRoot: 'Plugins root',
       profile: 'Profile',
       refresh: 'Refresh',
       reload: 'Reload page to apply UI changes',
@@ -74,7 +76,7 @@ window.__ModuleLoader__.load({
       stateUninstalled: 'Inactive',
       stateInactive: 'Inactive (dep only)',
       stateInvalid: 'Not a plugin',
-      noPlugins: 'No dsh-* plugins found under the repo root.',
+      noPlugins: 'No dsh-* plugins found under sub-plugins/.',
       error: 'Error',
       hasClientTag: 'UI',
     }
@@ -229,6 +231,8 @@ window.__ModuleLoader__.load({
         React.createElement('p', { style: S.intro }, t('intro')),
         React.createElement('div', { style: S.metaRow },
           data && React.createElement('span', null, `${t('repoRoot')}: ${data.repoRoot}`),
+          data && data.pluginsRoot && data.pluginsRoot !== data.repoRoot
+            && React.createElement('span', null, `${t('pluginsRoot')}: ${data.pluginsRoot}`),
           data && React.createElement('span', null, `${t('profile')}: ${data.profileName}`),
         ),
         err && React.createElement('p', { style: S.err }, `${t('error')}: ${err}`),

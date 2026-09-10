@@ -3,6 +3,7 @@
 # 机器本地 / 调试（.vscode 内含 chrome-profile 浏览器缓存与本地 token 配置）
 .vscode/
 .serena/
+.codemap/
 *.log
 .DS_Store
 Thumbs.db

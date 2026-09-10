@@ -14,7 +14,7 @@
 ### 安装
 
 ```bash
-dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins/dsh-plugin-manager
+dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
 # 重启 dsh web → 设置 → 本地插件 → 若提示旧布局，先点「一键接管/迁移」
 ```
 
@@ -31,8 +31,8 @@ dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins/dsh-plu
 
 ## 新增一个插件到本仓库
 
-1. 在根目录建 `dsh-xxx/`（含 `package.json` 声明 `dsh.bundle.patch`、`dsh.client`、`exports["./client"]`、README/ACCEPTANCE）。
-2. 管理器**自动扫描**到它（仓库根 `dsh-*`），在设置「本地插件」里点启用即完成安装+激活——**无需**再改 profile 或本 README 的清单。
+1. 在 `sub-plugins/` 下建 `dsh-xxx/`（含 `package.json` 声明 `dsh.bundle.patch`、`dsh.client`、`exports["./client"]`、README/ACCEPTANCE）。管理器也接受仓库根的旧扁平位置。
+2. 管理器**自动扫描**到它（`sub-plugins/dsh-*` 与仓库根 `dsh-*` 的并集），在设置「本地插件」里点启用即完成安装+激活——**无需**再改 profile 或本 README 的清单。
 
 ## 已退役：聚合伞包 `dsh-local-plugins`
 

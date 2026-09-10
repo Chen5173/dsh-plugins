@@ -58,7 +58,7 @@ dsh plugin --profile web add ./dsh-composer-history-recall
 ## 开发
 
 ```bash
-node dsh-composer-history-recall/test/bundle.test.mjs
+node sub-plugins/dsh-composer-history-recall/test/bundle.test.mjs
 ```
 
 24 条行为断言覆盖：bundle 注册协议、服务声明、overlay 槽位 id/order、capture 阶段挂载、locale 字典注册、历史派生（最新在前 / 仅 user / 丢弃空）、进入召回、逐条推进与边界、退出恢复 savedDraft、首/末行门控、chip 抑制、触发 token 抑制、无历史惰性、未聚焦忽略、修饰键 / IME 放行、编辑重置、切换会话重置、绝不 submit。

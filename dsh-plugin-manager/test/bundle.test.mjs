@@ -55,7 +55,7 @@ const state = {
   ],
 }
 function payload() {
-  return { ok: true, data: { repoRoot: 'D:/repo', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins } }
+  return { ok: true, data: { repoRoot: 'D:/repo', pluginsRoot: 'D:/repo/sub-plugins', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins } }
 }
 async function fetchStub(url, opts) {
   fetchCalls.push({ url, opts })
@@ -244,6 +244,18 @@ test('renders plugin rows from /list with state text and no auto reload', async 
   assert.match(texts, /非插件目录/)
   assert.ok(fetchCalls.some((c) => c.url === '/__dsh-plugin-manager/list'), 'list fetched on mount')
   assert.equal(reloaded, false, 'no automatic reload on plain render')
+})
+
+test('header shows the repo root and the scanned plugins root (sub-plugins)', async () => {
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  const texts = textOf(section())
+  assert.match(texts, /仓库目录/, 'repo root still shown')
+  assert.match(texts, /子插件目录/, 'plugins root label rendered')
+  assert.match(texts, /D:\/repo\/sub-plugins/, 'nested plugins root path shown')
 })
 
 test('toggling a client plugin posts set-enabled and shows a reload hint (no auto reload)', async () => {

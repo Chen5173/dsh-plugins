@@ -31,7 +31,7 @@ dsh plugin --profile web add ./dsh-session-title-regenerate
 {
   "dsh": { "profile": { "bundles": [ /* ... */, "dsh-session-title-regenerate" ] } },
   "dependencies": {
-    "dsh-session-title-regenerate": "link:D:/ChenSirDocument/Dsh-Projects/dsh-plugins/dsh-session-title-regenerate"
+    "dsh-session-title-regenerate": "link:C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/sub-plugins/dsh-session-title-regenerate"
   }
 }
 ```
@@ -59,7 +59,7 @@ dsh plugin --profile web add ./dsh-session-title-regenerate
 ## 测试
 
 ```bash
-node dsh-session-title-regenerate/test/bundle.test.mjs
+node sub-plugins/dsh-session-title-regenerate/test/bundle.test.mjs
 ```
 
 纯 Node 逻辑 harness（无浏览器）：宿主命令 handler（消息收集、最低推理参数、标题规范化、错误/重试/截断/取消路径）+ 客户端（槽位注册、命令触发、标题→id 解析、菜单注入与点击流）。宿主半**不 import 任何宿主包**——消息构造与流装配是 `src/index.js` 内的本地实现——因此测试与运行都不需要 `node_modules`，`link:` 安装也能直接加载。

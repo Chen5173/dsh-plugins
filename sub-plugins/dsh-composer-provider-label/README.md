@@ -120,7 +120,7 @@ dsh plugin --profile web remove dsh-composer-provider-label
 ## 开发
 
 ```bash
-node dsh-composer-provider-label/test/bundle.test.mjs   # 51 条逻辑断言 + 能力审计
+node sub-plugins/dsh-composer-provider-label/test/bundle.test.mjs   # 51 条逻辑断言 + 能力审计
 node --check dsh-composer-provider-label/src/index.js
 node --check dsh-composer-provider-label/src/client.js
 ```

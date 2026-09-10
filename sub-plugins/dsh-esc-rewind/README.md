@@ -58,7 +58,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 ## 开发 / 验证
 
 ```bash
-node dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（28 条，含删除模式）
+node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（28 条，含删除模式）
 node --check dsh-esc-rewind/src/client.js
 node --check dsh-esc-rewind/src/index.js
 ```

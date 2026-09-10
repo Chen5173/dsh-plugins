@@ -27,6 +27,10 @@ import {
   deriveStates,
   planMigration,
   makeYamlEngine,
+  PLUGINS_DIRNAME,
+  pluginRootsOf,
+  pluginAbsDirOf,
+  staleLinkSpec,
 } from '../src/host-core.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -229,6 +233,81 @@ function samplePlugins(root) {
   const plan = planMigration({ repoPlugins: plugins, manifest, rows, repoRoot: repo })
   assert.equal(plan.needsMigration, false, 'migrated profile: no further changes')
   assert.deepEqual(plan.summary.moved, [])
+}
+
+// --- sub-plugins/ nested layout (preferred plugin root) ----------------------
+
+{
+  const repo = path.join(tmpRoot, 'nested')
+  fs.mkdirSync(repo, { recursive: true })
+  writeRepo(path.join(repo, PLUGINS_DIRNAME), ['dsh-one', 'dsh-two', MANAGER_DIR])
+
+  assert.deepEqual(
+    pluginRootsOf(repo),
+    [path.join(repo, PLUGINS_DIRNAME), repo],
+    'nested root first, repo root kept as the legacy fallback',
+  )
+  assert.deepEqual(listRepoPluginDirs(repo), ['dsh-one', 'dsh-two'], 'nested plugins found, manager dir excluded')
+  const meta = readPluginMeta(repo, 'dsh-one')
+  assert.equal(meta.valid, true)
+  assert.equal(meta.dirPath, path.join(repo, PLUGINS_DIRNAME, 'dsh-one'), 'dirPath resolves into sub-plugins/')
+  assert.equal(pluginAbsDirOf(repo, 'dsh-one'), path.join(repo, PLUGINS_DIRNAME, 'dsh-one'))
+  assert.equal(pluginAbsDirOf(repo, 'dsh-absent'), path.join(repo, 'dsh-absent'), 'unknown dir falls back to flat path')
+}
+
+{
+  // Half-migrated repo: the same plugin dir exists in both roots → union, nested wins.
+  const repo = path.join(tmpRoot, 'partial')
+  fs.mkdirSync(repo, { recursive: true })
+  writeRepo(repo, ['dsh-flat'])
+  writeRepo(path.join(repo, PLUGINS_DIRNAME), ['dsh-flat', 'dsh-moved'])
+
+  assert.deepEqual(listRepoPluginDirs(repo), ['dsh-flat', 'dsh-moved'], 'union of both roots, deduped by name')
+  assert.equal(pluginAbsDirOf(repo, 'dsh-flat'), path.join(repo, PLUGINS_DIRNAME, 'dsh-flat'), 'nested copy wins')
+  assert.equal(readPluginMeta(repo, 'dsh-flat').dirPath, path.join(repo, PLUGINS_DIRNAME, 'dsh-flat'))
+}
+
+{
+  // Migration must link the directory the plugin actually lives in.
+  const repo = path.join(tmpRoot, 'nested-migrate')
+  fs.mkdirSync(repo, { recursive: true })
+  writeRepo(path.join(repo, PLUGINS_DIRNAME), ['dsh-aaa'])
+  const plugins = listRepoPluginDirs(repo).map((d) => readPluginMeta(repo, d))
+  const manifest = {
+    dependencies: { 'dsh-aaa': 'link:D:/old/dsh-aaa' },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app', 'dsh-plugin-manager'] } },
+  }
+  const plan = planMigration({ repoPlugins: plugins, manifest, rows: [], repoRoot: repo })
+  assert.equal(
+    plan.newManifest.devDependencies['dsh-aaa'],
+    linkSpecOf(path.join(repo, PLUGINS_DIRNAME, 'dsh-aaa')),
+    'migrated devDep points at sub-plugins/, not the repo root',
+  )
+}
+
+{
+  // Stale-link detection drives the self-heal on enable.
+  const repo = path.join(tmpRoot, 'stale')
+  fs.mkdirSync(repo, { recursive: true })
+  writeRepo(path.join(repo, PLUGINS_DIRNAME), ['dsh-aaa'])
+  const meta = readPluginMeta(repo, 'dsh-aaa')
+
+  assert.equal(staleLinkSpec({ devDependencies: {} }, meta), null, 'absent devDep is not a stale link')
+  assert.equal(
+    staleLinkSpec({ devDependencies: { 'dsh-aaa': 'link:D:/elsewhere' } }, { name: 'dsh-other', dirPath: meta.dirPath }),
+    null,
+    'only the given package name is ours to repair',
+  )
+  assert.equal(
+    staleLinkSpec({ devDependencies: { 'dsh-aaa': linkSpecOf(meta.dirPath) } }, meta),
+    null,
+    'already-correct spec needs no repair',
+  )
+  assert.deepEqual(
+    staleLinkSpec({ devDependencies: { 'dsh-aaa': 'link:D:/repo/dsh-aaa' } }, meta),
+    { from: 'link:D:/repo/dsh-aaa', to: linkSpecOf(meta.dirPath) },
+    'a link pointing at the old flat path is reported with both specs',
+  )
 }
 
 // --- yaml engine with a real parser is constructible (js-yaml optional) ------

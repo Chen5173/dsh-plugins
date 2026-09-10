@@ -47,7 +47,7 @@ dsh plugin --profile web add dsh-session-time-bucket   # 或 add ./dsh-session-t
 ## 开发 / 验证
 
 ```bash
-node dsh-session-time-bucket/test/bundle.test.mjs   # 逻辑 harness（16 条）
+node sub-plugins/dsh-session-time-bucket/test/bundle.test.mjs   # 逻辑 harness（16 条）
 node --check dsh-session-time-bucket/src/client.js
 ```
 

@@ -81,8 +81,8 @@ dsh plugin --profile web add ./dsh-open-session-workdir
 ## 开发
 
 ```bash
-node dsh-open-session-workdir/test/bundle.test.mjs        # 30 条逻辑断言
-node dsh-open-session-workdir/test/interception.test.mjs  # 挂载 better-sidebar 真实代码的探针
+node sub-plugins/dsh-open-session-workdir/test/bundle.test.mjs        # 30 条逻辑断言
+node sub-plugins/dsh-open-session-workdir/test/interception.test.mjs  # 挂载 better-sidebar 真实代码的探针
 ```
 
 30 条逻辑断言覆盖（含一条**能力审计**：从已安装的 typert 元数据取出 session remote 全部改状态方法，断言 bundle 一个都不调）：bundle 注册协议、服务声明、槽位 id/order/locale、能力门控关闭路径、**服务晚于 apply 挂载时仍能出按钮**、`cwd` 门控与会话切换、路径原样透传、连续点击、成功 Toast、四种失败分类（含 opener 缺失）、超时、复制写入剪贴板、locale 字典注册。
