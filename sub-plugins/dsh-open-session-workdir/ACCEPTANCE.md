@@ -108,8 +108,8 @@ node sub-plugins/dsh-open-session-workdir/test/interception.test.mjs
 
 ## 全量场景对照
 
-`openspec/changes/add-open-session-workdir/specs/session-workdir-open/spec.md` 共 6 条 Requirement / 17 个场景。逐条走查完成后：
+`openspec/specs/session-workdir-open/spec.md` 共 6 条 Requirement / 18 个场景（该变更已于 2026-09-10 归档：`openspec/changes/archive/2026-09-10-add-open-session-workdir/`；逐条走查记录见其 tasks 的 5.1）。逐条走查完成后：
 
 ```bash
-openspec validate add-open-session-workdir --strict
+openspec validate --specs
 ```
