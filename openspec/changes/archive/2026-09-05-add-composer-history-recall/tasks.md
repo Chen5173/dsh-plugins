@@ -28,12 +28,12 @@
 ## 5. 文案与主题
 
 - [x] 5.1 `ctx.locale.register(NS,{zh,en})` 并在注册项声明 `locale:NS`，`locale/change` 后刷新（design D8）；验证：harness「locale dictionaries are registered under the plugin namespace」+ 边界 Toast 走 `t('toast.oldest')`（已执行）；切英文不刷新的实时生效记于 ACCEPTANCE 7.2
-- [ ] 5.2 若渲染任何可见反馈（仅 Toast），颜色只用 `--dsw-*` token、不硬编码；验证：深浅色主题各触发一次边界提示，无对比度失效——**需真实浏览器**，见 ACCEPTANCE 7.3
+- [x] 5.2 若渲染任何可见反馈（仅 Toast），颜色只用 `--dsw-*` token、不硬编码；验证：深浅色主题各触发一次边界提示，无对比度失效——**需真实浏览器**，见 ACCEPTANCE 7.3（2026-09-10 用户真机确认通过）
 
 ## 6. 集成验收与交付
 
 - [x] 6.1 写逻辑 harness `test/bundle.test.mjs`（自带 hook shim 与假 composer DOM，无 jsdom），覆盖 2.3 / 3.1–3.6 / 4.1–4.3 / 5.1 的可断言部分；验证：`node dsh-composer-history-recall/test/bundle.test.mjs` → 20/20 passed（已执行）
 - [x] 6.2 逐条走查 `specs/composer-history-recall/spec.md` 的 7 条 Requirement 全部场景并记录；验证：`openspec validate add-composer-history-recall --strict` → valid（已执行）；15 个场景逐一对应 harness 断言（见 README「开发」段映射）
-- [ ] 6.3 只读回归：召回前后比对当前会话 id、对话内容、滚动位置，以及 `~/.dsh/sessions/<slug>/<id>/session.jsonl.zstd` 的 mtime 与大小；验证：四项均无变化——**需真实宿主会话日志**，见 ACCEPTANCE 8
-- [ ] 6.4 与 `dsh-open-session-workdir`、`@huanlin/dsh-plugin-session-delete` 共存安装；验证：无 slot 项 id 冲突、各自可用、方向键召回与头部按钮互不影响——**需真实安装环境**，见 ACCEPTANCE 9
+- [x] 6.3 只读回归：召回前后比对当前会话 id、对话内容、滚动位置，以及 `~/.dsh/sessions/<slug>/<id>/session.jsonl.zstd` 的 mtime 与大小；验证：四项均无变化——**需真实宿主会话日志**，见 ACCEPTANCE 8（2026-09-10 用户真机确认通过）
+- [x] 6.4 与 `dsh-open-session-workdir`、`@huanlin/dsh-plugin-session-delete` 共存安装；验证：无 slot 项 id 冲突、各自可用、方向键召回与头部按钮互不影响——**需真实安装环境**，见 ACCEPTANCE 9（2026-09-10 用户真机确认通过）
 - [x] 6.5 写 `README.md`（安装/卸载含 `disabled:true` 回滚、所需核心版本下限、逻辑行语义与「不抢多行光标/触发菜单」说明、以及「本插件不含任何宿主端点」）与 `ACCEPTANCE.md`（人眼验收清单）；验证：两份文档已交付（`npm pack --dry-run` 已含二者）；照 README 在干净 profile 从零装一遍属宿主冒烟，记于 ACCEPTANCE 1

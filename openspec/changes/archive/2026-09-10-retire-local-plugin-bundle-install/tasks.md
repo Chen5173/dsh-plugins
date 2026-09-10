@@ -37,8 +37,10 @@
   - 陈旧布局红能力对照：把该包塞回 `bundles` → exit 1，`dsh: profile bundle "dsh-esc-rewind" declares no dsh.bundle in its package.json`（改造前同一构造报 `duplicate loader entry id: esc-rewind`）
   - 管理器接管能力未受影响：`readPluginMeta` 不读 `dsh.bundle`，`ensureDevDep` 会把误装出的 `dependencies` 条目改写为 `devDependencies` 的 `link:`
 
+- [x] 5.5 实机验收（2026-09-10 用户重启 `dsh web` 后）：`GET /list` → 6 个子插件全 `state=active`、`installWhere=devDependencies`、`valid=true`；`legacyDetected=false`、`yamlError=null`、`pendingWrites=0`、`lastFlushError=null`；宿主启动无 `failed to import loader entry`（该错误会让启动直接失败，故无报错即可判为加载正常）
+
 ## 6. 归档与提交（待用户验收）
 
-- [ ] 6.1 用户验收后 `openspec archive retire-local-plugin-bundle-install`
+- [x] 6.1 用户验收后 `openspec archive retire-local-plugin-bundle-install`（2026-09-10 重启验收通过后归档）
 - [x] 6.2 提交（代码与文档同一 commit；本项目未接入版本管理体系，body 末尾注明跳过版本号/changelog）
 - [x] 6.3 提交粒度：经用户决定，本变更与尚未提交的 `batch-toggle-writes` **合并为一次提交**（两个 OpenSpec change 目录仍各自独立，归档时分别处理）

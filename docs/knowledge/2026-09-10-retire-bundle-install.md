@@ -49,6 +49,6 @@
 
 ## 相关文件
 
-- 变更：`openspec/changes/retire-local-plugin-bundle-install/`（proposal / design(含全部实测表) / tasks / spec delta）
+- 变更：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/`（proposal / design(含全部实测表) / tasks / spec delta）
 - 行为契约：`openspec/specs/plugin-manager/spec.md`「本地插件不提供 bundle 安装路径」
 - 文档：根 `README.md`（「已删除：聚合伞包」+「⚠️ 这两条 CLI 命令不要用」）、`AGENTS.md`、6 个子插件的 README/ACCEPTANCE、`dsh-plugin-manager/README.md`

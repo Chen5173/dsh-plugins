@@ -27,5 +27,5 @@
 ## 相关文件
 
 - 插件：`dsh-plugin-manager/{src/host-core.js, src/index.js, src/client.js, cordis.patch.yml, README.md, ACCEPTANCE.md, test/*}`
-- 计划：`openspec/changes/add-plugin-manager/`（归档后进 `openspec/specs/plugin-manager/`）
+- 变更：`openspec/changes/archive/2026-09-09-add-plugin-manager/`（delta 已并入 `openspec/specs/plugin-manager/`）
 - 已删除：仓库根伞包 `dsh-local-plugins`（根 `package.json` / `cordis.patch.yml` 于 2026-09-10 物理删除；此前只标 deprecated）

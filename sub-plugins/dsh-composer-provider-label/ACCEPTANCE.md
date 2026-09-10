@@ -122,7 +122,7 @@ stat -c '%y %s' "$S"      # 记下 mtime 与大小
 ## 全量场景对照
 
 - v1（已归档）：`openspec/changes/archive/2026-09-09-add-composer-provider-label/`，能力规格见 `openspec/specs/composer-provider-label/spec.md`。
-- 本轮扩展：`openspec/changes/extend-composer-provider-picker/specs/composer-provider-label/spec.md`（3 条 MODIFIED + 1 条 REMOVED + 5 条 ADDED）。
+- 本轮扩展：`openspec/changes/archive/2026-09-09-extend-composer-provider-picker/specs/composer-provider-label/spec.md`（3 条 MODIFIED + 1 条 REMOVED + 5 条 ADDED）。
 
 逐条走查完成后：
 

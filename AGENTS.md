@@ -13,4 +13,4 @@ DSH 插件开发/收集仓库（本地 git monorepo；每个插件是独立子�
 - `sub-plugins/dsh-*/package.json` MUST NOT 声明 `dsh.bundle`，目录内 MUST NOT 有包自带 `cordis.patch.yml`；仓库根 MUST NOT 再提供聚合伞包 `dsh-local-plugins`（根 `package.json` / `cordis.patch.yml` 已删除）。
 - 原因：子插件的激活行由管理器写在 profile `cordis.patch.yml`。若包同时声明 `dsh.bundle`，一次 `dsh plugin --profile web add <子插件目录>` 就会把它塞进 `dsh.profile.bundles`，包自带 patch 与管理器行**同 id 各插一次** → `dsh web` 启动失败 `duplicate loader entry id: <rowId>`（已实测复现）。
 - 卸载/停用只能走管理器面板：`dsh plugin --profile web remove <子插件包名>` 只摘依赖、不删管理器写的激活行，会留下悬空行使下次启动报 `failed to import loader entry …: Cannot find package …`（同样已实测）。
-- 变更记录与实测证据：`openspec/changes/retire-local-plugin-bundle-install/`。
+- 变更记录与实测证据：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/`。

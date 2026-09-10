@@ -63,7 +63,7 @@ dsh --dump-config --profile web | grep -n composer-history-recall   # 应看到�
 
 - [ ] 7.1 `[B]` 中文客户端 → 边界 Toast 为中文
 - [ ] 7.2 `[B]` 切英文后**不刷新**再触发 → Toast 变英文（`locale/change` 生效）
-- [ ] 7.3 `[B]` 深色 / 浅色主题各触发一次 Toast → 无硬编码色、对比度正常
+- [x] 7.3 `[B]` 深色 / 浅色主题各触发一次 Toast → 无硬编码色、对比度正常（2026-09-10 用户真机确认通过）
 
 ## 8. 只读回归（spec：召回只填回草稿不自动发送）
 
@@ -72,13 +72,13 @@ S=~/.dsh/sessions/<slug>/<session-id>/session.jsonl.zstd
 stat -c '%y %s' "$S"      # 记下 mtime 与大小
 ```
 
-- [ ] 8.1 反复用 `↑`/`↓` 召回多条历史
-- [ ] 8.2 `[B]` 当前会话 id 未变、对话内容未变、滚动位置未变、无消息被自动发出
-- [ ] 8.3 再次 `stat -c '%y %s' "$S"` → **mtime 与大小均无变化**
+- [x] 8.1 反复用 `↑`/`↓` 召回多条历史（2026-09-10 用户真机确认通过）
+- [x] 8.2 `[B]` 当前会话 id 未变、对话内容未变、滚动位置未变、无消息被自动发出（2026-09-10 用户真机确认通过）
+- [x] 8.3 再次 `stat -c '%y %s' "$S"` → **mtime 与大小均无变化**（2026-09-10 用户真机确认通过）
 
 ## 9. 共存
 
-- [ ] 9.1 `[B]` 与 `dsh-open-session-workdir`、`@huanlin/dsh-plugin-session-delete` 同时启用 → 头部按钮与本插件互不影响、无 slot id 冲突
+- [x] 9.1 `[B]` 与 `dsh-open-session-workdir`、`@huanlin/dsh-plugin-session-delete` 同时启用 → 头部按钮与本插件互不影响、无 slot id 冲突（2026-09-10 用户真机确认通过）
 
 ## 10. 回滚
 
@@ -95,7 +95,7 @@ stat -c '%y %s' "$S"      # 记下 mtime 与大小
 
 ## 全量场景对照
 
-`openspec/changes/add-composer-history-recall/specs/composer-history-recall/spec.md` 共 7 条 Requirement / 15 个场景。逐条走查完成后：
+`openspec/changes/archive/2026-09-05-add-composer-history-recall/specs/composer-history-recall/spec.md` 共 7 条 Requirement / 15 个场景。逐条走查完成后：
 
 ```bash
 openspec validate add-composer-history-recall --strict

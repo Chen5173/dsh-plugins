@@ -1,6 +1,6 @@
 # DSH 插件：composer 提供方标签升级为两级选择器（dsh-composer-provider-label）
 
-日期：2026-09-09 · 涉及：`dsh-composer-provider-label/{src/client.js,test/bundle.test.mjs,README.md,ACCEPTANCE.md}`、`openspec/changes/extend-composer-provider-picker/`
+日期：2026-09-09 · 涉及：`dsh-composer-provider-label/{src/client.js,test/bundle.test.mjs,README.md,ACCEPTANCE.md}`、`openspec/changes/archive/2026-09-09-extend-composer-provider-picker/`
 
 ## 一句话
 

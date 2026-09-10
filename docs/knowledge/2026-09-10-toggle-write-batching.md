@@ -46,6 +46,6 @@ openspec validate batch-toggle-writes --strict
 
 ## 相关文件
 
-- 变更：`openspec/changes/batch-toggle-writes/`（proposal / design / tasks / spec delta）
+- 变更：`openspec/changes/archive/2026-09-10-batch-toggle-writes/`（proposal / design / tasks / spec delta）
 - 代码：`dsh-plugin-manager/src/{host-core.js,index.js,client.js}`、`test/debounce.test.mjs`
 - 文档：`dsh-plugin-manager/README.md`（宿主半副作用节）、`dsh-plugin-manager/ACCEPTANCE.md`（A8）

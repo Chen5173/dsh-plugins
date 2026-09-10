@@ -38,7 +38,7 @@ dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugi
 | `dsh plugin --profile web add <子插件目录>` | 子插件包已不声明 `dsh.bundle`，于是只把它装成 profile 的**普通依赖**并打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer` 警告：**不进 bundles、也不会激活它**。激活请用面板开关（管理器会把它改写成 `devDependencies` 的 `link:` 并写入激活行）。 |
 | `dsh plugin --profile web remove <子插件包名>` | 只摘依赖、**不删管理器写的激活行** → 留下指向不存在包的悬空行，下次 `dsh web` 启动失败：`failed to import loader entry <rowId> (<pkg>): Cannot find package …`（实测 exit 1）。卸载请用面板「移除」。 |
 
-证据与逐条实测：`openspec/changes/retire-local-plugin-bundle-install/design.md`。
+证据与逐条实测：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/design.md`。
 
 ## 新增一个插件到本仓库
 

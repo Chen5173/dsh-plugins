@@ -48,7 +48,7 @@
 
 ### Requirement: 主开关激活/停用子插件并持久化
 
-系统 SHALL 为每个可管理子插件提供主开关：停用 = 在其激活行上写 `disabled`（保留行与现场，可再启用）；启用 = 移除 `disabled` 并确保行存在。激活状态 MUST 持久化为 profile `cordis.patch.yml` 中由管理器维护的行（稳定 id、`name`=子插件包名），DSH 对 profile patch 的实时热重载 MUST 让宿主侧即时启停；对带浏览器客户端 UI 的子插件，界面侧 MUST 经一次页面刷新进入/离开引导图。管理器 MUST 不触碰 `dsh-mcp-manager` 等其它插件的行。
+系统 SHALL 为每个可管理子插件提供主开关：停用 = 在其激活行上写 `disabled`（保留行与现场，可再启用）；启用 = 移除 `disabled` 并确保行存在。激活状态 MUST 持久化为 profile `cordis.patch.yml` 中由管理器维护的行（稳定 id、`name`=子插件包名），DSH 对 profile patch 的实时热重载 MUST 让宿主侧即时启停；对带浏览器客户端 UI 的子插件，界面侧 MUST 经一次页面刷新进入/离开引导图。管理器 MUST 不触碰 `dsh-mcp-manager` 等其它插件的行。对主开关请求的持久化 SHALL 在短窗口内合并（见「开关写入合并与重应用可见性」）：面板 MUST 在用户点击后立即按目标状态呈现该行，而行的落盘可以在合并窗口后完成。
 
 #### Scenario: 停用已激活子插件
 
@@ -69,6 +69,11 @@
 
 - **WHEN** profile `cordis.patch.yml` 中已有 `dsh-mcp-manager` 等其它插件维护的行，用户对某个本地子插件执行开关
 - **THEN** 其它行原样保留、内容不被破坏或改写
+
+#### Scenario: 开关目标状态立即呈现
+
+- **WHEN** 用户点击某子插件的主开关
+- **THEN** 该行在他看到响应时已经处于目标状态（面板不显示中间态等待落盘），行的落盘可在其后完成
 
 ### Requirement: 启用缺失依赖的子插件时自动安装
 
@@ -164,3 +169,61 @@
 
 - **WHEN** 用户把 `sub-plugins/` 下的子包移回仓库根
 - **THEN** 管理器仍能枚举它们，行 id 与状态不变，无需改代码或改 profile 行
+
+### Requirement: 开关写入合并与重应用可见性
+
+系统 SHALL 把短时间内的多次主开关请求合并为一次 profile `cordis.patch.yml` 写入（默认 400 ms 合并窗口），使 N 次点击最多只触发一次 DSH 核心的配置重应用；窗口内对同一行的再次请求 SHALL 覆盖该行的待写意图，MUST NOT 产生多次写入。合并后的落盘 SHALL 以磁盘当前内容为基础再套用待写意图，MUST NOT 用陈旧副本覆盖其它写入者的改动。`/__dsh-plugin-manager/status` SHALL 暴露未落盘的待写数量，面板 SHALL 在「仍有未落盘变更」或「宿主未恢复响应」期间显示「正在应用」提示，并在两者都消解后自动撤下，MUST NOT 要求用户手动刷新。合并落盘失败时系统 MUST 让失败可见（面板提示与诊断字段），并使后续列表以磁盘真实状态为准，MUST NOT 静默丢弃意图。宿主进程正常退出时，仍待写的意图 SHALL 被尽力落盘。
+
+#### Scenario: 连点多个开关只写一次文件
+
+- **WHEN** 用户在合并窗口内对两个不同子插件各发出一次开关请求
+- **THEN** profile `cordis.patch.yml` 只被写入一次，DSH 核心只发生一次配置重应用，两行最终都等于用户的目标状态
+
+#### Scenario: 同一行重复点击合并为一次写入
+
+- **WHEN** 用户在合并窗口内对同一子插件连续切换两次（例如关再开）
+- **THEN** 只有最后一次的目标状态被写入，文件不出现该行的中间状态
+
+#### Scenario: 面板显示正在应用并在宿主恢复后自动消失
+
+- **WHEN** 用户点击开关，落盘与随后的核心配置重应用开始
+- **THEN** 面板显示「正在应用」提示；当待写数量归零且宿主恢复响应后，提示自动撤下，无需用户操作
+
+#### Scenario: 合并窗口内仍可继续操作
+
+- **WHEN** 面板正在显示「正在应用」，用户去点另一个子插件的开关
+- **THEN** 该操作被接受并并入同一次待写意图（不因提示而被拒绝），且不额外增加一次核心配置重应用
+
+#### Scenario: 落盘失败不静默
+
+- **WHEN** 合并后的写入失败（例如 patch 文件不可写）
+- **THEN** 面板显示错误，诊断字段记录失败原因，后续列表返回磁盘上的真实状态（不呈现「看似已生效」的假状态）
+
+#### Scenario: 退出时尽力落盘
+
+- **WHEN** 宿主进程在合并窗口尚未结束时正常退出
+- **THEN** 尚未落盘的意图被尽力写入 patch 文件；无法写入时保留磁盘原状，不产生半个文件或损坏的 YAML
+
+### Requirement: 本地插件不提供 bundle 安装路径
+
+本仓库 MUST NOT 为本地子插件提供 bundle 层：`sub-plugins/` 下每个子插件的 `package.json` MUST NOT 声明 `dsh.bundle`，目录内 MUST NOT 存在包自带的 `cordis.patch.yml`。仓库根 MUST NOT 再提供聚合伞包清单（无根 `package.json`、无根 `cordis.patch.yml`）。据此，`dsh plugin --profile <name> add <子插件目录>` 这一路径 MUST NOT 让子插件进入 `dsh.profile.bundles`、MUST NOT 产生与管理器激活行重复的 loader entry id（否则 `dsh web` 启动会因 `duplicate loader entry id` 直接失败）；该路径的可见后果 SHALL 限于"装成普通 profile 依赖 + 打印 `declares no dsh.bundle` 警告 + 不激活"，且 MUST 不影响已有激活行，管理器 SHALL 仍能在启用时接管该包（把同名依赖改写为 `devDependencies` 的 `link:`）。卸载子插件的唯一受支持路径 SHALL 是管理器面板的「移除」；文档 MUST 明确警示 `dsh plugin --profile <name> remove <子插件包名>` 只摘依赖而不删管理器写的激活行，会留下指向不存在包的悬空行并使下次启动失败（`failed to import loader entry <id> (<name>): Cannot find package …`）。
+
+#### Scenario: 子插件包不自带 bundle 层
+
+- **WHEN** 检查 `sub-plugins/` 下每个子插件的 manifest 与目录内容
+- **THEN** 没有任何 manifest 声明 `dsh.bundle`，目录内也不存在包自带的 `cordis.patch.yml`
+
+#### Scenario: 仓库根不再提供聚合伞包
+
+- **WHEN** 检查仓库根是否存在可安装的伞包清单
+- **THEN** 根 `package.json` 与根 `cordis.patch.yml` 都不存在，`dsh-local-plugins` 不再是一个可被 `dsh plugin add` 装进 profile 的包
+
+#### Scenario: CLI 误装只装成普通依赖且不激活
+
+- **WHEN** 在某个 profile 上执行 `dsh plugin --profile <name> add <某子插件目录>`
+- **THEN** 该包进入 profile `dependencies` 而**不进入** `dsh.profile.bundles`，CLI 打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer` 警告，管理器维护的激活行数量与内容不变，且该 profile 仍能正常启动（不出现 `duplicate loader entry id`）
+
+#### Scenario: 卸载路径唯一且在文档中被明确警示
+
+- **WHEN** 用户想卸载某个子插件
+- **THEN** 文档指示的唯一路径是管理器面板「移除」（删激活行 + 摘依赖，仓库源码目录保留）；同时明确写出用 `dsh plugin --profile <name> remove <子插件包名>` 的后果是留下悬空激活行、导致下次启动报 `failed to import loader entry …: Cannot find package …`
