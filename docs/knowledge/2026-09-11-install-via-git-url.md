@@ -25,5 +25,6 @@
 ## 下一步 / 未了结
 
 - 补 `test/batch-toggle.test.mjs`（复用 `debounce.test.mjs` 的真 handler harness + `__setPnpmRunner` 桩），否则 A10 里引用它的 5 条 `[x]` 不成立。
-- 真机跑一次真实 `git+https://`（含私有仓库鉴权）——本地 `git+file://` 覆盖不到网络与凭据面。
+- ~~真机跑一次真实 `git+https://`~~ → **已做**（2026-09-11 推到 `135ce6b` + tag `v0.1.0` 后）：`add git+https://github.com/Chen5173/dsh-plugins.git` 与其 `#v0.1.0` 形式都 exit 0，依赖键 `dsh-plugin-manager`、bundles 恰一条、装出来的是整棵工作树，装完的 clone 里外壳测试仍 PASS。顺带一个值得记的细节：**pnpm 会把 `git+https://github.com/<user>/<repo>.git` 归一化成 `github:<user>/<repo>` 写进 `dependencies`**，两者是同一个东西，别以为被改坏了。
+- 仍未覆盖：私有仓库的 git 凭据面（本仓库 public）、以及浏览器里面板与子插件界面的真机复核。
 - 若希望面板能区分「管理器来自 git clone」与「管理器来自本地 checkout」并据此提示「这是快照，升级用 update」，需要在 `/list` 里加一个来源字段（现在只有路径）。

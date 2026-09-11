@@ -69,7 +69,8 @@
 ## 已知限制
 
 - **git 装的是快照**：改仓库源码不即时生效，升级走 `dsh plugin --profile <name> update`。`/list` 目前只回显路径，面板不区分「clone」与「本地 checkout」，也不会提示「该用 update」。
-- **私有仓库鉴权不在本仓库掌控内**：pnpm 直接调用系统 git，凭据走 git 侧（SSH key / credential helper）。本次只验到 `git+file://`，真实 `git+https://` 的传输与鉴权面需真机复验（A12 留了未勾选项）。
+- **`git+https://` 已用真实 GitHub remote 复验**（推到 `135ce6b` + tag `v0.1.0` 之后）：`add git+https://github.com/Chen5173/dsh-plugins.git` 与 `…#v0.1.0` 均 exit 0，依赖键 `dsh-plugin-manager`（pnpm 把 spec 归一化显示成 `github:Chen5173/dsh-plugins`），`bundles` 恰一条，`--dump-default-config` 只组合出 1 行，`node_modules/dsh-plugin-manager/` 是整棵工作树（`sub-plugins/` 6 包），且在装出来的 clone 里跑外壳测试 PASS。
+- **仍未覆盖**：私有仓库的 git 凭据面（本仓库 public；pnpm 直接调用系统 git，凭据走 git 侧），以及浏览器里面板与子插件界面的真机复核。
 - **无 `prepare` 脚本 ⇒ 不需要 `allowBuilds`**：`dsh plugin` 失败时会提示 pnpm ≥10 的 `allowBuilds` 白名单，容易被误读为「git 插件都要配」。本仓库根清单刻意不带构建脚本，所以不适用 —— 这一点值得写进 README 以免有人去乱配 workspace 文件。
 
 ## 回滚

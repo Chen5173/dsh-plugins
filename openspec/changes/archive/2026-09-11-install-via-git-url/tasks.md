@@ -39,5 +39,7 @@
 
 - [x] 6.1 `node dsh-plugin-manager/test/*.mjs` 四支全绿
 - [x] 6.2 成功判据 1–4 逐条达成（判据 4：仓库内不再有「根没有 package.json」的声称，`grep` 复核）
-- [ ] 6.3 需真机：真实 `git+https://` 传输 + 私有仓库鉴权 + 浏览器面板复核（本地 `git+file://` 覆盖不到网络面）
-- [ ] 6.4 另案：补 `test/batch-toggle.test.mjs`（同类「文档引用不存在的测试」事故，批量功能的 handler 级自动化仍缺）
+- [x] 6.3 真实 `git+https://` 复验（推到 `135ce6b` + tag `v0.1.0` 之后，隔离 `DSH_HOME`）：`add git+https://github.com/Chen5173/dsh-plugins.git` → exit 0、依赖键 `dsh-plugin-manager`（pnpm 归一化显示为 `github:Chen5173/dsh-plugins`）、`bundles` 恰一条、无警告；`#v0.1.0` 锁版本同样正常；装出来的 `node_modules/dsh-plugin-manager/` 是整棵工作树（6 个子包），在其内部跑外壳测试 PASS
+- [ ] 6.4 需真机（浏览器侧）：重启 `dsh web` → 设置页出现「本地插件」、`GET /list` 列出 6 个子插件、界面功能正常
+- [ ] 6.5 未覆盖：私有仓库的 git 凭据面（本仓库 public，pnpm 直接调用系统 git）
+- [ ] 6.6 另案：补 `test/batch-toggle.test.mjs`（同类「文档引用不存在的测试」事故，批量功能的 handler 级自动化仍缺）

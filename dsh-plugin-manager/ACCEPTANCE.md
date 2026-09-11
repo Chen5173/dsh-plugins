@@ -141,7 +141,10 @@
 - [x] 安装副本自测：在 clone 出来的安装目录里直接跑 `root-install-shell.test.mjs` → PASS（外壳随仓库一起分发且自洽）。
 - [x] 红能力（反向对照）：把 remote 退回到**没有根 `package.json`** 的提交再 `add` 一次 → pnpm 用**仓库目录名**当包名（装出来叫 `pre.git`），`dependencies` 键是 `pre.git`，`bundles` **不变**，CLI 打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer`。这就是外壳存在的理由。
 - [x] 换入口收敛实测：profile 先以 `link:D:/…/dsh-plugin-manager`（本机 web profile 的**现状**）装好管理器，再 `add git+…` → 同一个 `dsh-plugin-manager` 键的 spec 被改写为 git 地址，`bundles` 仍只有一条、`dependencies` 仍只有一个键，`--dump-default-config` 里 `- id: dsh-plugin-manager` 恰好出现 **1** 次，exit 0。
-- [x] 锁版本实测：同一 remote 分别以 `#<branch>`、`#<full commit sha>`、`#<tag>` 追加到 git 地址后 `add` → 依赖键仍是 **`dsh-plugin-manager`**（不受 fragment 影响），spec 原样保留 `#<ref>`，`bundles` 仍恰一条，`--dump-default-config` 各 profile 的 `- id: dsh-plugin-manager` 均出现 **1** 次。（注意：tag 必须真的在远端存在，否则 pnpm 报 `Could not resolve v0.1.0 to a commit of …` 并整体失败——已实测该失败形态。）
-- [ ] 需真机（走真实 `git+https://` 传输）：在个人机器上执行 `dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git` → 重启 `dsh web` → 设置页出现「本地插件」、`GET /list` 列出 6 个子插件、启动日志无 `duplicate loader entry id` / `Cannot find package`；并确认私有仓库场景下的 git 鉴权可用（pnpm 直接调用系统 git，凭据走 git 侧）。
+- [x] **真实 `git+https://` 传输实测**（2026-09-11，推到 `135ce6b` + tag `v0.1.0` 之后，隔离 `DSH_HOME`）：`dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git` → exit 0，依赖键恰为 **`dsh-plugin-manager`**（pnpm 把 spec 归一化成 `github:Chen5173/dsh-plugins`），`bundles` = `[dsh-base, dsh-web-app, dsh-plugin-manager]`，**无** `declares no dsh.bundle` 警告；`--dump-default-config` 组合出 `- id: dsh-plugin-manager` 且只 **1** 次，exit 0；`node_modules/dsh-plugin-manager/` 是整棵工作树（`sub-plugins/` 6 个目录 + `dsh-plugin-manager/` + `docs/` + `openspec/`）。
+- [x] 真实 tag 锁版本实测：`… git+https://…/dsh-plugins.git#v0.1.0` → 依赖键仍是 `dsh-plugin-manager`、spec 为 `github:Chen5173/dsh-plugins#v0.1.0`、`bundles` 恰一条。
+- [x] 安装自测：在**从 GitHub 装出来的 clone**里直接跑 `root-install-shell.test.mjs` → PASS。
+- [ ] 需真机（浏览器侧，无法在无 GUI 环境判定）：重启 `dsh web` → 设置页出现「本地插件」入口、`GET /list` 列出 6 个子插件、启动日志无 `duplicate loader entry id` / `Cannot find package`。
+- [ ] 需真机（私有仓库）：本仓库是 public，凭据面未覆盖。若日后转私有，pnpm 直接调用系统 git，需保证 git 侧有可用凭据（SSH key / credential helper）；失败形态预计是 git 侧鉴权报错而非 dsh 报错。
 - [ ] 需真机：从 git 装的 clone 里在面板点「启用」某个子插件 → 面板显示「已激活」且其宿主行为生效（本项的链接与解析部分已由上面的自动化实测覆盖）。
 
