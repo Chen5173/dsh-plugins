@@ -6,16 +6,25 @@
 
 ## 安装（一次）
 
+仓库本身就是 git 仓库，根 `package.json` 是本管理器的「安装外壳」，因此可以直接用 git 地址装：
+
 ```bash
-# 推荐：装仓库根 —— 根 package.json 就是本管理器的「安装外壳」
-dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins
-# 等价写法（直接装包目录，路径换盘/换目录时用）：
+# 从 git 装（对方不必先 clone）：装完插件名就是 dsh-plugin-manager
+dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
+# 等价简写 / 锁版本：github:Chen5173/dsh-plugins 、 …dsh-plugins.git#<tag|commit|branch>
+
+# 本机开发（改代码即时生效）：装仓库根或本包目录
+dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins
 dsh plugin --profile web add ./dsh-plugin-manager
 ```
 
-两条命令**完全等价**：都让 `dsh-plugin-manager` 进入 profile `dependencies`（`link:`）与 `dsh.profile.bundles`，激活行 id 相同，互相替换不产生第二个 bundle 层或第二行（隔离 profile 实测）。
+以上写法**完全等价**：都让 `dsh-plugin-manager` 进入 profile `dependencies` 与 `dsh.profile.bundles`，激活行 id 相同，从一个换成另一个只改写同一个依赖键，不产生第二个 bundle 层或第二行（隔离 profile + 本地 git remote 实测）。
 
-> 为什么根清单要与本包**同名**：包名就是插件身份 —— profile bundle 层名、激活行 id、浏览器模块表 id 都是它。客户端产物里 `window.__ModuleLoader__.load({ id: 'dsh-plugin-manager' })` 是写死的，而 DSH 的客户端模块系统按「离行入口文件最近的、名字等于该行 specifier 的 manifest」定位包，所以外壳必须同名、且同时转发 `main`/`exports["./client"]`/`dsh.bundle.patch` 到本包。源码、测试、patch、README/ACCEPTANCE 都在 `dsh-plugin-manager/`，外壳不含被复制的代码。
+> **git 入口靠的就是那个外壳**：`dsh plugin` 把 `pnpm add <git 地址>` 转发一遍，pnpm 会 clone 整个仓库并把**根目录当作包**，所以包名取自根清单的 `name`。实测删掉根 `package.json` 后，装出来的依赖键退化成仓库目录名（`dsh-plugins.git`），且因没有 `dsh.bundle` 被 reconcile 判成普通依赖，打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer` 并且永不激活。外壳因此 MUST 同名、MUST 转发 `dsh.bundle.patch`，且 MUST NOT 加 `files` 白名单（会把 `sub-plugins/` 裁掉）。约束由 `test/root-install-shell.test.mjs` 强制。
+
+> **git 装来的是快照**：profile 内是 clone 副本，改仓库源码不即时生效，升级走 `dsh plugin --profile web update`。管理器会把这个 clone 当作它的仓库根，照常扫到 `sub-plugins/` 里的全部子插件；在面板启用某个子插件时，写入的 `link:` 指向 clone 内的 `node_modules/dsh-plugin-manager/sub-plugins/<pkg>`（实测可被 profile 解析、`dsh web` 正常启动）。要热改子插件源码，就改用本地路径入口安装。
+
+> 为什么根清单要与本包**同名**：包名就是插件身份 —— profile `dependencies` 键、bundle 层名、激活行 id、浏览器模块表 id 都是它。客户端产物里 `window.__ModuleLoader__.load({ id: 'dsh-plugin-manager' })` 是写死的，而 DSH 的客户端模块系统按「离行入口文件最近的、名字等于该行 specifier 的 manifest」定位包，所以外壳必须同名、且同时转发 `main`/`exports["./client"]`/`dsh.bundle.patch` 到本包。源码、测试、patch、README/ACCEPTANCE 都在 `dsh-plugin-manager/`，外壳不含被复制的代码。
 
 然后**重启 `dsh web`**（新 bundle 层在启动时装载），打开设置页 → 左侧出现「本地插件」入口。
 
@@ -97,6 +106,7 @@ node dsh-plugin-manager/test/host-core.test.mjs   # 宿主纯逻辑（扫描/行
 node dsh-plugin-manager/test/bundle.test.mjs      # 客户端注册与面板逻辑（React shim + fetch stub）
 node dsh-plugin-manager/test/debounce.test.mjs    # 真 handler + 临时 DSH_HOME：连点只写一次 patch
 node dsh-plugin-manager/test/batch-toggle.test.mjs # 真 handler + 临时 DSH_HOME：批量一次落盘 + 一次安装 + 逐项失败回报
+node dsh-plugin-manager/test/root-install-shell.test.mjs # 仓库根安装外壳（同名/转发/无依赖/无根 patch/安装后仍可扫描）
 ```
 
 真机验收项（需浏览器与真实 profile）见 `ACCEPTANCE.md`。

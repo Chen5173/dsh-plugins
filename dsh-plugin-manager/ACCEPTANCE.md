@@ -72,7 +72,7 @@
 
 对照 `openspec/specs/plugin-manager/spec.md`「本地插件不提供 bundle 安装路径」（delta 见 `openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/`）。
 
-- [x] 仓库级扫描：6 个 `sub-plugins/*/package.json` 均无 `dsh.bundle`、目录内无 `cordis.patch.yml`、`files` 不再列它；仓库根无 `package.json` / `cordis.patch.yml`；管理器自身仍保留 `dsh.bundle`（它才是唯一本地 bundle）。
+- [x] 仓库级扫描：6 个 `sub-plugins/*/package.json` 均无 `dsh.bundle`、目录内无 `cordis.patch.yml`、`files` 不再列它；仓库根无 `cordis.patch.yml`；管理器自身仍保留 `dsh.bundle`（它才是唯一本地 bundle）。**（2026-09-11 校订）** 原条目里「仓库根无 `package.json`」已不成立：根现在有一个 `package.json`，但它是**管理器的安装外壳**（同名、零依赖、只转发、不提供任何子插件激活行），不是当年的聚合伞包 `dsh-local-plugins`；该属性现由 `test/root-install-shell.test.mjs` 逐条强制，见 A11。
 - [x] 隔离 profile 实测（`DSH_HOME` 指向临时目录，**未触碰运行中的 web profile**）：`dsh plugin --profile scratchy add <sub-plugins/dsh-esc-rewind>` → 只进 `dependencies`（`link:`），`dsh.profile.bundles` 仍只有 `@deepseek-ai/dsh-base`，CLI 打印 `dsh: warning: dsh-esc-rewind declares no dsh.bundle — installed as a plain dependency, not a profile layer`，exit 0。
 - [x] 隔离 profile 实测：上述状态下启动该 profile 成功（进程存活、无 `duplicate loader entry id`）。
 - [x] 隔离 profile 实测（陈旧布局的红能力对照）：把该子插件塞回 `bundles` → exit 1，报 `dsh: profile bundle "dsh-esc-rewind" declares no dsh.bundle in its package.json`（比改造前的 `duplicate loader entry id` 自解释得多）。
@@ -116,19 +116,32 @@
 - [ ] 需真机：点「全部关闭 (6)」→ 确认框 → 全部变「已停用」且只卡顿一次（对照逐行点 6 次的 6 次卡顿）；点「全部开启 (6)」→ 全部回来；面板顶部刷新提示出现，刷新后 6 个子插件界面全部消失/恢复。
 - [ ] 需真机：`dsh --profile web --dump-config` 中 6 行 `disabled: true/false` 与面板一致，且 `mcp-*` 等其它行原样保留。
 - [ ] 需真机：拖一个未安装的子插件目录进 `sub-plugins/`，点「全部开启」→ 只跑一次 `pnpm install`（观察耗时明显短于逐个启用），完成后该插件为「已激活」。
-## A11 仓库根安装外壳与 `add <仓库根>`（2026-09-10）
+## A11 仓库根安装外壳与 `add <仓库根>`（2026-09-10 提出 / 2026-09-11 落地）
 
-对照 `openspec/specs/plugin-manager/spec.md`「仓库根提供管理器的安装外壳」（delta 原稿见 `openspec/changes/add-repo-root-install-entry/`）。
+对照 `openspec/specs/plugin-manager/spec.md`「仓库根安装外壳让 git 地址可直接安装」（delta 与实测见 `openspec/changes/archive/2026-09-11-install-via-git-url/`）。
 
-- [x] 自动化：`dsh-plugin-manager/test/root-install-shell.test.mjs` —— 外壳 `name` === 管理器包名、`main`/`exports["."]` 转发到 `dsh-plugin-manager/src/index.js`（realpath 比较）、`exports["./client"]` + `dsh.client` 与包内一致、客户端产物注册 id === 包名。
-- [x] 自动化：外壳 `dsh.bundle.patch` 与包内 `cordis.patch.yml` 是同一文件，且该 patch **只有一行**（`id`/`name` 均为 `dsh-plugin-manager`）——伞包事故（多插一行同 id）的回归锁。
-- [x] 自动化：6 个子插件都不声明 `dsh.bundle`、目录内无 `cordis.patch.yml`、不复用管理器包名；仓库根无 `cordis.patch.yml`；外壳不声明任何子插件依赖、无 `dsh.profile.bundles`。
-- [x] 红能力：把外壳 `name` 临时改成 `dsh-local-plugins` → 上述测试 2 条精确判红（`shell name === manager name`、`the bundle registers exactly the package name`），改回后复绿（2026-09-10）。
-- [x] 隔离 profile 实测（`DSH_HOME` 指向临时目录，**未触碰运行中的 web profile**）：`dsh plugin --profile probe add <仓库根>` → `dependencies` = `{"dsh-plugin-manager":"link:<仓库根>"}`、`dsh.profile.bundles` = `["@deepseek-ai/dsh-base","dsh-plugin-manager"]`、**无** `declares no dsh.bundle` 警告（对照改造前：装成 `dsh-plugins` 普通依赖 + 打警告 + bundles 不变）。
-- [x] 隔离 profile 实测：该 profile 启动成功 —— base-only（无 web app、不占端口）进程存活 15 s（`timeout` 124）且零输出，无 `duplicate loader entry id`、无 `Cannot find package`。
-- [x] 隔离 profile 实测：`dsh --profile probe --dump-config` 的组合结果含 `- id: dsh-plugin-manager / name: dsh-plugin-manager`，无任何子插件行。
-- [x] 红能力对照：同 profile 加一行坏行 `{id: bogus, name: 'dsh-nonexistent-xyz'}` → exit 1，报 `failed to import loader entry bogus (dsh-nonexistent-xyz): Cannot find package … imported from <profile dir>`（证明该构造能暴露坏行，且行名解析锚点就是 profile 目录）。
-- [x] 等价性实测：先 `add <仓库根>/dsh-plugin-manager` 再 `add <仓库根>` → 依赖键不变、spec 被改写为仓库根、`dsh.profile.bundles` 仍是同一条（不重复）、启动正常。
-- [x] 浏览器半定位实测：按 `@deepseek-ai/dsh-client-modules` 的两条定位分支（`nearestPackage` / `exports["./package.json"]` 兜底）各跑一遍真实算法，10/10 断言通过：定位包名 `dsh-plugin-manager`、产物 `dsh-plugin-manager/src/client.js`、注册 id === 包名。
-- [ ] 需真机：在自己的机器上执行 `dsh plugin --profile web add <仓库根>`（例如 `E:\GitHubProjects\ChenSir5173\dsh-plugins`）→ 重启 `dsh web` → 设置页出现「本地插件」面板、`GET /list` 6 个子插件状态正常、启动日志无 `duplicate loader entry id` / `Cannot find package`。
+> **校订说明（重要，以免后人再被骗一次）**：本节最初写于 2026-09-10，但当天**只改了文档**——仓库根 `package.json` 与 `test/root-install-shell.test.mjs` 两个文件都没有被创建（`git show --stat ebc225d` 只含 README/AGENTS/spec/src 的改动）。所以 2026-09-10 那批「自动化 / 红能力 / 隔离 profile 实测」条目当时**指向的是不存在的文件**，已在此删除并按 2026-09-11 的真实复测重写。原条目里我这次**没有**重跑的部分（浏览器半定位算法 `nearestPackage` 分支逐行验证、base-only 进程存活 15 s、塞坏行的红能力对照）不恢复为「已验证」，改列在下方「未复验」。
+
+- [x] 自动化：`dsh-plugin-manager/test/root-install-shell.test.mjs`（18 条断言，2026-09-11 全绿）覆盖——外壳 `name` === 管理器包名 === 客户端 `__ModuleLoader__.load({ id })` 注册的字符串；`main` 与 `exports["."]` 都落在包内 `src/index.js` 同一文件；`exports["./client"]` 与 `dsh.client` 与包内清单逐字段一致；`dsh.bundle.patch` 解析到包内 `cordis.patch.yml` 且该文件只插 `dsh-plugin-manager` 一行；仓库根无 `cordis.patch.yml`；外壳 `private`/`type: module`、**不声明任何依赖**、**不设 `files` 白名单**（会把 `sub-plugins/` 裁掉）、**不带 `dsh.profile.bundles`**、清单里任何位置都不出现子插件名；6 个子插件均不声明 `dsh.bundle`、无包自带 patch、不复用管理器包名；从「安装后布局」（`<pkg>/dsh-plugin-manager/src`）反推仓库根仍能扫到全部子插件。
+- [x] 红能力（2026-09-11 逐条实跑，11 个变异全部判红、对照组全绿）：改外壳 `name`、删 `exports["./client"]`、删 `main`、转发指向不存在的文件、加子插件 `dependencies`、把 `dsh.bundle.patch` 指到根新建的 `cordis.patch.yml`、加 `files` 白名单、改 `dsh.client.platform`、去掉 `private`、删掉整个 `dsh.bundle`、给外壳加 `dsh.profile.bundles`；以及让某个子插件重新声明 `dsh.bundle`。
+- [x] 等价性：`add <仓库根>` 与 `add <仓库根>/dsh-plugin-manager` 与 `add git+…` 三个入口写入同一个 `dsh-plugin-manager` 依赖键与同一条 bundle 层。
+- [ ] 未复验（2026-09-10 声称过、本次未重跑，勿当作已验证）：`@deepseek-ai/dsh-client-modules` 两条定位分支（`nearestPackage` / `exports["./package.json"]` 兜底）的逐行复算；base-only profile 进程存活 15 s；往 profile 塞一行坏行以证明启动会失败。
+
+## A12 用 git 地址安装本仓库（2026-09-11）
+
+对照 `openspec/specs/plugin-manager/spec.md`「仓库根安装外壳让 git 地址可直接安装」。手法：`DSH_HOME` 指向临时目录 + 本地 `git clone --bare` 出来的 remote（`git+file://`），**全程未触碰运行中的 web profile**；`git+file://` 与 `git+https://`/`github:` 走 pnpm 完全相同的 clone→根目录即包 的路径，只有传输与鉴权不同。
+
+- [x] 隔离 profile 实测：`dsh plugin --profile web add git+file:///…/realremote.git` → `dependencies` 恰好多出 **`dsh-plugin-manager`** 一个键（值为该 git 地址），无其它新键；CLI **不再**打印 `declares no dsh.bundle` 警告。
+- [x] 隔离 profile 实测：`dsh.profile.bundles` = `["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app","dsh-plugin-manager"]`——git 层只多这一条。
+- [x] 隔离 profile 实测：`dsh --profile web --dump-default-config` 组合出 `# == dsh-plugin-manager` 层与 `- id: dsh-plugin-manager / name: dsh-plugin-manager`，exit 0，无 `duplicate loader entry id`。
+- [x] 安装内容实测：hoisted 后 `node_modules/dsh-plugin-manager/` 就是整棵工作树（`sub-plugins/` 6 个子包、`dsh-plugin-manager/`、`package.json`…，无 `.git`、无 `node_modules`）。
+- [x] 运行时定位实测：从安装目录跑 `repoRootOfPluginSrc(<pkg>/dsh-plugin-manager/src)` → `<pkg>`，`pluginRootsOf[0]` → `<pkg>/sub-plugins`，`listRepoPluginDirs` 得 6 个且 `readPluginMeta` 全部 `valid`、行 id 与仓库内一致。
+- [x] 启用子插件实测：按 `ensureDevDep` 的写法把 `link:<pkg>/sub-plugins/dsh-esc-rewind` 写进 profile `devDependencies` 并按 `upsertManaged` 写激活行 → `pnpm install` exit 0，`dsh-esc-rewind` 被 hoisted 成指向 clone 内的链接并可 `resolve()` 到 `src/index.js`；`deriveStates` 报 `state=active`，其余 5 个 `uninstalled`。
+- [x] 用户层组合实测：`dsh --profile web --dump-config`（含 profile 自有 `cordis.patch.yml`）出现 `- id: esc-rewind / name: dsh-esc-rewind`，exit 0。
+- [x] 安装副本自测：在 clone 出来的安装目录里直接跑 `root-install-shell.test.mjs` → PASS（外壳随仓库一起分发且自洽）。
+- [x] 红能力（反向对照）：把 remote 退回到**没有根 `package.json`** 的提交再 `add` 一次 → pnpm 用**仓库目录名**当包名（装出来叫 `pre.git`），`dependencies` 键是 `pre.git`，`bundles` **不变**，CLI 打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer`。这就是外壳存在的理由。
+- [x] 换入口收敛实测：profile 先以 `link:D:/…/dsh-plugin-manager`（本机 web profile 的**现状**）装好管理器，再 `add git+…` → 同一个 `dsh-plugin-manager` 键的 spec 被改写为 git 地址，`bundles` 仍只有一条、`dependencies` 仍只有一个键，`--dump-default-config` 里 `- id: dsh-plugin-manager` 恰好出现 **1** 次，exit 0。
+- [x] 锁版本实测：同一 remote 分别以 `#<branch>`、`#<full commit sha>`、`#<tag>` 追加到 git 地址后 `add` → 依赖键仍是 **`dsh-plugin-manager`**（不受 fragment 影响），spec 原样保留 `#<ref>`，`bundles` 仍恰一条，`--dump-default-config` 各 profile 的 `- id: dsh-plugin-manager` 均出现 **1** 次。（注意：tag 必须真的在远端存在，否则 pnpm 报 `Could not resolve v0.1.0 to a commit of …` 并整体失败——已实测该失败形态。）
+- [ ] 需真机（走真实 `git+https://` 传输）：在个人机器上执行 `dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git` → 重启 `dsh web` → 设置页出现「本地插件」、`GET /list` 列出 6 个子插件、启动日志无 `duplicate loader entry id` / `Cannot find package`；并确认私有仓库场景下的 git 鉴权可用（pnpm 直接调用系统 git，凭据走 git 侧）。
+- [ ] 需真机：从 git 装的 clone 里在面板点「启用」某个子插件 → 面板显示「已激活」且其宿主行为生效（本项的链接与解析部分已由上面的自动化实测覆盖）。
 

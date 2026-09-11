@@ -13,14 +13,28 @@
 
 ### 安装
 
+本仓库**本身就是一个 git 仓库**，根 `package.json` 是「管理器的安装外壳」，所以可以直接用 git 地址装（对方不需要先 clone）：
+
 ```bash
-# 推荐：装仓库根（根 package.json 是“管理器的安装外壳”）
-dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins
-# 等价写法（直接装包目录）：dsh plugin --profile web add <仓库根>/dsh-plugin-manager
+# 从 git 安装：装完插件名就是 dsh-plugin-manager
+dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
+# 等价的 github 简写：dsh plugin --profile web add github:Chen5173/dsh-plugins
+# 锁版本：地址后面加 #<tag|commit|branch>（该 ref 必须已推到远端，否则 pnpm 报 Could not resolve … 并整体失败）
+
+# 本机开发（改代码即时生效）：装自己这份 checkout
+dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins
+# 等价写法（直接装包目录）：add <仓库根>/dsh-plugin-manager
+
 # 重启 dsh web → 设置 → 本地插件 → 若提示旧布局，先点「一键接管/迁移」
 ```
 
-> 两条命令**完全等价**（隔离 profile 实测）：都让 `dsh-plugin-manager` 进入 profile `dependencies` 与 `dsh.profile.bundles`，激活行 id 相同，互相替换不产生第二个 bundle 层或第二行。根清单的 `name` **必须**等于 `dsh-plugin-manager` —— 包名就是插件身份（profile bundle 层名 / 激活行 id / 浏览器模块表 id）；它只是**转发外壳**（`main` → `dsh-plugin-manager/src/index.js`，`dsh.bundle.patch` → `dsh-plugin-manager/cordis.patch.yml`），源码、测试、README/ACCEPTANCE 都仍在 `dsh-plugin-manager/`。
+> 这些写法**完全等价**（隔离 profile 实测）：都让 `dsh-plugin-manager` 进入 profile `dependencies` 与 `dsh.profile.bundles`，激活行 id 相同；从一个换成另一个只会**改写同一个依赖键**，不产生第二个 bundle 层或第二行（实测把已有的 `link:` 直接换成 git 地址即收敛）。根清单的 `name` **必须**等于 `dsh-plugin-manager` —— 包名就是插件身份（profile `dependencies` 键 / bundle 层名 / 激活行 id / 浏览器模块表 id）；它只是**转发外壳**（`main` → `dsh-plugin-manager/src/index.js`，`dsh.bundle.patch` → `dsh-plugin-manager/cordis.patch.yml`），源码、测试、README/ACCEPTANCE 都仍在 `dsh-plugin-manager/`。
+
+> **为什么非要有这个外壳**：`dsh plugin add <git 地址>` 只是把 `pnpm add <git 地址>` 转发一遍，而 pnpm 会 clone **整个仓库**并把**根目录当作那个包** —— 于是根清单决定包名。实测（隔离 `DSH_HOME` + 本地 git remote）：有外壳 → 依赖键与 bundle 层都是 `dsh-plugin-manager`，`dsh --dump-default-config` 组合出 `- id: dsh-plugin-manager`；删掉外壳 → pnpm 退化用仓库目录名当包名（装出来叫 `dsh-plugins.git`），并且因为没有 `dsh.bundle` 被 reconcile 判成普通依赖，CLI 打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer`，**永不激活**。
+
+> **git 装来的是快照，不是活链接**：profile 里放的是 clone 出来的副本，改仓库源码不会即时生效；升级用 `dsh plugin --profile web update`（或再 `add` 一次该地址）。要热改就用上面的本地路径写法。
+
+> **子插件跟着一起进来**：pnpm 安装 git 依赖会带上整棵工作树（所以根清单**不能**加 `files` 白名单，那会把 `sub-plugins/` 裁掉），从 git 装的管理器照样扫到全部子插件；启用时它把 `link:` 指向 clone 内的 `node_modules/dsh-plugin-manager/sub-plugins/<pkg>`（实测能被 profile 解析、`dsh web` 正常启动）。
 
 > 旧布局 = 子插件仍逐个挂在 `dependencies` + `dsh.profile.bundles`（每个子插件自己的 bundle 层在启动时读一次）。迁移会备份 profile 的 `package.json`/`cordis.patch.yml`，收敛为 devDependencies + 管理器维护行，**迁移前后激活集合不变**。
 
@@ -42,9 +56,9 @@ dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugi
 | `dsh plugin --profile web add <子插件目录>` | 子插件包已不声明 `dsh.bundle`，于是只把它装成 profile 的**普通依赖**并打印 `declares no dsh.bundle — installed as a plain dependency, not a profile layer` 警告：**不进 bundles、也不会激活它**。激活请用面板开关（管理器会把它改写成 `devDependencies` 的 `link:` 并写入激活行）。 |
 | `dsh plugin --profile web remove <子插件包名>` | 只摘依赖、**不删管理器写的激活行** → 留下指向不存在包的悬空行，下次 `dsh web` 启动失败：`failed to import loader entry <rowId> (<pkg>): Cannot find package …`（实测 exit 1）。卸载请用面板「移除」。 |
 
-> 上表只针对**子插件目录**。`dsh plugin --profile web add <仓库根>` 是**允许且推荐**的（装的是管理器本身，见「安装」）；`remove dsh-plugin-manager` 也是卸载管理器的正确命令（会一并从 `dsh.profile.bundles` 摘掉该层）。
+> 上表只针对**子插件目录**。`dsh plugin --profile web add <仓库根>` 与 `add git+https://…/dsh-plugins.git` 都是**允许且推荐**的（装的是管理器本身，见「安装」）；`remove dsh-plugin-manager` 也是卸载管理器的正确命令（会一并从 `dsh.profile.bundles` 摘掉该层）。
 
-证据与逐条实测：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/design.md`；安装外壳的实测见 `openspec/changes/add-repo-root-install-entry/design.md`。
+证据与逐条实测：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/design.md`；git/路径两种安装入口的实测：`openspec/changes/archive/2026-09-11-install-via-git-url/design.md`。
 
 ## 新增一个插件到本仓库
 
