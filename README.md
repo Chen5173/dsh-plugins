@@ -76,15 +76,19 @@ dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins
 
 ## 各插件速览
 
-| 插件 | 作用 |
-|---|---|
-| `dsh-plugin-manager` | **本地插件管理器**（先装它）——设置「本地插件」面板管理仓库内全部 `dsh-*`（逐个开关 + **全部开启/全部关闭**批量 + 一键迁移） |
-| `dsh-session-title-regenerate` | 会话标题「重新生成标题」（最低推理档摘要） |
-| `dsh-session-time-bucket` | 侧栏会话按时间桶分组（今天/昨天/…） |
-| `dsh-composer-history-recall` | 输入框 `↑`/`↓` 召回自己发过的消息 |
-| `dsh-composer-provider-label` | composer 显示模型 provider 标签 |
-| `dsh-esc-rewind` | Esc 停止 / Esc·Esc 回退重来 / `/rewind`，可选删除模式 |
-| `dsh-open-session-workdir` | 会话头「打开工作目录」 |
+**想知道每个插件具体做了什么、在哪儿触发、有什么前提 → 看 [`docs/plugins.md`](docs/plugins.md)**（用法索引，含核对过的槽位/order 分布表）。这里只留一行话目录。
+
+| 插件 | 作用 | 你在哪儿用 |
+|---|---|---|
+| [`dsh-plugin-manager`](dsh-plugin-manager/README.md) | **本地插件管理器**（先装这一个）——设置「本地插件」面板管理仓库内全部 `dsh-*`（逐个开关 + **全部开启/全部关闭**批量 + 一键迁移） | 设置 → 本地插件 |
+| [`dsh-composer-history-recall`](sub-plugins/dsh-composer-history-recall/README.md) | 输入框 `↑`/`↓` 逐条召回**本会话自己发过的**消息（只填草稿，绝不自动发送） | composer 键盘 |
+| [`dsh-esc-rewind`](sub-plugins/dsh-esc-rewind/README.md) | `Esc` 停止 / `Esc·Esc` 回退本轮重来 / `/rewind` 从任意历史轮重来；旧会话默认归档，可切真删 | composer 键盘 + `/rewind` + 会话头图标 |
+| [`dsh-composer-provider-label`](sub-plugins/dsh-composer-provider-label/README.md) | 模型名左边显示**实际打到哪个 provider**，点开是提供方/模型两级选择菜单 | composer 右侧标签 |
+| [`dsh-session-title-regenerate`](sub-plugins/dsh-session-title-regenerate/README.md) | 用**最低推理档**摘要全部提问，重生成 ≤60 字会话标题 | 会话头按钮 / 侧栏 `⋯` 菜单 / `/regenerate-title` |
+| [`dsh-session-time-bucket`](sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话按时间桶分组（今天/昨天/前7天/前30天/更早）+ `[工作区]` 前缀 | 自动（核心处于「单列表+最近更新」时） |
+| [`dsh-open-session-workdir`](sub-plugins/dsh-open-session-workdir/README.md) | 用系统文件管理器打开当前会话的工作目录 | 会话头文件夹图标 |
+
+除管理器外都是**在面板里点一下开关就能用**的小工具；哪些带宿主半、哪些纯客户端、各自的核心版本要求，见 `docs/plugins.md` 的一览表。
 
 ## 其他
 

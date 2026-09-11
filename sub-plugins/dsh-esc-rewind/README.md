@@ -42,6 +42,8 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 - **settings**：node 半注册命名空间 `esc-rewind`，字段 `deleteOldOnRewind`（boolean，默认 `false`）。客户端经 `remote.settings.describe()` 读取、切换时 `update()` 写入；读取失败/缺字段一律回退 `false`（绝不因读不到配置而误开删除）。设置页可改（settings/document-updated 会即时刷新会话头图标）。
 - **删除通道**（自建，无第三方依赖）：`webServer` 提供 `POST /__esc-rewind/session/delete`（校验 sessionId 格式与 POST 方法）；同时注册模型工具 `esc_rewind_session_delete`（terminal/edit-mode 可用）。`webServer`/`tools` 缺席时删除通道不可用，客户端自动降级归档。
+- **只读诊断端点**：`GET /__esc-rewind/status` 回报宿主半健康度——`settingsSectionRegistered` / `settingsSectionError` / `deleteOldOnRewind`（当前删除模式）。非 GET 方法回 405。排查「图标点了没反应 / 删除模式像没生效」时先打它，判断的是宿主半有没有起来，不看会话内容。
+- **客户端诊断快照**：`window.__dsew`（门控计数、最后一次决策、删除模式位；不含消息内容）。
 - **删除核心** `deleteSessionCore`：拒绝运行中 agent → flush → detach → 删磁盘日志目录（两种 id 拼写）→ 清投影缓存 → 复扫磁盘（防 dispose 重建）→ 确认无残留后才清工作区/归档记账；失败抛错不碰记账（半删会话不会掉进 Ungrouped）。
 - **安全时序**：删除永远在“新分支 fork+open 成功并可用之后”；删除失败 → 降级 `archiveSession` + toast，回退本身不失败。
 
@@ -55,9 +57,10 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 本插件由仓库的**本地插件管理器**（`dsh-plugin-manager`）统一安装与启停，**不要**单独用 `dsh plugin add` 装它：
 
-1. 只装管理器一次：
+1. 只装管理器一次（仓库根就是它的安装外壳，两种入口等价）：
    ```bash
-   dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
+   dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
+   # 或 dsh plugin --profile web add <本机仓库根>   # 本机开发：改代码即时生效
    ```
 2. 重启 `dsh web`，打开设置 →「本地插件」。
 3. 在面板里打开本插件的主开关：管理器自动把本包以 `link:<本插件目录>` 写进 profile `devDependencies`（按需跑 `pnpm install`），并写入激活行 `- insert: [{ id: esc-rewind, name: 'dsh-esc-rewind' }]`。profile patch 被 DSH **实时热重载**，宿主侧即时生效；本插件带界面，**刷新页面**后界面才进引导图。
@@ -76,8 +79,8 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 ```bash
 node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（28 条，含删除模式）
-node --check dsh-esc-rewind/src/client.js
-node --check dsh-esc-rewind/src/index.js
+node --check sub-plugins/dsh-esc-rewind/src/client.js
+node --check sub-plugins/dsh-esc-rewind/src/index.js
 ```
 
 浏览器手测见 `ACCEPTANCE.md`。

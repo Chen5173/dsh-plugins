@@ -81,6 +81,8 @@
 
 ## A10 批量全部开启 / 全部关闭（2026-09-10）
 
+> ⚠️ **证据缺口（2026-09-11 整理文档时发现）**：本节多处 `[x]` 引用的 `test/batch-toggle.test.mjs` **从未入库**（`git log --all --` 查无此文件）。批量目前真实存在的自动化只有 `host-core.test.mjs` 的 `batchPlan` 纯逻辑用例与 `bundle.test.mjs` 的面板用例；凡「引用 batch-toggle.test 用例 N」的条目应视为**未验证**，直到该 harness 被补出来（可复用 `debounce.test.mjs` 的真 handler harness + `__setPnpmRunner` 桩）。
+
 对照 `openspec/specs/plugin-manager/spec.md`「批量全部开启 / 全部关闭」相关 Requirement（delta 原稿见 `openspec/changes/archive/2026-09-10-add-batch-toggle-all/`）。
 
 ### 作用范围与计数口径

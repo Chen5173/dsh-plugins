@@ -14,9 +14,10 @@
 
 本插件由仓库的**本地插件管理器**（`dsh-plugin-manager`）统一安装与启停，**不要**单独用 `dsh plugin add` 装它：
 
-1. 只装管理器一次：
+1. 只装管理器一次（仓库根就是它的安装外壳，两种入口等价）：
    ```bash
-   dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
+   dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
+   # 或 dsh plugin --profile web add <本机仓库根>   # 本机开发：改代码即时生效
    ```
 2. 重启 `dsh web`，打开设置 →「本地插件」。
 3. 在面板里打开本插件的主开关：管理器自动把本包以 `link:<本插件目录>` 写进 profile `devDependencies`（按需跑 `pnpm install`），并写入激活行 `- insert: [{ id: open-session-workdir, name: 'dsh-open-session-workdir' }]`。profile patch 被 DSH **实时热重载**，宿主侧即时生效；本插件带界面，**刷新页面**后界面才进引导图。
@@ -35,7 +36,9 @@
 
 ## 按钮在哪
 
-会话头部那一行（显示会话标题/面包屑的那条）**右侧的图标排**，从左到右：日程(10) → 任务列表(20) → **打开的文件夹(25，本插件)** → 删除会话(30)。只有图标没有文字，悬停显示「打开工作目录」。
+会话头部那一行（显示会话标题/面包屑的那条）**右侧的图标排**。本插件的行是 `order: 25`，核心自带的动作在它两侧：日程(10) → 任务列表(20) → **打开的文件夹(25，本插件)** → … → 删除会话(30)。只有图标没有文字，悬停显示「打开工作目录」。
+
+> 那个 `…` 不是排版省略：同一个槽位里**还有别的插件行**——`dsh-session-title-regenerate` 的重新生成标题是 **27**、`dsh-esc-rewind` 的归档/删除处置开关是 **28**。两个都启用时，本按钮**右边**会再挤两枚图标，实际顺序不是上面那四个。全部插件的真实 order 见 [`docs/plugins.md`](../../docs/plugins.md)。
 
 不在左侧会话列表的行上，也不在右侧文件面板里。
 

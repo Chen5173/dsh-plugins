@@ -18,9 +18,10 @@ office · DeepSeek-V4-Flash · high
 
 本插件由仓库的**本地插件管理器**（`dsh-plugin-manager`）统一安装与启停，**不要**单独用 `dsh plugin add` 装它：
 
-1. 只装管理器一次：
+1. 只装管理器一次（仓库根就是它的安装外壳，两种入口等价）：
    ```bash
-   dsh plugin --profile web add C:/WorkProject/GithubProjects/ChenSir5173/dsh-plugins/dsh-plugin-manager
+   dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
+   # 或 dsh plugin --profile web add <本机仓库根>   # 本机开发：改代码即时生效
    ```
 2. 重启 `dsh web`，打开设置 →「本地插件」。
 3. 在面板里打开本插件的主开关：管理器自动把本包以 `link:<本插件目录>` 写进 profile `devDependencies`（按需跑 `pnpm install`），并写入激活行 `- insert: [{ id: composer-provider-label, name: 'dsh-composer-provider-label' }]`。profile patch 被 DSH **实时热重载**，宿主侧即时生效；本插件带界面，**刷新页面**后界面才进引导图。
@@ -134,8 +135,8 @@ tooltip 文案跟随客户端语言（zh/en）；标签文本是 provider 名字
 
 ```bash
 node sub-plugins/dsh-composer-provider-label/test/bundle.test.mjs   # 51 条逻辑断言 + 能力审计
-node --check dsh-composer-provider-label/src/index.js
-node --check dsh-composer-provider-label/src/client.js
+node --check sub-plugins/dsh-composer-provider-label/src/index.js
+node --check sub-plugins/dsh-composer-provider-label/src/client.js
 ```
 
 51 条断言覆盖：bundle 注册协议、槽位 id/order、locale 字典、四条路由场景（显式 / 沿用 / 默认 / 无路由）、括号剪裁、office 内置别名、settings 别名覆盖与三种失败回退、三个刷新信号、zh/en、纯函数单测、client 与 node 内置表一致性、node 半空安全；以及本轮扩展：菜单开关与零副作用、根层/提供方层/模型层内容与顺序、失败项置灰、未广告的当前提供方合成行、四种选模型规则（保留 / 默认优先 / 第一个 / effort 继承）、选完自动进入模型层、显示范围切换与 localStorage 持久化、空态与一键切回、写入参数形状、忙碌态、拒绝写入的错误态、子代理会话禁用、目录失败的重试入口、缺 `Menu` 时的只读降级，以及**能力审计**（`selectModel` 只允许一个调用点，其余改状态 Remote 与 settings 写入一律禁止）。GUI 侧的视觉/布局/主题/真实安装见 [ACCEPTANCE.md](./ACCEPTANCE.md)。

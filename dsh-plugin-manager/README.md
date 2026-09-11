@@ -102,11 +102,12 @@ dsh plugin --profile web remove dsh-plugin-manager
 ## 开发 / 测试
 
 ```bash
-node dsh-plugin-manager/test/host-core.test.mjs   # 宿主纯逻辑（扫描/行变换/状态/迁移规划/意图合并）
+node dsh-plugin-manager/test/host-core.test.mjs   # 宿主纯逻辑（扫描/行变换/状态/迁移规划/意图合并/批量规划）
 node dsh-plugin-manager/test/bundle.test.mjs      # 客户端注册与面板逻辑（React shim + fetch stub）
 node dsh-plugin-manager/test/debounce.test.mjs    # 真 handler + 临时 DSH_HOME：连点只写一次 patch
-node dsh-plugin-manager/test/batch-toggle.test.mjs # 真 handler + 临时 DSH_HOME：批量一次落盘 + 一次安装 + 逐项失败回报
 node dsh-plugin-manager/test/root-install-shell.test.mjs # 仓库根安装外壳（同名/转发/无依赖/无根 patch/安装后仍可扫描）
 ```
+
+> ⚠️ **尚缺的自动化**：批量（全部开启/全部关闭）目前只有 `host-core.test.mjs` 的 `batchPlan` **纯逻辑**用例与 `bundle.test.mjs` 的**面板**用例。`test/batch-toggle.test.mjs`（真 handler 级：一次批量 = 恰好 1 次 patch 写入、恰好 1 次 `pnpm install`、失败逐项回报、不触碰其它插件的行）**从未入库** —— 但 `ACCEPTANCE.md` A10 里有 5 条 `[x]` 把它当作证据引用，那几条在补出来之前不成立。harness 可直接复用 `debounce.test.mjs`（真 `registerHttp` + 假 web 服务器 + 临时 `$DSH_HOME`）加上 `src/index.js` 导出的 `__setPnpmRunner` 桩。
 
 真机验收项（需浏览器与真实 profile）见 `ACCEPTANCE.md`。
