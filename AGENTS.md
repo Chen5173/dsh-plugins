@@ -6,11 +6,29 @@ DSH 插件开发/收集仓库（本地 git monorepo；每个插件是独立子�
 - **项目知识库索引：`docs/knowledge/README.md`** — 接手新任务或提问前先看索引，再按需点开具体篇目；每完成一段开发在此新增一篇并登记一行。
 - 开发规则：本仓库无项目级规则索引，按 `developer-principles` 采用用户级 `~/.agents/rules/index.md`。
 
+## 开发 / 验证
+
+改完**至少跑对应测试**；全部离线可跑、不起服务器、不开端口、不碰正在运行的 `web` profile。
+
+```bash
+# 管理器（4 支）
+node dsh-plugin-manager/test/host-core.test.mjs        # 宿主纯逻辑：扫描/行变换/状态/迁移规划/意图合并/批量规划
+node dsh-plugin-manager/test/bundle.test.mjs           # 客户端注册与面板逻辑（React shim + fetch stub）
+node dsh-plugin-manager/test/debounce.test.mjs         # 真 handler + 临时 DSH_HOME：连点只写一次 patch
+node dsh-plugin-manager/test/root-install-shell.test.mjs # 仓库根安装外壳（18 条断言）
+# 子插件（每个包的 bundle.test.mjs 校验 manifest + 注册 + patch）
+for f in sub-plugins/*/test/*.test.mjs; do node "$f" || echo "FAIL $f"; done
+```
+
+- 面板状态标签与批量取舍**以源码为准**：状态由 `deriveStates()` 给出 `active/disabled/legacy/uninstalled/inactive/invalid`，客户端标签在 `src/client.js`（`已激活 / 已停用 / 旧布局 / 未激活 / 未激活(仅依赖) / 非插件目录`）；`batchPlan()` 开启方向只吃 `disabled`+`uninstalled`，关闭方向只吃 `active`。
+- 新增插件：在 `sub-plugins/` 下建 `dsh-xxx/`，`package.json` 含 `name`/`main`/`exports["./client"]`/`dsh.client`，**不声明 `dsh.bundle`**、目录内**不放** `cordis.patch.yml`，配 `README.md` + `ACCEPTANCE.md` + `test/bundle.test.mjs`；管理器自动扫描到它，无需改仓库根任何清单。
+- 已知证据缺口：`dsh-plugin-manager/test/batch-toggle.test.mjs` **从未入库**，但 `ACCEPTANCE.md` A10 有 5 条 `[x]` 引用它 —— 补出来之前那几条不成立。harness 复用 `debounce.test.mjs`（真 `registerHttp` + 假 web 服务器 + 临时 `$DSH_HOME`）加 `src/index.js` 导出的 `__setPnpmRunner` 桩。
+
 ## 每个插件做什么、怎么用
 回答「X 插件干嘛的 / 在哪触发 / 有什么前提」先看 **`docs/plugins.md`**（用法索引，含核对过的槽位与 order 分布）。写/改任何插件文档前注意：本仓库多次出现「文档声称存在、实际文件不存在」，因此**文档里的每条命令与每个 order/端点都要从源码核对**，不要照抄旧 README。
 
 ## 插件统一安装（先读 README）
-只装 `dsh-plugin-manager` 一个本地 bundle；子插件源码在 `sub-plugins/`（管理器自身仍在仓库根），子插件根与仓库根都会被扫描。激活清单（真相源）是 profile `cordis.patch.yml` 中由管理器维护的稳定 id 行。涉及「安装/卸载/新增插件、profile 结构、bundles」时先读根 `README.md` 的「统一安装模型」，不要直接逐个 `dsh plugin add` 本地插件。
+只装 `dsh-plugin-manager` 一个本地 bundle；子插件源码在 `sub-plugins/`（管理器自身仍在仓库根），子插件根与仓库根都会被扫描。激活清单（真相源）是 profile `cordis.patch.yml` 中由管理器维护的稳定 id 行。涉及「安装/卸载/新增插件、profile 结构、bundles」时先读根 `README.md` 的「安装」与「⚠️ 子插件不要用 `dsh plugin` 装卸」，不要直接逐个 `dsh plugin add` 本地插件。
 
 ### 本地插件包一律不声明 `dsh.bundle`（2026-09-10 起）
 - `sub-plugins/dsh-*/package.json` MUST NOT 声明 `dsh.bundle`，目录内 MUST NOT 有包自带 `cordis.patch.yml`；仓库根 MUST NOT 再提供聚合伞包 `dsh-local-plugins`（聚合 `cordis.patch.yml` 已删除，根不再有任何列出子插件激活行的清单）。

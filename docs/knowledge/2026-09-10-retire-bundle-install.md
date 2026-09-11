@@ -47,8 +47,13 @@
 
 6 个子插件的 manifest 里带着 `publishConfig.access: public`（例如 `dsh-esc-rewind`），说明曾按"可独立发布"的形态准备过。若历史上真的 `npm publish` 过，外部使用者会从"能装能激活"变成"装成普通依赖 + 警告、不激活"。作者已确认这些插件只有自己在用；若日后要收尾，可对已发布版本做 `npm deprecate` 指向管理器模型。
 
+## 伞包遗留清理（从根 README 归档到此）
+
+- 若某个 profile 的 `dsh.profile.bundles` 里仍列着 `dsh-local-plugins`：该条目已不可解析，这个 profile 启动会报 `cannot resolve profile bundle "dsh-local-plugins"`。管理器救不了（启动已经失败），修法是手工从该 profile 的 `package.json` 摘掉该条目。
+- 2026-09-06 伞包实验的历史迁移备份：`~/.dsh/profiles/web/package.json.bak-2026-09-06-umbrella`、`pnpm-lock.yaml.bak-2026-09-06-umbrella`（回滚 = 还原备份后 `dsh plugin --profile web install`）。
+
 ## 相关文件
 
 - 变更：`openspec/changes/archive/2026-09-10-retire-local-plugin-bundle-install/`（proposal / design(含全部实测表) / tasks / spec delta）
 - 行为契约：`openspec/specs/plugin-manager/spec.md`「本地插件不提供 bundle 安装路径」
-- 文档：根 `README.md`（「已删除：聚合伞包」+「⚠️ 这两条 CLI 命令不要用」）、`AGENTS.md`、6 个子插件的 README/ACCEPTANCE、`dsh-plugin-manager/README.md`
+- 文档：根 `README.md`（「⚠️ 子插件不要用 `dsh plugin` 装卸」）、`AGENTS.md`、6 个子插件的 README/ACCEPTANCE、`dsh-plugin-manager/README.md`
