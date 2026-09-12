@@ -12,7 +12,8 @@
 | 停止后再按 `Esc`② | 回退本轮：取消排队消息 → 定位“本轮开始前”的上一完整回合 → `fork` 新分支 → 保留原标题 → **按开关处置原会话（默认归档 / 开启后真删）** → 打开分支 → 把被撤销的问题文本（尽力含图片）还原到输入框，toast「已回退…」 |
 | 生成中快速连按两次 | 第二击不等停稳：直接执行“停止+回退”（最终状态一致） |
 | 用工具栏 Stop 按钮停止 | 同样进入“可回退”预备态（尾部是被中断的 assistant）；再按一次 `Esc` 即回退 |
-| 自然正常结束的回合 | **不可回退**：尾部是 settled assistant，`Esc` 不接管（防误删） |
+| 自然正常结束的回合 | **不可回退**：尾部是 settled assistant，`Esc` 不接管（防误删）；**也不会弹「再按 Esc 回退本轮」提示**（该提示只认宿主耐久停止证据，见下） |
+| 「再按 Esc 回退本轮」提示的时机 | 仅在**本会话内出现过 running→idle** **且该轮有宿主耐久停止证据**时出现：尾部 assistant 带 `interrupted`，或该轮 `turn/end` 为 `aborted`/`user`（覆盖「尚无内容即被停」）。判据在该轮**定型后**结算，因此提示可能晚于停止动作一两帧；自然结束（settled / `completed` 等）永不提示，切进历史上被中断/失败的会话也不提示 |
 | 编辑了输入框草稿 | 解除预备态：再按 `Esc` 不回退（防覆盖你正在写的新内容） |
 | 有新发送 / 切换会话 | 解除预备态（按会话派生，天然失效） |
 | 弹层/菜单/输入补全打开 | 不接管 `Esc`（让给核心“关闭弹层”），先关弹层再谈停止/回退 |
@@ -51,7 +52,8 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 - 监听 `document` **capture 阶段** keydown（在核心所有 bubble 阶段 Esc 关闭逻辑之前），但**硬门控**：仅当会话处于可回退状态、无弹层/菜单/dialog/输入补全打开、且焦点不在外来文本框时才拦截；任何不确定都放行（`Esc` 永远优先服务于“关闭弹层”）。
 - armed 是**派生状态**而非记忆状态：running（可停止）或尾部为 `interrupted` assistant（已停）且草稿为空；自然完成的 settled 尾部永不 armed。
-- 按会话隔离：切换会话即失效；诊断快照 `window.__dsew`（计数/最后门控/删除模式位，不含消息内容）。
+- 自动提示（工具栏 Stop 路径）**不读瞬态投影**：下降沿只记「候选回合」，由**宿主耐久证据**结算（尾部 `interrupted` 或该轮 `turn/end` 为 `aborted`/`user`）。原因见 `docs/knowledge/2026-09-08-dsh-esc-rewind.md` v7.2：运行中的 assistant 行在 `chat.legacy.nodes` 里不产出节点，下降沿那一帧的尾巴是本轮刚发出的 user 提问，用「尾部非 settled」判停止会在自然结束时误弹。
+- 按会话隔离：切换会话即失效；诊断快照 `window.__dsew`（计数/最后门控/删除模式位，不含消息内容），其中 `hintToasts`/`lastHint` 专用于排查「提示为什么弹/没弹」。
 
 ## 安装 / 启停
 
@@ -78,7 +80,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 ## 开发 / 验证
 
 ```bash
-node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（28 条，含删除模式）
+node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（49 条，含删除模式与提示时机的真机形态用例）
 node --check sub-plugins/dsh-esc-rewind/src/client.js
 node --check sub-plugins/dsh-esc-rewind/src/index.js
 ```

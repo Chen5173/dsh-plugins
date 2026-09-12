@@ -1,6 +1,6 @@
 # 验收清单 — dsh-esc-rewind
 
-逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关）由 `test/bundle.test.mjs`（28 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
+逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关、提示时机的耐久证据判定）由 `test/bundle.test.mjs`（49 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
 
 架构重点：**回退 = fork 分支 + 按开关处置原会话**（默认归档，append-only 日志无原地删除；删除模式经宿主半真删）；armed 是派生状态（running 或 尾部 interrupted + 草稿为空）。
 
@@ -23,6 +23,11 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 1.2 `[B]` 用工具栏 Stop 按钮停止 → 出现同款“再按 Esc 回退”提示（一次/回合）
 - [ ] 1.3 `[B]` 有弹层/菜单（如命令菜单、设置、图册）打开时按 `Esc` → 先关弹层，**不**触发停止；再按才停止（层叠语义）
 - [ ] 1.4 `[B]` 输入法（IME）组合中、或焦点在非 composer 文本框（如侧栏搜索）里按 `Esc` → 不触发停止
+- [ ] 1.5 `[B]` **自然结束不弹提示（本次缺陷回归）**：让一轮正常讲完（不动键盘/不点 Stop）→ 全程**不出现**「已停止 · 再按 Esc 回退本轮」；`window.__dsew.hintToasts` 不递增
+- [ ] 1.6 `[B]` 工具栏 Stop（有内容）→ 提示**允许晚一两帧**出现（等该轮定型为 `interrupted`）但必定出现一次；同一回合不重复弹
+- [ ] 1.7 `[B]` 发送后**首个 token 之前**立刻点工具栏 Stop（对话里没有 assistant 行）→ 仍出现提示一次（依据 `turn/end` 为 `aborted`/`user`），`window.__dsew.lastHint === 'turn-aborted'`
+- [ ] 1.8 `[B]` 停止后先打字再等该轮定型 → 不出现提示（不打扰编辑）
+- [ ] 1.9 `[B]` 切进历史上被中断或 429 失败的会话（本会话内没发生过 running 下降沿）→ 不自动弹提示；按一次 `Esc` 才进入武装态并提示
 
 ## 2. Esc Esc 回退
 
@@ -56,6 +61,7 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 4.1 `[B]` 核心会话行 `…` 菜单（重命名/分叉/归档）、Stop 按钮、发送/排队、标题自动生成等核心行为不受影响
 - [ ] 4.2 `[B]` 长时间运行无重复 toast/无限重试；连续多次回退均成功且分支无重复
 - [ ] 4.3 `[B]` 无报错时 `window.__dsew.lastGate` 能解释每次“为什么没接管”（诊断只含计数与门控，不含消息内容）
+- [ ] 4.4 `[B]` 提示时机可自证：`window.__dsew.hintToasts`（自动提示发布次数）与 `lastHint`（`'tail-interrupted'` / `'turn-aborted'`）能解释最近一次提示的依据；自然结束的回合两者都不变
 
 ## 5. 删除模式（开关 + 宿主半真删）
 

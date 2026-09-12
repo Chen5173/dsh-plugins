@@ -361,6 +361,70 @@ function chatOf(nodes) {
   return { order, nodes: { get: (k) => map.get(k) }, legacy: null }
 }
 
+// --- production-shaped chat (what the real GUI hands the plugin) --------------
+//
+// 真机里插件的 chatNodeList() 走 `chat.legacy.nodes` 分支，而那份列表是
+// LegacySliceBuilder 的产物，与上面 chatOf() 的 view-node 形态有两处关键差别：
+//   1) 运行中的 assistant 行**不产出节点**（内容只进 legacy.partial），
+//      所以生成期间列表的尾部是「本轮刚发出的 user 提问」；
+//   2) 节点是宿主耐久记录（assistant 行带 blocks / 可选 interrupted），
+//      **没有 status 字段**——「是否被中断」只能靠 interrupted 标记判断。
+// 提示判据必须在真机形态下成立，故新增这组构造器与对应用例。
+
+/** 真机形态的 user 记录节点。 */
+function legacyUser(seq, text) {
+  return {
+    kind: 'user',
+    seq,
+    time: seq * 1000,
+    content: text === undefined ? [] : [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }
+}
+
+/** 真机形态的 assistant 耐久节点（interrupted 由宿主仅在取消回合时写入）。 */
+function legacyAssistant(seq, text, interrupted = false) {
+  return {
+    kind: 'assistant',
+    seq,
+    time: seq * 1000,
+    turn: 1,
+    step: 1,
+    blocks: text === undefined ? [] : [{ kind: 'text', text }],
+    ...(interrupted === true ? { interrupted: true } : {}),
+  }
+}
+
+/** 真机形态的 timeline：每轮 turn/end 终态（reason 省略 = 该轮尚未收尾）。 */
+function timelineOf(entries) {
+  const turns = new Map()
+  const turnOrder = []
+  for (const entry of entries) {
+    turnOrder.push(entry.turn)
+    turns.set(entry.turn, {
+      turn: entry.turn,
+      start: { type: 'turn/start', seq: 0, time: 0, data: { turn: entry.turn } },
+      end: entry.reason === undefined
+        ? undefined
+        : { type: 'turn/end', seq: 90 + entry.turn, time: 0, data: { turn: entry.turn, reason: entry.reason } },
+      status: entry.reason === undefined ? 'open' : 'closed',
+      steps: [],
+      data: { get: () => undefined },
+    })
+  }
+  return { turnOrder, turns }
+}
+
+/** 真机形态的 chat 快照：legacy 节点列表 + timeline（插件只读这两处）。 */
+function legacyChatOf(nodes, turnEntries = []) {
+  return {
+    order: [],
+    nodes: { get: () => undefined },
+    legacy: { nodes, turnTimings: new Map(), turnEnds: new Map(), partial: null, runningCalls: [] },
+    timeline: timelineOf(turnEntries),
+  }
+}
+
 // --- component mounting ------------------------------------------------------
 
 function mount({ services, sessionId, chat, running = false, draft = '', interruptedTail = false }) {
@@ -575,6 +639,282 @@ test('post-stop hint: toolbar-Stop (running→idle falling edge) does hint once'
   toasts.length = 0
   env.rerender()
   assert.ok(toasts.length > 0, 'post-stop hint appears after a real running→idle stop')
+})
+
+// --- hint evidence (真机形态 + 投影落后一帧) ----------------------------------
+// 缺陷回归：自然结束时 running 位先掉、对话投影还没落定，旧判据（尾部非 settled）
+// 会误弹提示。下面 4 条按真机数据形态与到达顺序建模。
+
+test('hint evidence: natural completion must NOT hint even while the projection lags', () => {
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  // 生成中：运行中的 assistant 行在 legacy 列表里不产出节点 → 尾巴是本轮的 user 提问
+  const streaming = [legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2')]
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(streaming, [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }]),
+    running: true,
+  })
+  env.render()
+  toasts.length = 0
+  const hintedBefore = window.__dsew.hintToasts
+
+  // 自然结束：running 位先到，投影尚未落定
+  env.state.running = false
+  env.rerender()
+  assert.equal(toasts.length, 0, 'running 下降沿那一刻不得提示（本轮尚未定型）')
+
+  // 随后 settled 的 assistant 行落定，该轮 turn/end 也是 completed
+  env.chat = legacyChatOf(
+    [...streaming, legacyAssistant(4, 'a2')],
+    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'completed' } }],
+  )
+  env.rerender()
+  assert.equal(toasts.length, 0, '自然结束的回合定型后也不得提示')
+  assert.equal(window.__dsew.hintToasts, hintedBefore, 'hintToasts 不得递增')
+})
+
+test('hint evidence: toolbar Stop resolves once the interrupted row lands', () => {
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  const streaming = [legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2')]
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(streaming, [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }]),
+    running: true,
+  })
+  env.render()
+  toasts.length = 0
+  const hintedBefore = window.__dsew.hintToasts
+
+  env.state.running = false
+  env.rerender()
+  assert.equal(toasts.length, 0, '下降沿只记候选，不得抢在定型前提示')
+
+  env.chat = legacyChatOf(
+    [...streaming, legacyAssistant(4, 'half answer', true)],
+    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }],
+  )
+  env.rerender()
+  assert.ok(toasts.includes('esc.hint'), '中断行落定后提示一次')
+  assert.equal(window.__dsew.hintToasts - hintedBefore, 1, '恰好一次提示（发布计数）')
+  assert.equal(window.__dsew.lastHint, 'tail-interrupted', '判据应为尾部 interrupted 证据')
+
+  // toasts 数组记录的是 Toast 的每次渲染，故重复提示要用发布计数判定
+  env.rerender()
+  env.rerender()
+  assert.equal(window.__dsew.hintToasts - hintedBefore, 1, '每回合至多一次提示')
+})
+
+test('hint evidence: a stop with no content resolves through turn/end aborted/user', () => {
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  // 尚无内容即被停：对话里没有 assistant 行，尾巴一直是 user 提问
+  const nodes = [legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2')]
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(nodes, [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }]),
+    running: true,
+  })
+  env.render()
+  toasts.length = 0
+
+  env.state.running = false
+  env.rerender()
+  assert.equal(toasts.length, 0, 'turn/end 未落定前不得提示')
+
+  env.chat = legacyChatOf(
+    [...nodes],
+    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }],
+  )
+  env.rerender()
+  assert.deepEqual(toasts, ['esc.hint'], '无内容停止也要提示一次')
+  assert.equal(window.__dsew.lastHint, 'turn-aborted', '判据应为 turn/end aborted/user')
+})
+
+test('hint evidence: non-user aborts and failed turns never count as a user stop', () => {
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  const nodes = [legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2')]
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(nodes, [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }]),
+    running: true,
+  })
+  env.render()
+  toasts.length = 0
+  env.state.running = false
+  env.rerender()
+
+  // hook/parent/disposed 的取消不是用户停止；error（如 429）同样不是
+  env.chat = legacyChatOf(
+    [...nodes],
+    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'aborted', reason: { kind: 'hook' } } }],
+  )
+  env.rerender()
+  assert.equal(toasts.length, 0, '非 user 原因的 abort 不得提示')
+
+  env.chat = legacyChatOf(
+    [...nodes],
+    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'error', error: { code: 'RATE_LIMIT' } } }],
+  )
+  env.rerender()
+  assert.equal(toasts.length, 0, '失败的回合不得提示')
+})
+
+test('hint evidence: switching into a stopped session does NOT hint (no falling edge)', () => {
+  const services = makeServices()
+  services.seed('s1', { running: false })
+  applyWith(services)
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(
+      [legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2'), legacyAssistant(4, 'half', true)],
+      [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }],
+    ),
+    running: false,
+  })
+  env.render()
+  toasts.length = 0
+  env.rerender()
+  assert.equal(toasts.length, 0, '切进历史上被中断的会话不得提示')
+})
+
+test('hint evidence: a non-empty draft consumes the candidate without hinting', () => {
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  const streaming = [legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2')]
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(streaming, [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }]),
+    running: true,
+  })
+  env.render()
+  toasts.length = 0
+  env.state.running = false
+  env.rerender()
+
+  // 用户已开始写新草稿：该轮定型为中断也不提示（不打扰编辑）
+  env.draft = 'typing a new prompt'
+  env.chat = legacyChatOf([...streaming, legacyAssistant(4, 'half', true)], [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }])
+  env.rerender()
+  assert.equal(toasts.length, 0, '草稿非空不得提示')
+
+  // 候选已结算为一次性判定：事后清空草稿也不补提示
+  env.draft = ''
+  env.rerender()
+  assert.equal(toasts.length, 0, '候选不得因草稿清空而复活')
+})
+
+test('hint evidence: the bare falling edge never hints in either chat shape', () => {
+  // 回归核心：只下 running 下降沿、没有任何停止证据（尾部仍是本轮 user 提问），
+  // 两种 chat 形态（view-node / 真机 legacy）都不得弹提示。
+  for (const shape of ['view-node', 'legacy']) {
+    const services = makeServices()
+    services.seed('s1', { running: true })
+    applyWith(services)
+    const nodes = shape === 'view-node'
+      ? chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'q2')])
+      : legacyChatOf([legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2')], [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }])
+    const env = mount({ services, sessionId: 's1', chat: nodes, running: true })
+    env.render()
+    toasts.length = 0
+    const hintedBefore = window.__dsew.hintToasts
+    env.state.running = false
+    env.rerender()
+    env.rerender()
+    assert.equal(toasts.length, 0, `${shape}: 下降沿本身不得触发提示`)
+    assert.equal(window.__dsew.hintToasts, hintedBefore, `${shape}: hintToasts 不得递增`)
+  }
+})
+
+test('hint evidence: delete mode keeps the irreversible warning wording', async () => {
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  services.setSettingsValue(true)
+  await internals()._module.loadDeleteMode()
+  const streaming = [legacyUser(1, 'q1'), legacyAssistant(2, 'a1'), legacyUser(3, 'q2')]
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(streaming, [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }]),
+    running: true,
+  })
+  env.render()
+  toasts.length = 0
+  env.state.running = false
+  env.rerender()
+  env.chat = legacyChatOf([...streaming, legacyAssistant(4, 'half', true)], [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }])
+  env.rerender()
+  assert.ok(toasts.includes('esc.hint.delete'), '删除模式用警示文案')
+  assert.ok(!toasts.includes('esc.hint'), '不得用普通文案')
+})
+
+test('hint evidence: definitive stop evidence wins over a stale settled row', () => {
+  // 多步回合：第 1 步已有 settled 回复（成为列表尾部），第 2 步无内容即被停。
+  // 此时只有该轮 turn/end 的 aborted/user 能证明用户停过 → 必须提示。
+  const nodes = [
+    legacyUser(1, 'q1'), legacyAssistant(2, 'a1'),
+    legacyUser(3, 'q2'), legacyAssistant(4, 'step-1 text'),
+  ]
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: legacyChatOf(nodes, [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2 }]),
+    running: true,
+  })
+  env.render()
+  toasts.length = 0
+  const hintedBefore = window.__dsew.hintToasts
+  env.state.running = false
+  env.rerender()
+  env.chat = legacyChatOf(
+    nodes,
+    [{ turn: 1, reason: { kind: 'completed' } }, { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }],
+  )
+  env.rerender()
+  assert.ok(toasts.includes('esc.hint'), 'settled 尾 + aborted/user 仍应提示')
+  assert.equal(window.__dsew.hintToasts - hintedBefore, 1)
+  assert.equal(window.__dsew.lastHint, 'turn-aborted')
+})
+
+test('pure: tailStatus / lastTurnEndEvidence contracts (真机形态与形状容错)', () => {
+  const api = internals()
+  assert.equal(api.tailStatus([]), null, '空列表 → null')
+  assert.equal(api.tailStatus([legacyUser(1, 'q')]), null, '尾部非 assistant → null')
+  assert.equal(api.tailStatus([legacyAssistant(2, 'a')]), 'settled', '耐久 settled 行（无 status 字段）')
+  assert.equal(api.tailStatus([legacyAssistant(3, 'x', true)]), 'interrupted', 'interrupted 标记')
+  assert.equal(api.tailStatus([runningAssistant(4)]), 'running', 'view-node 形态的 running 行')
+  assert.equal(api.tailInterrupted([legacyAssistant(3, 'x', true)]), true)
+
+  assert.equal(api.lastTurnEndEvidence(undefined), null, '无 chat → null')
+  assert.equal(api.lastTurnEndEvidence({ timeline: { turnOrder: [], turns: new Map() } }), null, '空 timeline → null')
+  assert.equal(api.lastTurnEndEvidence({ timeline: { turnOrder: [1], turns: null } }), null, '形状不符 → null')
+  assert.equal(
+    api.lastTurnEndEvidence(legacyChatOf([], [{ turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }])),
+    'aborted:user',
+  )
+  assert.equal(
+    api.lastTurnEndEvidence(legacyChatOf([], [{ turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook' } } }])),
+    'aborted:hook',
+  )
+  assert.equal(api.lastTurnEndEvidence(legacyChatOf([], [{ turn: 1, reason: { kind: 'completed' } }])), 'completed')
+  assert.equal(api.lastTurnEndEvidence(legacyChatOf([], [{ turn: 1 }])), null, '该轮尚未收尾 → null')
 })
 
 test('ESC twice rewinds: fork at the previous settled boundary, archive, open, stage restore', async () => {

@@ -144,6 +144,10 @@ window.__ModuleLoader__.load({
       rewinds: 0,
       pendingApplied: 0,
       historyLoads: 0,
+      /** 自动弹出的「再按 Esc 回退」提示次数（非用户按键路径）。 */
+      hintToasts: 0,
+      /** 最近一次提示的判据：'tail-interrupted' | 'turn-aborted' | null。 */
+      lastHint: null,
       lastGate: 'init',
       lastAction: null,
       rewindAvail: null,
@@ -384,10 +388,60 @@ window.__ModuleLoader__.load({
       return exchanges.length === 0 ? null : exchanges[exchanges.length - 1]
     }
 
-    /** Whether the conversation tail is an interrupted (aborted) assistant. */
-    function tailInterrupted(list) {
+    /**
+     * - 函数功能：取「对话尾部是 assistant 行」时的生命周期状态；尾部不是 assistant 行（例如本轮刚发出的 user 提问）时返回 null，表示本轮尚未定型。
+     * - 参数类型：
+     *     list: Array -- 会话节点列表，例如 [user(1,'q'), { kind:'assistant', seq:2, interrupted:true }]
+     * - 返回值：
+     *     retval: string|null -- 'running' | 'settled' | 'interrupted'，或 null（尾部非 assistant / 空列表）
+     * - 调用样例：
+     *     tailStatus(list) === 'interrupted'   // 该轮被中断（用户停止）
+     */
+    function tailStatus(list) {
       const tail = list && list.length ? list[list.length - 1] : null
-      return !!(tail && nodeKind(tail) === 'assistant' && assistantStatusOf(tail) === 'interrupted')
+      if (!tail || nodeKind(tail) !== 'assistant') return null
+      return assistantStatusOf(tail)
+    }
+
+    /**
+     * - 函数功能：判断对话尾部是否为「被中断（用户停止）」的 assistant 回复——即宿主写入的耐久停止证据。
+     * - 参数类型：
+     *     list: Array -- 会话节点列表，例如 [{ kind:'assistant', seq:2, blocks:[…], interrupted:true }]
+     * - 返回值：
+     *     retval: boolean -- true 表示尾部是带 interrupted 证据的 assistant 行
+     * - 调用样例：
+     *     tailInterrupted(list) === true
+     */
+    function tailInterrupted(list) {
+      return tailStatus(list) === 'interrupted'
+    }
+
+    /**
+     * - 函数功能：读「最后一轮」的 turn/end 终态证据（宿主写入、只有该轮真正收尾后才存在），用于区分「用户停止（aborted/user）」与「自然结束（completed/error/…）」；覆盖「尚未产出任何内容即被停」的回合（此时对话里没有 assistant 行）。
+     * - 参数类型：
+     *     chat: object -- 会话 chat 视图快照，例如 { timeline: { turnOrder:[1,2], turns: Map{…} } }
+     * - 返回值：
+     *     retval: string|null -- 'aborted:user' | 'aborted:<cause>' | 'completed' | 'error' | 'max-tokens' | 'blocked' | 'interrupted'；缺失或形状不符为 null
+     * - 调用样例：
+     *     lastTurnEndEvidence(chat) === 'aborted:user'
+     *
+     * 注意：kind 为 'interrupted' 的是持久化层崩溃修复标记（loop 不产出），不是用户停止。
+     */
+    function lastTurnEndEvidence(chat) {
+      const timeline = chat && chat.timeline
+      if (!timeline) return null
+      const order = timeline.turnOrder
+      const turns = timeline.turns
+      if (!Array.isArray(order) || order.length === 0) return null
+      if (!turns || typeof turns.get !== 'function') return null
+      const turn = turns.get(order[order.length - 1])
+      const end = turn && turn.end
+      const reason = end && end.data && end.data.reason
+      const kind = reason && typeof reason.kind === 'string' ? reason.kind : null
+      if (kind === null) return null
+      if (kind !== 'aborted') return kind
+      const cause = reason.reason && typeof reason.reason.kind === 'string' ? reason.reason.kind : 'unknown'
+      return 'aborted:' + cause
     }
 
     /** Whether the conversation tail ended abnormally, i.e. is NOT a naturally
@@ -1150,7 +1204,10 @@ window.__ModuleLoader__.load({
       const list = useMemo(() => chatNodeList(chat), [chat])
       const exchanges = useMemo(() => buildExchanges(list), [list])
       const target = exchanges.length ? exchanges[exchanges.length - 1] : null
-      const unsettled = tailUnsettled(list)
+      // 提示判据所需的两份「耐久证据」（都是原始值，便于放进 effect 依赖）：
+      // 尾部 assistant 行的状态，以及最后一轮 turn/end 的终态。
+      const tailState = tailStatus(list)
+      const roundEnd = lastTurnEndEvidence(chat)
       const input = useInput ? useInput((s) => s) : undefined
       const draft = input && typeof input.draft === 'string' ? input.draft : ''
 
@@ -1179,9 +1236,13 @@ window.__ModuleLoader__.load({
       // One-hint-per-exchange guard (ESC stop and toolbar-Stop both arm; the
       // armed-tail effect must not re-toast what the ESC handler already did).
       const hintedRef = useRef(null)
-      // Track the previous render's running flag so the post-stop hint only
-      // fires on the running→idle falling edge (a real toolbar-Stop / Esc stop),
-      // never when switching into an already-unsettled session (running stays
+      // 上一次 running→idle 下降沿记下的「候选回合」＝该回合首个 user 节点的 seq。
+      // 下降沿只证明「本会话刚结束了一轮」，并不证明它是被停止的（自然结束同形），
+      // 因此这里只记候选，等本轮定型（尾部出现 assistant 行 / turn/end 落定）后再结算。
+      const stopCandidateRef = useRef(null)
+      // Track the previous render's running flag so the post-stop hint can only
+      // be considered after a running→idle falling edge in this session — never
+      // when just switching into an already-unsettled session (running stays
       // false the whole time, so there is no edge).
       const prevRunningRef = useRef(null)
       // One-restore-per-branch guard for the staged composer restore.
@@ -1205,6 +1266,7 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         stopMarkRef.current = null
         prevRunningRef.current = null
+        stopCandidateRef.current = null
       }, [sessionId])
 
       // The single document capture listener for this session's lifetime.
@@ -1223,12 +1285,13 @@ window.__ModuleLoader__.load({
           if (hasOpenOverlay(event)) { __diag.lastGate = 'overlay'; return }
 
           const stopIssued = stopMarkRef.current === (targetRef.current && targetRef.current.seq)
+          // decideEsc 内部用 listRef 实时重算「尾部非 settled」，不再传渲染期快照
+          // （旧代码传的 unsettled 参数在函数体内从未被读取，属死参数）。
           const decision = decideEsc({
             running: runningRef.current,
             draft: draftRef.current,
             list: listRef.current,
             stopIssued,
-            unsettled,
           })
 
           if (decision.action === 'none') { __diag.lastGate = 'idle-or-settled'; return }
@@ -1283,22 +1346,49 @@ window.__ModuleLoader__.load({
         return () => document.removeEventListener('keydown', onKey, true)
       }, [])
 
-      // Post-stop hint for toolbar-Stop too (an unsettled tail with an empty
-      // draft is armed; make the affordance discoverable, once per exchange).
-      // Guarded by a running→idle falling edge so it only fires right after a
-      // real stop in this session — never when switching into an already
-      // unsettled session (e.g. a 429-failed turn), where running stays false.
+      // 工具栏 Stop 也补「再按 Esc 回退」提示：下降沿只用来记候选，是否提示由
+      // **宿主耐久停止证据**结算（尾部 assistant 带 interrupted，或该轮 turn/end
+      // 为 aborted/user）。这样与「running 位 / 对话投影谁先到」无关：自然结束
+      // （尾部 settled、或 turn/end 为 completed 等）会被静默丢弃，不再误弹。
       useEffect(() => {
         const wasRunning = prevRunningRef.current
         prevRunningRef.current = running
-        if (!unsettled || running || draft !== '') return
-        if (wasRunning === true) {
-          if (!target || !qualifyExchange(target)) return
-          if (hintedRef.current === target.seq) return
-          hintedRef.current = target.seq
-          publishToast(tRef.current(deleteModeOn() ? 'esc.hint.delete' : 'esc.hint'))
+        // 下降沿：本会话刚结束了一轮（可能是主动停止，也可能是自然结束）。
+        if (wasRunning === true && !running) {
+          stopCandidateRef.current = target ? target.seq : null
         }
-      }, [unsettled, running, draft, target])
+        const candidate = stopCandidateRef.current
+        if (candidate === null || candidate === undefined) return
+        if (running) return
+        // 候选只对「当轮」有效：用户发了新消息（target.seq 变了）即作废。
+        if (!target || target.seq !== candidate) {
+          stopCandidateRef.current = null
+          return
+        }
+        // 未定型：尾部还没有 assistant 行（如运行中的行在投影里不产出节点时，
+        // 尾巴是刚发出的 user 提问），且该轮还没有 turn/end 终态 → 等下一帧。
+        // 结算顺序（先确定的停止证据，后收尾终态）：
+        //   1) 尾部带 interrupted —— 有内容被停，直接判定停止；
+        //   2) 该轮 turn/end 为 aborted/user —— 无内容被停，或最后一步无内容、
+        //      尾部停在上一步那条 settled 行上（settled 尾此时是**歧义**证据）；
+        //   3) 其它 turn/end 终态（completed/error/max-tokens/blocked/非 user 的
+        //      abort）—— 判定自然结束，静默丢弃候选；
+        //   4) 该轮尚未收尾而尾部已是 settled —— 保持等待，等 turn/end 落定再判，
+        //      避免把「后续步骤被停」误判成自然结束（宁晚勿错）。
+        let evidence = null
+        if (tailState === 'interrupted') evidence = 'tail-interrupted'
+        else if (roundEnd === 'aborted:user') evidence = 'turn-aborted'
+        else if (roundEnd !== null) evidence = 'settled'
+        if (evidence === null) return
+        stopCandidateRef.current = null
+        if (evidence === 'settled') return
+        if (draft !== '' || !qualifyExchange(target)) return
+        if (hintedRef.current === target.seq) return
+        hintedRef.current = target.seq
+        __diag.hintToasts += 1
+        __diag.lastHint = evidence
+        publishToast(tRef.current(deleteModeOn() ? 'esc.hint.delete' : 'esc.hint'))
+      }, [running, draft, target, tailState, roundEnd])
 
       // Apply the staged composer restore once the rewound branch mounts.
       useEffect(() => {
@@ -1605,6 +1695,7 @@ window.__ModuleLoader__.load({
         window.__dsewInternals = {
           nodeKind, nodeSeq, nodeTime, nodeText, nodeImageRefs, assistantStatusOf,
           chatNodeList, buildExchanges, qualifyExchange, lastExchange, tailInterrupted,
+          tailStatus, lastTurnEndEvidence,
           tailUnsettled, decideEsc, snippet, timeLabel,
           _module: {
             publishToast, doRewind, issueStop, ensureIdle, clearQueue,

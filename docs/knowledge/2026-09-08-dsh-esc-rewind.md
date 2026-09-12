@@ -77,3 +77,19 @@
 - **修复**：新增 `prevRunningRef`（session 切换时重置为 null），hint effect 改为**仅当 `running` 在本会话内发生 true→false 下降沿**（即用户主动 Stop / Esc 停止）且尾部非 settled、草稿空时才提示。切进失败会话 running 全程 false、无下降沿 → 不弹。
 - **为什么不用 `unsettled` 上升沿**：`tailUnsettled` 对 running 尾也返回 true，运行中 unsettled 已为 true；工具栏 Stop 前后 unsettled 恒 true，无上升沿可用。真正区分「主动停止」的是 running 下降沿。
 - **测试**：新增 2 条（切进 unsettled 会话不提示、工具栏 Stop 提示一次），套件 39/39 全绿；全仓库无回归。
+
+## v7.2（2026-09-12）：提示时机改为「宿主耐久停止证据」（修「自然结束仍弹提示」）
+
+- **缺陷**：用户报告**正常的输出结束后仍自动弹出**「已停止 · 再按 Esc 回退本轮」。v7.1 的守卫（本会话内 running 有过 true→false 下降沿）方向对、判据错。
+- **根因（三层，全部代码核对过）**：
+  1. **下降沿不唯一**：`agent/status` 的 `running` 覆盖整轮（`core/agent/src/runtime-types.ts`：从唤醒输入起、持续到 driver drain/close/checkpoint），正常收尾同样置 false。
+  2. **两个输入两个 store**：`running` 走宿主 `agent/status` → `api-session/status` 广播（`api/session-controller/src/index.ts:143`）→ 客户端 `$on`（`client/index.ts:94`）→ `Session.handleRunning()` → notifier 微任务（`sessions/session.ts:498`）；`unsettled ← chat.legacy.nodes` 走每会话事件 journal → `BoundConversation.accept` → assembler → `publish()`（高频流式行按 3 个动画帧延迟发布，`ui-conversation/.../assembly.ts:121-137`）。同一帧里读两者不成立。
+  3. **运行中的 assistant 在插件读的那份列表里不存在**：`LegacySliceBuilder.legacyContribution` 对 `assistant-step` + `status==='running'` 返回 `nodes: EMPTY_LIST`（内容只进 `partial`）⇒ 下降沿那一帧的尾巴是**本轮刚发出的 user 提问** ⇒ `tailUnsettled()` 为真 ⇒ 误弹。
+- **harness 为什么没抓到**：既有「工具栏 Stop 提示一次」用例把 running 与 interrupted 尾巴**在同一次 rerender 里**同时赋值，构造不出真机那一帧；且 `chatOf()` 返回 `legacy: null`（view-node 分支），而真机走 `chat.legacy.nodes` 分支。只读探针（复用 harness 前半段 + 追加用例）复现：只下下降沿 → toast 出现；两者同帧 → 不出现。
+- **新判据（只用宿主耐久证据）**：
+  - 停止证据：尾部 assistant 行带 `interrupted`（`core/agent-loop/src/agent.ts:374-383` 仅在 `signal.aborted` 且有内容时写）；或该轮 `turn/end` 为 `{kind:'aborted', reason:{kind:'user'}}`（`agent.ts:313/328` + `api/session-controller/src/commands.ts:446`，工具栏 Stop 与本插件 `session.cancel()` 同源）——后者覆盖「尚无内容即被停」。
+  - 自然结束证据：尾部 assistant 为 `settled`，或该轮 `turn/end` 为 `completed`/`error`/`max-tokens`/`blocked`（`turn/end` 的 `interrupted` kind 是**崩溃修复**标记、loop 不产出，不能当停止证据）。
+  - **下降沿只用来记候选回合**（证明本会话刚结束一轮），候选等该轮**定型**后结算 → 对「running 位 / 对话投影谁先到」双向免疫；候选绑定最后一轮 user seq，发新消息/切会话即作废。
+- **新增纯函数**：`tailStatus(list)`（尾部 assistant 行状态或 null）、`lastTurnEndEvidence(chat)`（读 `chat.timeline.turnOrder/turns[n].end.data.reason`，返回 `aborted:user` / `completed` / …）。`tailUnsettled()` 继续只服务 **Esc armed 判定**（按键时用实时 list 重算，不受本缺陷影响）。
+- **顺带**：`decideEsc` 调用点的 `unsettled` 是**死参数**（函数内用 list 重算）已删除；`__diag` 增 `hintToasts` / `lastHint`（此前 hint effect 不写任何诊断，缺陷无法自证）。
+- **测试**：套件 49/49（新增真机形态构造器 `legacyUser/legacyAssistant/legacyChatOf` + 10 条：自然结束不弹（含投影落后）、下降沿只记候选、无内容停止走 `turn/end aborted/user`、非 user 的 abort/失败轮不弹、切进历史中断会话不弹、草稿非空消耗候选不弹、确定停止证据优先于 settled 尾的歧义情形、删除模式文案、纯函数契约与形状容错）。**红绿验证**：把新用例跑在 `HEAD` 版 client.js 上 8 条全红（41/49），跑在当前实现上 49/49。
