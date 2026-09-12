@@ -54,3 +54,26 @@
 - **第二真机 bug：settings 段未注册（“namespace is not registered”）**。绑定修好后 update 仍被宿主拒绝，因为宿主半 `installSettingsSection` 依赖 `import('@deepseek-ai/schemastery')`，而**宿主解析 bundle 的裸 specifier 走插件源码目录**（title-regenerate 能静态 import `@deepseek-ai/dsh-llm` 只因为它源码目录自带本地 stub）——外部 link 插件目录无 schemastery → import 失败 → 段从未注册。修复 = **零依赖 fallback schema**：`SettingsProvider` 只用 `schema(value)`（resolve 校验/默认值）与 `schema.toJSON()`（describe 序列化），`redactSecrets(schema,…)` 对函数型 schema 走 default 分支原样放行（无 secret 声明即安全）。`fallbackSectionSchema(field, fallback)` 返回可调用函数 + toJSON，语义等同 `z.object({field: z.boolean().default(false)})`。installSettingsSection 现在：schemastery 可用用真 schema，解析失败/不兼容 → catch → 仍用 fallback 注册，`HOST_DIAG` 记录结果。
 - **宿主半改动必须重启 GUI host**（client 半刷新页面即可）：`src/index.js` 新增只读 `GET /__esc-rewind/status`（返回 `settingsSectionRegistered`/`settingsSectionError`/`deleteOldOnRewind`，对应 ACCEPTANCE 5.10 探针）。
 - 现有 **35 条 harness 全绿**（18 既有 + 10 删除模式 + 4 宿主半 + 3 settings-reader 回归）。
+
+## v6（2026-09-12）：快捷键回退放宽到「尾部非 settled」
+
+- **需求**：只要这一轮**不是正常结束**，就允许用 Esc 快捷键回退（之前只认尾部 `interrupted` + 空草稿）。
+- **改动**：新增 `tailUnsettled(list)`（尾部非助手节点、或助手状态非 `settled` 即真；空/正常结束为假），`decideEsc` 非运行分支与 `EscBridge` 的 post-stop hint 改用同一判定；`tailInterrupted` 保留未删（仍导出，仅不再用于 armed）。运行态两次 Esc 语义不变（stop→rewind），草稿非空仍 disarm。
+- **语义边界**：尾部是**刚发出的 user 提问（助手尚未回复）**也会进入可回退态，re重放到该提问本身——这是用户确认要的「撤销刚发出问题」。hid提示只识别 `interrupted` vs 其余非 settled，文案仍按 delete 开/关分两档。
+- 细跑：`sub-plugins/dsh-esc-rewind/test/bundle.test.mjs` 37/37 全绿（新增 2 条纯逻辑：user 尾回退、未知状态 assistant 尾回退）。
+
+## v7（2026-09-12）：非运行态也两次 Esc（防误触）
+
+- **需求**：v6 放宽后，非运行态一次 Esc 就直接回退，误触风险高。改为**非运行态也要两步**：第一次 Esc 只武装（记住 target + 提示「再按一次 Esc 回退本轮」），第二次 Esc（`stopIssued=true`）才真正 `doRewind`。
+- **改动**：`decideEsc` 非运行态分支返回 `action:'arm'`（非 `stopIssued`）或 `action:'rewind'`（`stopIssued`）；document capture 的 `onKey` 新增 `arm` 分支——`consume()` + 设 `stopMarkRef.current = target.seq` + toast（`esc.hint`/`esc.hint.delete` 两档），**不调 `issueStop`**（没在运行）。复用既有 `stopMarkRef`/`stopIssued`，不新增状态；与运行态共用同一 ref（session 切换已重置）。
+- **为什么新增 `arm` 而非复用 `stop`**：`stop` 分支会调 `issueStop`，语义是「取消运行中的回合」；非运行态复用会误触发停止逻辑。`arm` 分支语义清晰、零 `issueStop`。
+- **建议勿改文档/文案膨胀**：首次按下沿用既有「再按一次 Esc 回退本轮」提示，不新增「已武装」独立文案（如要可后续扩展）。
+- 细跑：esc-rewind 套件 37/37 全绿（3 条非运行态测试改写为「第一次=arm、第二次=rewind」），全仓库子插件 + manager 套件无回归。
+
+## v7.1（2026-09-12）：post-stop hint 只在主动停止后弹（切进失败会话不提示）
+
+- **缺陷**：post-stop hint effect（给工具栏 Stop 补「再按 Esc 回退」提示）的触发只看「尾部非 settled + 草稿空」，不检查是否本会话内主动停止过 → **切换进一个本就非正常结束的会话（如 429 失败轮、被打断历史轮）时也会自动弹提示**，时机错误。
+- **根因**：`hintedRef` 是 per-`target.seq` 守卫、切会话不重置；effect 触发条件无「是否刚停止」判定。
+- **修复**：新增 `prevRunningRef`（session 切换时重置为 null），hint effect 改为**仅当 `running` 在本会话内发生 true→false 下降沿**（即用户主动 Stop / Esc 停止）且尾部非 settled、草稿空时才提示。切进失败会话 running 全程 false、无下降沿 → 不弹。
+- **为什么不用 `unsettled` 上升沿**：`tailUnsettled` 对 running 尾也返回 true，运行中 unsettled 已为 true；工具栏 Stop 前后 unsettled 恒 true，无上升沿可用。真正区分「主动停止」的是 running 下降沿。
+- **测试**：新增 2 条（切进 unsettled 会话不提示、工具栏 Stop 提示一次），套件 39/39 全绿；全仓库无回归。
