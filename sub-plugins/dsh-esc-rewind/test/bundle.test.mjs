@@ -447,17 +447,44 @@ test('pure decisions: ESC again while running (stop issued) rewinds', () => {
   assert.equal(d.exchange.seq, 3)
 })
 
-test('pure decisions: armed interrupted tail rewinds on ESC', () => {
+test('pure decisions: armed interrupted tail arms on first ESC, rewinds on second', () => {
   const list = [user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), interrupted(4, 'partial')]
-  const d = internals().decideEsc({ running: false, draft: '', list, stopIssued: false })
-  assert.equal(d.action, 'rewind')
-  assert.equal(d.exchange.seq, 3)
+  const d1 = internals().decideEsc({ running: false, draft: '', list, stopIssued: false })
+  assert.equal(d1.action, 'arm')
+  assert.equal(d1.exchange.seq, 3)
+  const d2 = internals().decideEsc({ running: false, draft: '', list, stopIssued: true })
+  assert.equal(d2.action, 'rewind')
+  assert.equal(d2.exchange.seq, 3)
 })
 
 test('pure decisions: natural completion never rewinds', () => {
   const list = [user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), settled(4, 'full answer')]
   const d = internals().decideEsc({ running: false, draft: '', list, stopIssued: false })
   assert.equal(d.action, 'none')
+})
+
+test('pure decisions: an unsettled user-tail question arms first, rewinds second', () => {
+  // Tail is a just-sent user question with no assistant reply yet — not settled,
+  // so an empty-draft ESC is allowed to rewind (tailUnsettled), but only on the
+  // second ESC. Rewind target is that last (unanswered) question itself.
+  const list = [user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), user(4, 'q3 waiting')]
+  const d1 = internals().decideEsc({ running: false, draft: '', list, stopIssued: false })
+  assert.equal(d1.action, 'arm')
+  assert.equal(d1.exchange.seq, 4)
+  const d2 = internals().decideEsc({ running: false, draft: '', list, stopIssued: true })
+  assert.equal(d2.action, 'rewind')
+  assert.equal(d2.exchange.seq, 4)
+})
+
+test('pure decisions: an unrecognised-status assistant tail arms first, rewinds second', () => {
+  const unknown = makeChatNode({ kind: 'assistant', seq: 4, text: 'x', extra: { status: 'unknown' } })
+  const list = [user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), unknown]
+  const d1 = internals().decideEsc({ running: false, draft: '', list, stopIssued: false })
+  assert.equal(d1.action, 'arm')
+  assert.equal(d1.exchange.seq, 3)
+  const d2 = internals().decideEsc({ running: false, draft: '', list, stopIssued: true })
+  assert.equal(d2.action, 'rewind')
+  assert.equal(d2.exchange.seq, 3)
 })
 
 test('pure decisions: an edited draft disarms the armed state', () => {
@@ -511,6 +538,43 @@ test('ESC stop integration: first ESC cancels the running turn and hints', async
   assert.equal(prevented, true, 'ESC must be consumed on stop')
   assert.deepEqual(services.calls.cancels, ['s1'])
   assert.ok(toasts.length > 0, 'stop hint toast expected')
+})
+
+test('post-stop hint: switching INTO an already-unsettled session does NOT hint', () => {
+  // e.g. a 429-failed turn where the tail is unsettled but NEVER went running→idle
+  // in this session: the user just opened the session, so running stays false the
+  // whole time. No falling edge → no tooltip. (prevRunning is null on mount.)
+  const env = mount({
+    services: applyWith(makeServices()),
+    sessionId: 's1',
+    chat: chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), interrupted(4, 'partial')]),
+    running: false,
+  })
+  env.render()
+  toasts.length = 0
+  env.rerender()
+  assert.ok(toasts.length === 0, 'must not hint when merely switching into an unsettled session')
+})
+
+test('post-stop hint: toolbar-Stop (running→idle falling edge) does hint once', () => {
+  const services = makeServices()
+  services.seed('s1', { running: true })
+  applyWith(services)
+  const env = mount({
+    services,
+    sessionId: 's1',
+    chat: chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), runningAssistant(4)]),
+    running: true,
+  })
+  env.render()
+  // Simulate the host settling after the toolbar Stop: running true→false with an
+  // unsettled (interrupted) tail.
+  services.setRunning('s1', false)
+  env.state.running = false
+  env.chat = chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), interrupted(4, 'partial')])
+  toasts.length = 0
+  env.rerender()
+  assert.ok(toasts.length > 0, 'post-stop hint appears after a real running→idle stop')
 })
 
 test('ESC twice rewinds: fork at the previous settled boundary, archive, open, stage restore', async () => {

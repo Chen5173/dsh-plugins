@@ -390,6 +390,17 @@ window.__ModuleLoader__.load({
       return !!(tail && nodeKind(tail) === 'assistant' && assistantStatusOf(tail) === 'interrupted')
     }
 
+    /** Whether the conversation tail ended abnormally, i.e. is NOT a naturally
+     *  settled assistant. Running / interrupted / unrecognised / non-assistant
+     *  tails (e.g. a just-sent user question without a reply yet) all qualify.
+     *  An empty or settled tail does not arm a rewind. */
+    function tailUnsettled(list) {
+      const tail = list && list.length ? list[list.length - 1] : null
+      if (!tail) return false
+      if (nodeKind(tail) === 'assistant') return assistantStatusOf(tail) !== 'settled'
+      return true
+    }
+
     /**
      * Pure ESC decision. Returns { action, exchange }:
      *   'none'   — let Escape fall through to core (menus/close/etc.).
@@ -406,8 +417,10 @@ window.__ModuleLoader__.load({
         if (opts.stopIssued === true && qualified) return { action: 'rewind', exchange }
         return { action: 'stop', exchange: qualified ? exchange : null }
       }
-      if (qualified && draft === '' && tailInterrupted(list)) {
-        return { action: 'rewind', exchange }
+      if (qualified && draft === '' && tailUnsettled(list)) {
+        // Non-running two-step arming: first ESC arms, second (stopIssued) rewinds.
+        if (opts.stopIssued === true) return { action: 'rewind', exchange }
+        return { action: 'arm', exchange }
       }
       return { action: 'none', exchange: null }
     }
@@ -1137,7 +1150,7 @@ window.__ModuleLoader__.load({
       const list = useMemo(() => chatNodeList(chat), [chat])
       const exchanges = useMemo(() => buildExchanges(list), [list])
       const target = exchanges.length ? exchanges[exchanges.length - 1] : null
-      const interrupted = tailInterrupted(list)
+      const unsettled = tailUnsettled(list)
       const input = useInput ? useInput((s) => s) : undefined
       const draft = input && typeof input.draft === 'string' ? input.draft : ''
 
@@ -1166,6 +1179,11 @@ window.__ModuleLoader__.load({
       // One-hint-per-exchange guard (ESC stop and toolbar-Stop both arm; the
       // armed-tail effect must not re-toast what the ESC handler already did).
       const hintedRef = useRef(null)
+      // Track the previous render's running flag so the post-stop hint only
+      // fires on the running→idle falling edge (a real toolbar-Stop / Esc stop),
+      // never when switching into an already-unsettled session (running stays
+      // false the whole time, so there is no edge).
+      const prevRunningRef = useRef(null)
       // One-restore-per-branch guard for the staged composer restore.
       const pendingAppliedRef = useRef(false)
 
@@ -1186,6 +1204,7 @@ window.__ModuleLoader__.load({
       // Reset per-session state when the active session changes.
       useEffect(() => {
         stopMarkRef.current = null
+        prevRunningRef.current = null
       }, [sessionId])
 
       // The single document capture listener for this session's lifetime.
@@ -1209,7 +1228,7 @@ window.__ModuleLoader__.load({
             draft: draftRef.current,
             list: listRef.current,
             stopIssued,
-            interrupted,
+            unsettled,
           })
 
           if (decision.action === 'none') { __diag.lastGate = 'idle-or-settled'; return }
@@ -1234,6 +1253,19 @@ window.__ModuleLoader__.load({
             return
           }
 
+          if (decision.action === 'arm') {
+            // Non-running first ESC: only arm (remember this target so the next
+            // ESC treats stopIssued=true and rewinds). No issueStop — nothing is
+            // running. Mirrors the running-path hint so the user knows the next
+            // ESC rewinds.
+            consume()
+            __diag.lastAction = 'arm'
+            __diag.lastGate = 'esc-arm'
+            stopMarkRef.current = targetRef.current ? targetRef.current.seq : null
+            publishToast(tRef.current(deleteModeOn() ? 'esc.hint.delete' : 'esc.hint'))
+            return
+          }
+
           if (decision.action === 'rewind' && decision.exchange) {
             consume()
             __diag.lastAction = 'rewind'
@@ -1251,15 +1283,22 @@ window.__ModuleLoader__.load({
         return () => document.removeEventListener('keydown', onKey, true)
       }, [])
 
-      // Post-stop hint for toolbar-Stop too (an interrupted tail with an empty
+      // Post-stop hint for toolbar-Stop too (an unsettled tail with an empty
       // draft is armed; make the affordance discoverable, once per exchange).
+      // Guarded by a running→idle falling edge so it only fires right after a
+      // real stop in this session — never when switching into an already
+      // unsettled session (e.g. a 429-failed turn), where running stays false.
       useEffect(() => {
-        if (!interrupted || running || draft !== '') return
-        if (!target || !qualifyExchange(target)) return
-        if (hintedRef.current === target.seq) return
-        hintedRef.current = target.seq
-        publishToast(tRef.current(deleteModeOn() ? 'esc.hint.delete' : 'esc.hint'))
-      }, [interrupted, running, draft, target])
+        const wasRunning = prevRunningRef.current
+        prevRunningRef.current = running
+        if (!unsettled || running || draft !== '') return
+        if (wasRunning === true) {
+          if (!target || !qualifyExchange(target)) return
+          if (hintedRef.current === target.seq) return
+          hintedRef.current = target.seq
+          publishToast(tRef.current(deleteModeOn() ? 'esc.hint.delete' : 'esc.hint'))
+        }
+      }, [unsettled, running, draft, target])
 
       // Apply the staged composer restore once the rewound branch mounts.
       useEffect(() => {
@@ -1566,7 +1605,7 @@ window.__ModuleLoader__.load({
         window.__dsewInternals = {
           nodeKind, nodeSeq, nodeTime, nodeText, nodeImageRefs, assistantStatusOf,
           chatNodeList, buildExchanges, qualifyExchange, lastExchange, tailInterrupted,
-          decideEsc, snippet, timeLabel,
+          tailUnsettled, decideEsc, snippet, timeLabel,
           _module: {
             publishToast, doRewind, issueStop, ensureIdle, clearQueue,
             exchangesOfSession, isSubagentSession, sessionFacts,
