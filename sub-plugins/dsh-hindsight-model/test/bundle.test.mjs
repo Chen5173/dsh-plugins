@@ -137,8 +137,16 @@ function makeDeps(overrides = {}) {
     if (args[0] === 'reg' && args[1] === 'query') {
       return { ok: true, stdout: userEnvOutput, stderr: '' }
     }
+    if (args[0] === 'powershell' && String(args[4] || '').includes('Stop-Process')) {
+      // Stopping no longer goes through the CLI: the plugin identifies the
+      // listener and terminates it, so the runner is where the daemon dies.
+      deps.daemonAlive = false
+      return { ok: true, stdout: '', stderr: '' }
+    }
     if (args[0] === 'powershell') {
-      return { ok: true, stdout: '16280|2026-09-12T18:55:46.0000000+08:00', stderr: '' }
+      return deps.daemonAlive === false
+        ? { ok: true, stdout: '', stderr: '' }
+        : { ok: true, stdout: '16280|python|2026-09-12T18:55:46.0000000+08:00|python.exe -m hindsight_api.main --daemon --idle-timeout 0 --port 9077', stderr: '' }
     }
     if (args[0] === 'reg' && args[1] === 'delete') {
       return { ok: true, stdout: 'The operation completed successfully.', stderr: '' }
@@ -147,11 +155,29 @@ function makeDeps(overrides = {}) {
   }
   deps.env = PROCESS_ENV
   deps.calls = calls
+  deps.daemonAlive = true
+  // The daemon block reports a health result; answer /health and leave the rest
+  // to the individual tests.
+  deps.httpGetJson = async (url) => {
+    if (url.endsWith('/health')) return { status: 'healthy', database: 'connected' }
+    throw new Error('not faked')
+  }
+  deps.spawnCalls = []
+  deps.spawn = async (file, args, options) => {
+    deps.spawnCalls.push({ file, args, options })
+    // Model reality: a stop frees the port, a start takes it back. Without this
+    // a restart would (correctly) stall waiting for the port.
+    const action = args[args.length - 1]
+    if (action === 'stop') deps.daemonAlive = false
+    if (action === 'start') deps.daemonAlive = true
+    return { ok: true, code: 0, stdout: 'done', stderr: '' }
+  }
+  deps.sleep = async () => {}
   return Object.assign(deps, overrides)
 }
 
 /** A mock cordis ctx exposing exactly the services the plugin reads. */
-function makeCtx({ withWebServer = true, services = {}, slots = null } = {}) {
+function makeCtx({ withWebServer = true, services = {}, slots = null, on = null } = {}) {
   const registered = []
   const effects = []
   const table = {
@@ -183,6 +209,9 @@ function makeCtx({ withWebServer = true, services = {}, slots = null } = {}) {
     _registered: registered,
     _effects: effects,
   }
+  // `on` is opt-in: a host WITHOUT it is the interesting degrade case, so the
+  // default ctx deliberately has no event bus at all.
+  if (typeof on === 'function') ctx.on = on
   if (withWebServer) {
     ctx.get = (key) => (key === 'webServer'
       ? { register: (route) => { registered.push(route); return () => {} } }
@@ -509,10 +538,12 @@ test('reg query and daemon probe parsing', () => {
   const env = core.parseRegQuery(REG_QUERY_OUTPUT)
   assert.equal(env.HINDSIGHT_API_LLM_MODEL, 'deepseek-flash')
   assert.equal(env.Path, 'C:\\Windows')
-  const probe = core.parseDaemonProbe('16280|2026-09-12T18:55:46.0000000+08:00')
+  const probe = core.parseDaemonProbe('16280|python|2026-09-12T18:55:46.0000000+08:00|"py.exe" -m hindsight_api.main --daemon --port 9077')
   assert.equal(probe.pid, 16280)
+  assert.equal(probe.name, 'python')
   assert.equal(probe.startTime instanceof Date, true)
-  assert.deepEqual(core.parseDaemonProbe(''), { pid: null, startTime: null })
+  assert.ok(probe.commandLine.includes('hindsight_api.main'))
+  assert.deepEqual(core.parseDaemonProbe(''), { pid: null, name: null, commandLine: null, startTime: null })
 })
 
 test('change validation: unknown keys, non-strings and newlines are all rejected', () => {
@@ -764,7 +795,7 @@ test('verify: no LLM-call lookup is attempted when the verdict is "not applied"'
   const deps = makeDeps({
     run: async (args) => (args[0] === 'reg'
       ? { ok: true, stdout: REG_QUERY_OUTPUT, stderr: '' }
-      : { ok: true, stdout: '16280|2026-09-12T10:40:00.0000000+08:00', stderr: '' }),
+      : { ok: true, stdout: '16280|python|2026-09-12T10:40:00.0000000+08:00|python.exe -m hindsight_api.main --daemon --idle-timeout 0 --port 9077', stderr: '' }),
   })
   deps.httpGetJson = async () => { probed = true; return {} }
   const base = makeDeps()
@@ -877,13 +908,15 @@ test('cleanEnv: exports the values, then deletes only the conflicting keys', asy
 // 7. HTTP contract
 // ============================================================================
 
-test('routes: apply() registers exactly the five exact routes', () => {
+test('routes: apply() registers exactly the seven exact routes', () => {
   const ctx = makeCtx()
   hostIndex.apply(ctx)
-  assert.equal(ctx._registered.length, 5)
+  assert.equal(ctx._registered.length, 7)
   assert.deepEqual(ctx._registered.map((r) => r.path).sort(), Object.values(hostIndex.ROUTES).sort())
+  assert.ok(ctx._registered.some((r) => r.path === hostIndex.ROUTES.daemon), 'the lifecycle route is mounted')
+  assert.ok(ctx._registered.some((r) => r.path === hostIndex.ROUTES.auto), 'the auto-start switch route is mounted')
   assert.deepEqual([...new Set(ctx._registered.map((r) => r.kind))], ['exact'])
-  assert.equal(ctx._effects.length, 5, 'every registration is wrapped in ctx.effect')
+  assert.equal(ctx._effects.length, 7, 'every registration is wrapped in ctx.effect')
 })
 
 test('routes: a host without webServer never blows up apply()', () => {
@@ -978,6 +1011,17 @@ const PANEL_STATE = {
     { key: 'HF_ENDPOINT', state: 'set', onDisk: { secret: false, value: 'https://hf-mirror.com' }, fallback: null },
   ],
   groups: core.KEY_GROUPS,
+  daemon: {
+    canControl: true,
+    reason: null,
+    running: true,
+    pid: 16280,
+    health: { known: true, reachable: true, status: 'healthy', database: 'connected' },
+    commands: {
+      start: 'uv run --directory "C:\fake\embed" hindsight-embed daemon --profile coding-agent start',
+      stop: 'uv run --directory "C:\fake\embed" hindsight-embed daemon --profile coding-agent stop',
+    },
+  },
   restart: { command: 'Remove-Item Env:HINDSIGHT_API_LLM_PROVIDER -ErrorAction SilentlyContinue\nuv run --directory "C:\\fake\\embed" hindsight-embed daemon --profile coding-agent stop\nuv run --directory "C:\\fake\\embed" hindsight-embed daemon --profile coding-agent start', conflictKeys: ['HINDSIGHT_API_LLM_PROVIDER', 'HINDSIGHT_API_LLM_MODEL'] },
   backups: ['C:\\fake\\.hindsight\\profiles\\coding-agent.env.bak-2026-09-13T10-00-00-000Z'],
   dsh: {
@@ -1066,8 +1110,10 @@ test('panel render: all four layers and both conflict groups are on screen', asy
   assert.ok(text.includes('••••••••••(17)'), 'the secret is masked on screen')
   assert.ok(text.includes('未设 → 回落默认：BAAI/bge-small-en-v1.5'), 'an unset vector key names its fallback')
   const pre = findAll(tree, (node) => node.type === 'pre')
-  assert.equal(pre.length, 1)
-  assert.ok(textOf(pre[0]).includes('--profile coding-agent'))
+  assert.equal(pre.length, 2, 'one for the commands the panel runs, one for the manual restart')
+  const preText = pre.map((node) => textOf(node)).join(' ')
+  assert.ok(preText.includes('--profile coding-agent'))
+  assert.ok(preText.includes('Remove-Item Env:'), 'the manual command still carries its own cleanup')
 })
 
 test('panel render: an unknown daemon never renders as success', async () => {
@@ -1195,6 +1241,837 @@ test('panel render: a failing host endpoint shows the reason, not an empty panel
   const text = textOf(tree)
   assert.ok(text.includes('出错：boom'), 'the failure is surfaced')
   assert.ok(text.includes('重新读取'), 'and a retry is offered')
+})
+
+// ============================================================================
+// 11. daemon lifecycle
+// ============================================================================
+
+test('sanitizedEnv: every profile-owned key is stripped, nothing else is touched', () => {
+  const env = {
+    PATH: '/usr/bin',
+    HOME: 'h',
+    HINDSIGHT_API_LLM_MODEL: 'deepseek-v4-flash',
+    HINDSIGHT_API_LLM_API_KEY: 'sk-outer',
+    HINDSIGHT_API_PORT: '9077',
+    HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT: '0',
+    HF_ENDPOINT: 'https://hf-mirror.com',
+  }
+  const clean = core.sanitizedEnv(env)
+  for (const key of core.MANAGED_KEYS) assert.equal(clean[key], undefined, `${key} must be stripped`)
+  assert.equal(clean.PATH, '/usr/bin')
+  assert.equal(clean.HOME, 'h')
+  assert.equal(env.HINDSIGHT_API_LLM_MODEL, 'deepseek-v4-flash', 'the caller env is never mutated')
+})
+
+test('daemonArgs: argv comes from the machine layout, and restart is not a CLI subcommand', () => {
+  const dir = ['C:', 'x', '.hindsight', 'embed-project'].join('/')
+  const start = core.daemonArgs({ embedPackagePath: dir, daemonProfile: 'coding-agent', action: 'start' })
+  assert.deepEqual(start, ['run', '--directory', dir, 'hindsight-embed', 'daemon', '--profile', 'coding-agent', 'start'])
+  assert.equal(start.includes('restart'), false)
+  assert.equal(core.daemonArgs({ embedPackagePath: dir, daemonProfile: 'coding-agent', action: 'restart' }), null)
+  assert.equal(core.daemonArgs({ embedPackagePath: null, daemonProfile: 'p', action: 'start' }), null)
+  assert.equal(core.daemonArgs({ embedPackagePath: 'd', daemonProfile: null, action: 'start' }), null)
+  assert.match(core.daemonCommandLine(start), /^uv run --directory /)
+  const spaced = core.daemonCommandLine(core.daemonArgs({ embedPackagePath: 'a b/c', daemonProfile: 'p', action: 'stop' }))
+  assert.ok(spaced.includes('"a b/c"'), 'a path with a space is quoted')
+})
+
+test('tailForDisplay: bounded, and it never lets a credential through', () => {
+  const noisy = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n')
+  assert.equal(core.tailForDisplay(noisy).split('\n').length, 12, 'only the tail is kept')
+  const secretish = 'sk-abcdef123456\nHINDSIGHT_API_LLM_API_KEY=codemaker-managed\nTOKEN: abcdefghijklmnop'
+  const shown = core.tailForDisplay(secretish)
+  assert.equal(shown.includes('sk-abcdef123456'), false)
+  assert.equal(shown.includes('codemaker-managed'), false)
+  assert.equal(shown.includes('abcdefghijklmnop'), false)
+  assert.equal(shown.length > 0, true, 'the shape of the failure is still visible')
+})
+
+test('daemon: an unknown action is refused before anything is spawned', async () => {
+  const deps = makeDeps()
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('nope')
+  assert.equal(result.code, 'bad-action')
+  assert.equal(deps.spawnCalls.length, 0)
+})
+
+test('daemon: stop and restart need an explicit confirmation flag', async () => {
+  const deps = makeDeps()
+  const impl = core.createCore(deps)
+  for (const action of ['stop', 'restart']) {
+    const result = await impl.daemonAction(action)
+    assert.equal(result.code, 'confirm-required', `${action} must require confirmation`)
+  }
+  assert.equal(deps.spawnCalls.length, 0, 'nothing runs before the confirmation')
+  const started = await impl.daemonAction('start')
+  assert.equal(started.ok, true, 'start is harmless and needs no confirmation')
+})
+
+test('daemon: stopping something already stopped is idempotent success', async () => {
+  const deps = makeDeps()
+  deps.daemonAlive = false
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('stop', { confirm: true })
+  assert.equal(result.ok, true)
+  assert.equal(result.code, 'already-stopped')
+  assert.equal(deps.spawnCalls.length, 0, 'no point spawning a stop for a dead daemon')
+})
+
+test('daemon: start spawns uv with the SANITIZED environment', async () => {
+  const deps = makeDeps()
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('start')
+  assert.equal(result.ok, true)
+  assert.equal(result.code, 'started')
+  assert.equal(deps.spawnCalls.length, 1)
+  const call = deps.spawnCalls[0]
+  assert.equal(call.file, 'uv')
+  assert.equal(call.args[call.args.length - 1], 'start')
+  for (const key of core.MANAGED_KEYS) {
+    assert.equal(call.options.env[key], undefined, `${key} must not reach the child`)
+  }
+  assert.equal(result.state.daemon.running, true, 'the receipt carries a refreshed snapshot')
+})
+
+test('daemon: restart is stop → wait for the port → start, in that order', async () => {
+  const deps = makeDeps()
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('restart', { confirm: true })
+  assert.equal(result.ok, true)
+  assert.equal(result.code, 'restarted')
+  assert.deepEqual(deps.spawnCalls.map((c) => c.args[c.args.length - 1]), ['start'],
+    'only the start is a CLI call — the stop is the plugin\'s identified kill')
+  assert.equal(deps.calls.some((args) => String(args[4] || '').includes('Stop-Process')), true,
+    'the stop terminated the identified process')
+  assert.equal(result.steps.length, 2)
+  assert.deepEqual(result.steps.map((s) => s.action), ['stop', 'start'])
+})
+
+test('daemon: a restart whose stop never frees the port fails loudly', async () => {
+  const deps = makeDeps()
+  const originalRun = deps.run
+  deps.run = async (args) => {
+    // A "stop" that reports success but leaves the port bound.
+    if (args[0] === 'powershell' && String(args[4] || '').includes('Stop-Process')) {
+      return { ok: true, stdout: '', stderr: '' }
+    }
+    return originalRun(args)
+  }
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('restart', { confirm: true })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'port-busy')
+  assert.equal(deps.spawnCalls.length, 0, 'no start is attempted while the port is still held')
+})
+
+test('daemon: one action at a time', async () => {
+  const deps = makeDeps()
+  let release
+  deps.spawn = async (file, args) => {
+    deps.spawnCalls.push({ file, args })
+    await new Promise((resolve) => { release = resolve })
+    return { ok: true, code: 0, stdout: '', stderr: '' }
+  }
+  const impl = core.createCore(deps)
+  const first = impl.daemonAction('start')
+  // The in-flight flag is set synchronously, but the first action is still
+  // awaiting its probe — let it reach spawn before releasing the gate.
+  for (let i = 0; i < 10 && typeof release !== 'function'; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  const second = await impl.daemonAction('start')
+  assert.equal(second.code, 'busy', 'a second action is refused while one is running')
+  assert.equal(typeof release, 'function', 'the first action did reach spawn')
+  release()
+  assert.equal((await first).ok, true)
+})
+
+test('daemon: a host without spawn support says so instead of pretending', async () => {
+  const deps = makeDeps()
+  delete deps.spawn
+  const impl = core.createCore(deps)
+  const state = await impl.collectState()
+  assert.equal(state.daemon.canControl, false)
+  assert.equal(state.daemon.reason, 'this host cannot spawn processes')
+  const result = await impl.daemonAction('start')
+  assert.equal(result.code, 'no-spawn')
+})
+
+test('collectState: the daemon block reports status, health and the real commands', async () => {
+  const impl = core.createCore(makeDeps())
+  const state = await impl.collectState()
+  assert.equal(state.daemon.running, true)
+  assert.equal(state.daemon.pid, 16280)
+  assert.equal(state.daemon.health.reachable, true)
+  assert.equal(state.daemon.health.status, 'healthy')
+  assert.ok(state.daemon.commands.start.includes('--profile coding-agent'))
+  assert.ok(state.daemon.commands.stop.includes('Stop-Process'), 'the stop is the identified kill, not the CLI')
+  assert.ok(state.daemon.commands.stop.includes('9077'), 'and it is scoped to this port')
+})
+
+test('collectState: an unreachable daemon reports unhealthy, not unknown', async () => {
+  const deps = makeDeps()
+  deps.daemonAlive = false
+  const impl = core.createCore(deps)
+  const state = await impl.collectState()
+  assert.equal(state.daemon.running, false)
+  assert.equal(state.daemon.health.reachable, false)
+})
+
+test('endpoint /daemon: method, action and confirmation are all enforced', async () => {
+  const deps = makeDeps()
+  const impl = core.createCore(deps)
+  const handlers = hostIndex.createHandlers({ core: impl, dsh: hostIndex.createDshReader(makeCtx()) })
+  const route = hostIndex.ROUTES.daemon
+
+  assert.equal((await callHandler(handlers[route], 'GET')).status, 405)
+  assert.equal((await callHandler(handlers[route], 'POST', { action: 'nope' })).status, 400)
+  assert.equal((await callHandler(handlers[route], 'POST', { action: 'stop' })).status, 400, 'no confirm ⇒ 400')
+  assert.equal(deps.spawnCalls.length, 0)
+
+  const ok = await callHandler(handlers[route], 'POST', { action: 'start' })
+  assert.equal(ok.status, 200)
+  assert.equal(ok.headers['content-type'], 'application/json; charset=utf-8')
+  assert.equal(ok.json().code, 'started')
+  assert.equal(ok.json().state.daemon.running, true)
+
+  const confirmed = await callHandler(handlers[route], 'POST', { action: 'stop', confirm: true })
+  assert.equal(confirmed.status, 200)
+  assert.equal(confirmed.json().code, 'stopped')
+})
+
+test('endpoint /daemon: the response never carries a plaintext key', async () => {
+  const deps = makeDeps()
+  deps.spawn = async (file, args, options) => {
+    deps.spawnCalls.push({ file, args, options })
+    deps.daemonAlive = args[args.length - 1] === 'start'
+    return { ok: true, code: 0, stdout: 'starting with HINDSIGHT_API_LLM_API_KEY=codemaker-managed', stderr: 'sk-abcdef123456' }
+  }
+  const impl = core.createCore(deps)
+  const handlers = hostIndex.createHandlers({ core: impl, dsh: hostIndex.createDshReader(makeCtx()) })
+  const res = await callHandler(handlers[hostIndex.ROUTES.daemon], 'POST', { action: 'start' })
+  assert.equal(res.status, 200)
+  assert.equal(res.body.includes('codemaker-managed'), false, 'output is redacted')
+  assert.equal(res.body.includes('sk-abcdef123456'), false)
+  assert.equal(res.body.includes('sk-super-secret-value'), false)
+})
+
+/** Re-render an already-mounted component until it settles. */
+async function settle(element, React) {
+  let tree = null
+  for (let pass = 0; pass < 8; pass += 1) {
+    const result = React.__render(element)
+    tree = result.tree
+    for (const effect of result.effects) effect()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    if (!result.dirtyNow()) break
+  }
+  return tree
+}
+
+test('panel render: the daemon block offers the lifecycle actions with live status', async () => {
+  stubFetch(PANEL_STATE)
+  const tree = await mount(React.createElement(clientTest.Section), React)
+  const text = textOf(tree)
+  assert.ok(text.includes('守护进程'), 'the block has a heading')
+  assert.ok(text.includes('运行中') && text.includes('PID 16280'), 'status and pid are shown')
+  assert.ok(text.includes('healthy'), 'the health result is shown')
+  for (const label of ['启动', '停止', '重启']) {
+    assert.ok(buttonsByText(tree, label).length > 0, `missing action: ${label}`)
+  }
+  assert.ok(text.includes('会中断进行中的记忆操作'), 'the warning is always visible')
+  assert.ok(text.includes('面板实际执行的命令'), 'the commands actually run are shown')
+  assert.ok(text.includes('--profile coding-agent'), 'and they come from the machine layout')
+  assert.ok(text.includes('外层同名变量不会被写回 profile'), 'the environment sanitization is explained')
+  assert.ok(text.includes('不向无法确认的进程发信号'), 'and so is the stop\'s safety property')
+})
+
+test('panel render: start does not need confirmation', async () => {
+  const calls = stubFetch(PANEL_STATE)
+  const tree = await mount(React.createElement(clientTest.Section), React)
+  await buttonsByText(tree, '启动')[0].props.onClick()
+  const sent = calls.find((c) => c.url.endsWith('/daemon'))
+  assert.ok(sent, 'start is sent straight away')
+  assert.deepEqual(JSON.parse(sent.init.body), { action: 'start' })
+})
+
+test('panel render: stop asks first, and only then sends confirm:true', async () => {
+  const calls = stubFetch(PANEL_STATE)
+  const element = React.createElement(clientTest.Section)
+  const tree = await mount(element, React)
+  buttonsByText(tree, '停止')[0].props.onClick()
+  const asked = await settle(element, React)
+  assert.equal(calls.some((c) => c.url.endsWith('/daemon')), false, 'the first click sends nothing')
+  assert.ok(textOf(asked).includes('确认停止'), 'the button turned into a confirmation')
+  assert.ok(buttonsByText(asked, '取消').length > 0, 'and it can be cancelled')
+
+  await buttonsByText(asked, '确认停止')[0].props.onClick()
+  const sent = calls.find((c) => c.url.endsWith('/daemon'))
+  assert.ok(sent, 'the confirmation sends the action')
+  assert.deepEqual(JSON.parse(sent.init.body), { action: 'stop', confirm: true })
+})
+
+test('panel render: restart goes through the same confirmation gate', async () => {
+  const calls = stubFetch(PANEL_STATE)
+  const element = React.createElement(clientTest.Section)
+  const tree = await mount(element, React)
+  buttonsByText(tree, '重启')[0].props.onClick()
+  const asked = await settle(element, React)
+  assert.equal(calls.some((c) => c.url.endsWith('/daemon')), false)
+  assert.ok(textOf(asked).includes('确认重启'))
+  await buttonsByText(asked, '确认重启')[0].props.onClick()
+  const sent = calls.find((c) => c.url.endsWith('/daemon'))
+  assert.deepEqual(JSON.parse(sent.init.body), { action: 'restart', confirm: true })
+})
+
+test('panel render: cancelling the confirmation leaves the daemon alone', async () => {
+  const calls = stubFetch(PANEL_STATE)
+  const element = React.createElement(clientTest.Section)
+  const tree = await mount(element, React)
+  buttonsByText(tree, '停止')[0].props.onClick()
+  const asked = await settle(element, React)
+  buttonsByText(asked, '取消')[0].props.onClick()
+  const back = await settle(element, React)
+  assert.equal(calls.some((c) => c.url.endsWith('/daemon')), false, 'nothing was sent')
+  assert.ok(buttonsByText(back, '停止').length > 0, 'and the plain button is back')
+})
+
+test('panel render: a host that cannot spawn disables the actions and says why', async () => {
+  const degraded = JSON.parse(JSON.stringify(PANEL_STATE))
+  degraded.daemon = {
+    canControl: false,
+    reason: 'this host cannot spawn processes',
+    running: false,
+    pid: null,
+    health: { known: false, reachable: false, status: null, database: null },
+    commands: { start: null, stop: null },
+  }
+  stubFetch(degraded)
+  const tree = await mount(React.createElement(clientTest.Section), React)
+  for (const label of ['启动', '停止', '重启']) {
+    assert.equal(buttonsByText(tree, label)[0].props.disabled, true, `${label} must be disabled`)
+  }
+  const text = textOf(tree)
+  assert.ok(text.includes('启停不可用'))
+  assert.ok(text.includes('this host cannot spawn processes'), 'and the missing piece is named')
+  assert.ok(text.includes('读取'), 'while the rest of the panel still works')
+})
+
+test('panel render: a stopped daemon reads as stopped, not as a failure', async () => {
+  const stopped = JSON.parse(JSON.stringify(PANEL_STATE))
+  stopped.daemon.running = false
+  stopped.daemon.pid = null
+  stopped.daemon.health = { known: true, reachable: false, status: null, database: null }
+  stubFetch(stopped)
+  const tree = await mount(React.createElement(clientTest.Section), React)
+  const text = textOf(tree)
+  assert.ok(text.includes('已停止'))
+  assert.ok(text.includes('健康：—'), 'a stopped daemon has no health result to report')
+})
+
+test('identify: only a positively identified Hindsight listener may be signalled', () => {
+  const cmd = 'python.exe -m hindsight_api.main --daemon --idle-timeout 0 --port 9077'
+  assert.equal(core.identifyHindsightProcess({ name: 'python', commandLine: cmd, port: 9077 }).ok, true)
+  assert.equal(core.identifyHindsightProcess({ name: 'python', commandLine: cmd, port: 1234 }).ok, false,
+    'a listener on another port is not ours to kill')
+  assert.equal(core.identifyHindsightProcess({ name: 'python', commandLine: 'python.exe -m http.server 9077', port: 9077 }).ok, false,
+    'a different module is not our daemon')
+  assert.equal(core.identifyHindsightProcess({ name: 'python', commandLine: 'python.exe -m hindsight_api.main --port 9077', port: 9077 }).ok, false,
+    'the daemon flag is required too')
+  assert.equal(core.identifyHindsightProcess({ name: 'svchost', commandLine: cmd, port: 9077 }).ok, false,
+    'an unexpected process name is refused even with a matching command line')
+  assert.equal(core.identifyHindsightProcess({ name: 'python', commandLine: null, port: 9077 }).ok, false,
+    'unknown identity is refused')
+})
+
+test('daemon: an unidentifiable listener is refused, never killed', async () => {
+  const deps = makeDeps()
+  let killed = false
+  deps.run = async (args) => {
+    if (args[0] === 'powershell' && String(args[4] || '').includes('Stop-Process')) {
+      killed = true
+      return { ok: true, stdout: '', stderr: '' }
+    }
+    // Something else holds the port: a node server, not the Hindsight daemon.
+    return { ok: true, stdout: '9999|node|2026-09-12T18:55:46.0000000+08:00|node.exe server.js --port 9077', stderr: '' }
+  }
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('stop', { confirm: true })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'not-identified')
+  assert.equal(killed, false, 'upstream\'s "never signal what you cannot identify" rule is preserved')
+  assert.ok(result.steps[0].output.includes('拒绝向无法确认的进程发信号'))
+})
+
+// ============================================================================
+// 9. auto start: launcher form, self-heal plan, backoff, origin (pure)
+// ============================================================================
+
+/** A minimal well-formed PE image declaring one subsystem. */
+function peImage(subsystem) {
+  const bytes = new Uint8Array(0x200)
+  bytes[0] = 0x4d
+  bytes[1] = 0x5a // 'MZ'
+  const lfanew = 0x80
+  bytes[0x3c] = lfanew
+  bytes[lfanew] = 0x50
+  bytes[lfanew + 1] = 0x45 // 'PE\0\0'
+  const at = lfanew + 24 + 68
+  bytes[at] = subsystem & 0xff
+  bytes[at + 1] = (subsystem >> 8) & 0xff
+  return bytes
+}
+
+test('launcher form: only the PE header decides (2 = console-free, 3 = console)', () => {
+  assert.equal(core.peSubsystemOf(peImage(2)), 2)
+  assert.equal(core.launcherFormOf(2), 'gui')
+  assert.equal(core.peSubsystemOf(peImage(3)), 3)
+  assert.equal(core.launcherFormOf(3), 'console')
+})
+
+test('launcher form: unreadable bytes are unknown, never a guess', () => {
+  assert.equal(core.launcherFormOf(core.peSubsystemOf(new Uint8Array(0))), 'unknown')
+  assert.equal(core.launcherFormOf(core.peSubsystemOf(null)), 'unknown')
+  assert.equal(core.peSubsystemOf(new Uint8Array(0x200)), null, 'no MZ signature')
+  assert.equal(core.peSubsystemOf(peImage(2).slice(0, 0x40)), null, 'e_lfanew past the buffer is not a PE')
+  assert.equal(core.launcherFormFromName('pythonw.exe'), 'gui')
+  assert.equal(core.launcherFormFromName('python.exe'), 'console')
+  assert.equal(core.launcherFormFromName('something-else'), 'unknown')
+})
+
+test('self-heal plan: console is replaced only when the same release ships a console-free launcher', () => {
+  assert.deepEqual(
+    core.planLauncherHeal({ form: 'console', guiSourceAvailable: true }),
+    { action: 'replace', reason: 'console-launcher' },
+  )
+  const blocked = core.planLauncherHeal({ form: 'console', guiSourceAvailable: false })
+  assert.equal(blocked.action, 'none')
+  assert.equal(blocked.reason, 'no-gui-source')
+  assert.equal(blocked.blocked, true, 'a missing source is NOT permission to start')
+  assert.equal(core.planLauncherHeal({ form: 'gui', guiSourceAvailable: true }).blocked, false)
+  assert.equal(core.planLauncherHeal({ form: 'unknown', guiSourceAvailable: true }).action, 'none')
+})
+
+test('launcher source: pyvenv.cfg home points at the same release built for venvs', () => {
+  const cfg = 'home = C:\\Users\\x\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\r\ninclude-system-site-packages = false\n'
+  assert.equal(core.parsePyvenvHome(cfg), 'C:\\Users\\x\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none')
+  assert.equal(core.guiLauncherSourceOf('C:\\base\\'), 'C:\\base\\Lib\\venv\\scripts\\nt\\pythonw.exe')
+  assert.equal(core.parsePyvenvHome(''), null)
+  assert.equal(core.guiLauncherSourceOf(null), null)
+})
+
+test('backoff: 1/5/15/30 minutes capped, and one notice per distinct failure', () => {
+  assert.deepEqual(core.BACKOFF_STEPS_MS, [60_000, 300_000, 900_000, 1_800_000])
+  assert.equal(core.backoffDelayMs(1), 60_000)
+  assert.equal(core.backoffDelayMs(3), 900_000)
+  assert.equal(core.backoffDelayMs(9), 1_800_000, 'capped')
+  assert.equal(core.backoffDelayMs(0), 0)
+
+  const first = core.advanceAutoAttempt({}, { ok: false, code: 'start-failed', at: 'T1', now: 1_000 })
+  assert.equal(first.state.failures, 1)
+  assert.equal(first.state.backoffUntil, 61_000)
+  assert.ok(first.notice, 'the first failure is worth a notice')
+  const second = core.advanceAutoAttempt(first.state, { ok: false, code: 'start-failed', at: 'T2', now: 2_000 })
+  assert.equal(second.state.failures, 2)
+  assert.equal(second.state.backoffUntil, 302_000)
+  assert.equal(second.notice, null, 'the same failure is not repeated')
+  const recovered = core.advanceAutoAttempt(second.state, { ok: true, code: 'started', at: 'T3', now: 3_000 })
+  assert.equal(recovered.state.failures, 0)
+  assert.equal(recovered.state.backoffUntil, 0)
+})
+
+test('backoff window gates the next attempt', () => {
+  const { state } = core.advanceAutoAttempt({}, { ok: false, code: 'start-failed', now: 10_000 })
+  assert.equal(core.autoAttemptDue(state, 40_000), false, 'inside the first 1-minute window')
+  assert.equal(core.autoAttemptDue(state, 70_001), true)
+  assert.equal(core.autoAttemptDue({ failures: 0, backoffUntil: 0 }, 1), true)
+})
+
+test('origin: auto/manual only when THIS process started that pid', () => {
+  const base = { known: true, pid: 42, imageName: 'pythonw.exe', imageForm: 'gui' }
+  assert.equal(core.classifyDaemonOrigin({ ...base, startedBy: { pid: 42, reason: 'auto' } }).origin, 'auto')
+  assert.equal(core.classifyDaemonOrigin({ ...base, startedBy: { pid: 42, reason: 'manual' } }).origin, 'manual')
+  assert.equal(core.classifyDaemonOrigin({ ...base, startedBy: { pid: 7, reason: 'auto' } }).origin, 'external', 'a stale pid is not ours')
+  assert.equal(core.classifyDaemonOrigin({ ...base }).origin, 'external')
+  assert.equal(core.classifyDaemonOrigin({ known: false, pid: null }).origin, 'unknown')
+})
+
+test('origin: a console-capable image carries the window risk', () => {
+  assert.equal(core.classifyDaemonOrigin({ known: true, pid: 1, imageName: 'python.exe', imageForm: 'console' }).consoleRisk, true)
+  assert.equal(
+    core.classifyDaemonOrigin({ known: true, pid: 1, imageName: 'python.exe', imageForm: 'unknown' }).consoleRisk,
+    true,
+    'falls back to the image name when the bytes cannot be read',
+  )
+  assert.equal(core.classifyDaemonOrigin({ known: true, pid: 1, imageName: 'pythonw.exe', imageForm: 'unknown' }).consoleRisk, false)
+})
+
+test('daemon probe: the image path is read, and the older 4-field shape still parses', () => {
+  const modern = core.parseDaemonProbe('16280|pythonw|2026-09-12T18:55:46.0000000+08:00|C:\\base\\pythonw.exe|-m hindsight_api.main --daemon --port 9077')
+  assert.equal(modern.pid, 16280)
+  assert.equal(modern.exePath, 'C:\\base\\pythonw.exe')
+  assert.equal(modern.commandLine, '-m hindsight_api.main --daemon --port 9077', 'the command line stays last: it may contain the separator')
+  const legacy = core.parseDaemonProbe('16280|python|2026-09-12T18:55:46.0000000+08:00|python.exe -m hindsight_api.main --daemon --port 9077')
+  assert.equal(legacy.exePath, null)
+  assert.equal(legacy.commandLine, 'python.exe -m hindsight_api.main --daemon --port 9077')
+})
+
+// ============================================================================
+// 10. on-demand auto start (core + host wiring)
+// ============================================================================
+
+/** Deps with binary access, for the launcher self-heal branches. */
+function makeBinaryDeps({ launcherForm = 3, sourceForm = 2, failRename = false } = {}) {
+  const deps = makeDeps()
+  const embed = 'C:\\fake\\.hindsight\\embed-project'
+  const venv = `${embed}\\.venv`
+  const files = new Map()
+  files.set(normPath(`${venv}\\Scripts\\pythonw.exe`), peImage(launcherForm))
+  files.set(normPath('C:\\base\\cpython-3.12\\Lib\\venv\\scripts\\nt\\pythonw.exe'), peImage(sourceForm))
+  deps.writeText(`${venv}\\pyvenv.cfg`, 'home = C:\\base\\cpython-3.12\ninclude-system-site-packages = false\n')
+  deps.readBinary = (p) => files.get(normPath(p)) || null
+  deps.writeBinary = (p, bytes) => { files.set(normPath(p), bytes) }
+  deps.removeFile = (p) => { files.delete(normPath(p)) }
+  deps.rename = (from, to) => {
+    if (failRename) throw new Error('EPERM: rename refused')
+    if (!files.has(normPath(from))) throw new Error(`ENOENT: ${from}`)
+    files.set(normPath(to), files.get(normPath(from)))
+    files.delete(normPath(from))
+  }
+  const originalRun = deps.run
+  deps.run = async (args) => {
+    // Modern probe shape: the image path rides along, so the origin/console-risk
+    // assertions follow the ACTUAL bytes in the fake venv rather than a name.
+    if (args[0] === 'powershell' && !String(args[4] || '').includes('Stop-Process')) {
+      if (!deps.daemonAlive) return { ok: true, stdout: '', stderr: '' }
+      const line = `16280|pythonw|2026-09-12T18:55:46.0000000+08:00|${venv}\Scripts\pythonw.exe|-m hindsight_api.main --daemon --idle-timeout 0 --port 9077`
+      return { ok: true, stdout: line, stderr: '' }
+    }
+    return originalRun(args)
+  }
+  deps.binaryFiles = files
+  deps.embed = embed
+  deps.venv = venv
+  return deps
+}
+
+test('auto start: a healthy daemon is adopted — no spawn, no writes, same pid', async () => {
+  const deps = makeDeps() // daemonAlive ⇒ the probe finds a listener
+  const impl = core.createCore(deps)
+  const result = await impl.ensureDaemon({ reason: 'auto' })
+  assert.equal(result.ok, true)
+  assert.equal(result.code, 'adopted')
+  assert.equal(deps.spawnCalls.length, 0, 'adoption never spawns')
+  assert.equal(result.pid, 16280)
+  const state = await impl.collectState()
+  assert.equal(state.auto.triggers, 1)
+  assert.equal(state.auto.lastResult.code, 'adopted')
+  assert.equal(state.auto.starting, false)
+})
+
+test('auto start: an unhealthy daemon starts in the BACKGROUND, through the sanitized CLI path', async () => {
+  const deps = makeDeps()
+  deps.daemonAlive = false
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const spawned = []
+  deps.spawn = async (file, args, options) => {
+    spawned.push({ file, args, options })
+    await gate // stays in flight until this test lets go
+    deps.daemonAlive = true
+    return { ok: true, code: 0, stdout: 'started', stderr: '' }
+  }
+  const impl = core.createCore(deps)
+
+  // Reaching the next line at all is the non-blocking proof: the spawn is parked
+  // on `gate`, so a trigger that waited for the cold start would hang right here.
+  const result = await impl.ensureDaemon({ reason: 'auto' })
+  assert.equal(result.code, 'starting', 'the trigger returns while the cold start is still running')
+
+  release()
+  await result.started
+  assert.equal(spawned.length, 1, 'exactly one start, through the shared path')
+  assert.equal(
+    spawned[0].args.join(' '),
+    'run --directory C:\\fake\\.hindsight\\embed-project hindsight-embed daemon --profile coding-agent start',
+    'the same command the panel buttons run',
+  )
+  for (const key of core.MANAGED_KEYS) {
+    assert.equal(key in (spawned[0].options.env || {}), false, `${key} is stripped from the child env`)
+  }
+  const state = await impl.collectState()
+  assert.equal(state.auto.lastResult.ok, true)
+  assert.equal(state.auto.lastResult.code, 'started')
+  assert.equal(state.auto.starting, false)
+})
+
+test('auto start: failures back off; success lifts the window', async () => {
+  const deps = makeDeps()
+  deps.daemonAlive = false
+  let clock = 1_000_000
+  deps.now = () => clock
+  deps.spawn = async () => ({ ok: false, code: 1, stdout: '', stderr: 'uv exploded' })
+  const impl = core.createCore(deps)
+
+  const first = await impl.ensureDaemon({ reason: 'auto' })
+  await first.started
+  let state = await impl.collectState()
+  assert.equal(state.auto.failures, 1)
+  assert.equal(state.auto.retryInMs, 60_000)
+  assert.equal(state.auto.lastResult.ok, false)
+
+  const blocked = await impl.ensureDaemon({ reason: 'auto' })
+  assert.equal(blocked.code, 'backoff', 'a session inside the window must not retry')
+  assert.equal(deps.spawnCalls.length, 0, 'and must not spawn')
+
+  clock += 60_001
+  deps.spawn = async () => { deps.daemonAlive = true; return { ok: true, code: 0, stdout: 'ok', stderr: '' } }
+  const third = await impl.ensureDaemon({ reason: 'auto' })
+  assert.equal(third.code, 'starting')
+  await third.started
+  state = await impl.collectState()
+  assert.equal(state.auto.failures, 0)
+  assert.equal(state.auto.retryInMs, 0)
+})
+
+test('auto start: the switch turns the trigger off, and an unwritable switch says so', async () => {
+  const deps = makeDeps()
+  deps.daemonAlive = false
+  deps.readAutoStart = () => false
+  const impl = core.createCore(deps)
+  assert.equal((await impl.ensureDaemon()).code, 'disabled')
+  assert.equal(deps.spawnCalls.length, 0)
+  const refused = await impl.setAutoStart(true)
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'settings-unavailable')
+  assert.equal((await impl.setAutoStart('yes')).code, 'invalid-value')
+})
+
+test('auto start: with a writable switch the value round-trips', async () => {
+  const deps = makeDeps()
+  let stored = null
+  deps.readAutoStart = () => (stored === null ? true : stored)
+  deps.writeAutoStart = async (value) => { stored = value; return { ok: true } }
+  const impl = core.createCore(deps)
+  assert.equal((await impl.setAutoStart(false)).ok, true)
+  assert.equal(stored, false)
+  assert.equal((await impl.ensureDaemon()).code, 'disabled')
+  await impl.setAutoStart(true)
+  assert.equal((await impl.ensureDaemon()).code, 'adopted')
+})
+
+test('auto start: a host without session capabilities degrades to manual and says so', async () => {
+  const deps = makeDeps()
+  const impl = core.createCore(deps)
+  assert.equal(impl.noteHostEvents('missing'), 'missing')
+  const state = await impl.collectState()
+  assert.equal(state.auto.hostEvents, 'missing')
+  assert.equal(state.auto.enabled, true, 'the manual capability is untouched')
+})
+
+test('self-heal: a console launcher is swapped for the console-free one, after a backup', async () => {
+  const deps = makeBinaryDeps({ launcherForm: 3, sourceForm: 2 })
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('start', { confirm: true })
+  assert.equal(result.ok, true)
+  const launcher = normPath(`${deps.venv}\\Scripts\\pythonw.exe`)
+  const backup = normPath(`${deps.embed}\\pythonw.exe.uv-orig-2026-09-13T10-00-00-000Z`)
+  assert.equal(core.peSubsystemOf(deps.binaryFiles.get(launcher)), 2, 'the launcher now declares the console-free subsystem')
+  assert.equal(core.peSubsystemOf(deps.binaryFiles.get(backup)), 3, 'the original bytes survive in the backup')
+  const healStep = result.steps.find((step) => step.action === 'heal')
+  assert.equal(healStep.code, 'replaced')
+  assert.equal(result.state.auto.heal.occurred, true, 'the panel is told a replacement happened')
+  assert.ok(result.state.auto.healed.backupPath.endsWith('pythonw.exe.uv-orig-2026-09-13T10-00-00-000Z'))
+})
+
+test('self-heal: an already console-free launcher means zero writes', async () => {
+  const deps = makeBinaryDeps({ launcherForm: 2, sourceForm: 2 })
+  const before = [...deps.binaryFiles.keys()]
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('start', { confirm: true })
+  assert.equal(result.ok, true)
+  assert.equal(result.steps.some((step) => step.action === 'heal'), false, 'nothing worth reporting')
+  assert.equal(result.state.auto.heal.code, 'not-needed')
+  assert.deepEqual([...deps.binaryFiles.keys()], before, 'no file was created or replaced')
+})
+
+test('self-heal: a console launcher with no console-free source refuses to start', async () => {
+  const deps = makeBinaryDeps({ launcherForm: 3, sourceForm: 3 })
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('start', { confirm: true })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'launcher-blocked')
+  assert.equal(deps.spawnCalls.length, 0, 'nothing was started')
+  assert.equal(core.peSubsystemOf(deps.binaryFiles.get(normPath(`${deps.venv}\\Scripts\\pythonw.exe`))), 3, 'the launcher is untouched')
+})
+
+test('self-heal: a failed swap blocks the start and leaves no half-written state', async () => {
+  const deps = makeBinaryDeps({ launcherForm: 3, sourceForm: 2, failRename: true })
+  const impl = core.createCore(deps)
+  const result = await impl.daemonAction('start', { confirm: true })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'launcher-blocked')
+  assert.equal(deps.spawnCalls.length, 0)
+  assert.equal(core.peSubsystemOf(deps.binaryFiles.get(normPath(`${deps.venv}\\Scripts\\pythonw.exe`))), 3, 'original bytes stay in place')
+  assert.deepEqual([...deps.binaryFiles.keys()].filter((key) => key.includes('.heal-')), [], 'the staging file is cleaned up')
+})
+
+test('origin: what this plugin started is "ours"; a foreign console daemon is external + risky', async () => {
+  const mine = makeBinaryDeps({ launcherForm: 2, sourceForm: 2 })
+  const owned = core.createCore(mine)
+  await owned.daemonAction('start', { confirm: true })
+  const ownedState = await owned.collectState()
+  assert.equal(ownedState.origin.origin, 'manual')
+  assert.equal(ownedState.origin.consoleRisk, false)
+
+  const foreign = makeBinaryDeps({ launcherForm: 2, sourceForm: 2 })
+  const originalRun = foreign.run
+  const foreignProbe = '999|python|2026-09-12T18:55:46.0000000+08:00|C:\\base\\python.exe|-m hindsight_api.main --daemon --port 9077'
+  foreign.daemonAlive = true
+  foreign.run = async (args) => (args[0] === 'powershell' ? { ok: true, stdout: foreignProbe, stderr: '' } : originalRun(args))
+  foreign.readBinary = (p) => (normPath(p) === normPath('C:\\base\\python.exe') ? peImage(3) : null)
+  const other = core.createCore(foreign)
+  const foreignState = await other.collectState()
+  assert.equal(foreignState.origin.origin, 'external')
+  assert.equal(foreignState.origin.consoleRisk, true, 'a console image is flagged for the panel')
+})
+
+test('host: apply() subscribes the session-start trigger; the /auto route writes the switch', async () => {
+  const seen = []
+  const installed = []
+  let written = null
+  const ctx = makeCtx({
+    on: (name, handler) => { seen.push([name, handler]); return () => {} },
+    services: {
+      settings: {
+        // The REAL shape: register() hands back the owner scope, which is the
+        // only way a host half can write. installSection() returns nothing.
+        register: (ns, schema, options) => {
+          installed.push({ ns, base: options && options.base })
+          return {
+            get: () => ({ autoStart: true }),
+            update: async (patch) => { written = patch },
+          }
+        },
+      },
+    },
+  })
+  hostIndex.apply(ctx)
+  assert.deepEqual(seen.map(([name]) => name), ['agent/session-start'], 'one plain session hook, nothing on the per-step middleware chain')
+  await new Promise((resolve) => setImmediate(resolve)) // the section schema is imported dynamically
+  assert.equal(installed.length, 1)
+  assert.equal(installed[0].ns, 'hindsight-model')
+  assert.deepEqual(installed[0].base, { autoStart: true })
+
+  const impl = core.createCore(makeDeps())
+  const handlers = hostIndex.createHandlers({ core: impl, dsh: hostIndex.createDshReader(makeCtx()) })
+  const bad = await callHandler(handlers[hostIndex.ROUTES.auto], 'GET', {})
+  assert.equal(bad.status, 405)
+  const invalid = await callHandler(handlers[hostIndex.ROUTES.auto], 'POST', { enabled: 'yes' })
+  assert.equal(invalid.status, 400)
+  const unavailable = await callHandler(handlers[hostIndex.ROUTES.auto], 'POST', { enabled: false })
+  assert.equal(unavailable.status, 500, 'no writable settings service ⇒ an honest failure, not a silent no-op')
+  assert.equal(unavailable.json().code, 'settings-unavailable')
+})
+
+test('panel render: the auto-start switch states its policy, and is disabled when settings are unwritable', async () => {
+  stubFetch(PANEL_STATE) // the fixture has no auto block at all
+  const tree = await mount(React.createElement(clientTest.Section), React)
+  const text = textOf(tree)
+  assert.ok(text.includes('自动启动'), 'the switch is part of the daemon block')
+  assert.ok(text.includes('开关不可写'), 'an unwritable switch says why')
+  assert.ok(text.includes('已经在跑就采纳'), 'and the policy is spelled out, not implied')
+  const toggle = buttonsByText(tree, '开启自动启动')
+  assert.equal(toggle.length, 1)
+  assert.equal(toggle[0].props.disabled, true, 'no writable settings service ⇒ no flipping')
+})
+
+test('panel render: a writable switch flips the settings key through /auto', async () => {
+  const auto = {
+    enabled: true,
+    writable: true,
+    reason: null,
+    triggers: 4,
+    lastTriggerAt: 'T',
+    lastResult: { at: 'T', ok: true, code: 'adopted' },
+    failures: 0,
+    retryInMs: 0,
+    starting: false,
+    notice: null,
+    heal: { code: 'not-needed' },
+    healed: null,
+    hostEvents: 'subscription-ok',
+    origin: { origin: 'auto', consoleRisk: false },
+  }
+  const calls = stubFetch({ ...PANEL_STATE, auto, origin: auto.origin })
+  const tree = await mount(React.createElement(clientTest.Section), React)
+  const text = textOf(tree)
+  assert.ok(text.includes('上次自动启动：已采纳现成的守护进程'), 'the last outcome is shown')
+  assert.ok(text.includes('启动来源：自动（本插件）'), 'so is who started it')
+
+  await buttonsByText(tree, '关闭自动启动')[0].props.onClick()
+  const sent = calls.find((call) => call.url.endsWith('/auto'))
+  assert.ok(sent, 'the switch posts to /auto')
+  assert.deepEqual(JSON.parse(sent.init.body), { enabled: false })
+})
+
+test('panel render: cold start, backoff, self-heal and a missing event bus are all visible', async () => {
+  const auto = {
+    enabled: true,
+    writable: true,
+    reason: null,
+    triggers: 2,
+    lastTriggerAt: 'T',
+    lastResult: { at: 'T', ok: false, code: 'start-failed' },
+    failures: 2,
+    retryInMs: 120_000,
+    starting: true,
+    notice: { kind: 'auto-start-failed', failures: 1, code: 'start-failed' },
+    heal: { occurred: true, code: 'replaced' },
+    healed: { at: 'T', backupPath: 'C:\\fake\\embed\\pythonw.exe.uv-orig-T', source: 'C:\\base\\pythonw.exe' },
+    hostEvents: 'subscription-ok',
+    origin: { origin: 'external', consoleRisk: true },
+  }
+  stubFetch({ ...PANEL_STATE, auto, origin: auto.origin })
+  const tree = await mount(React.createElement(clientTest.Section), React)
+  const text = textOf(tree)
+  assert.ok(text.includes('正在后台冷启动'), 'a cold start in flight is announced')
+  assert.ok(text.includes('上次自动启动失败') && text.includes('已退避'), 'failures and the retry window are shown')
+  assert.ok(text.includes('替换了解释器启动器'), 'a launcher replacement is reported, never silent')
+  assert.ok(text.includes('启动来源：外部（本插件之外）') && text.includes('有控制台窗口风险'), 'a foreign console daemon is flagged')
+
+  stubFetch({
+    ...PANEL_STATE,
+    auto: { ...auto, starting: false, triggers: 0, failures: 0, retryInMs: 0, healed: null, heal: { code: 'not-needed' }, hostEvents: 'missing', origin: { origin: 'unknown', consoleRisk: false } },
+    origin: { origin: 'unknown', consoleRisk: false },
+  })
+  const second = await mount(React.createElement(clientTest.Section), React)
+  const secondText = textOf(second)
+  assert.ok(secondText.includes('宿主未提供会话事件'), 'a host without session events says so instead of failing silently')
+  assert.ok(secondText.includes('启动来源：未知'), 'an unidentifiable daemon is unknown, not guessed')
+})
+
+test('host: an installSection-only service registers the namespace but leaves the switch read-only', async () => {
+  const seen = []
+  const ctx = makeCtx({
+    services: {
+      settings: {
+        // Older/leaner providers expose installSection but no scope handle.
+        installSection: (context, ns, schema, entry, hooks) => {
+          seen.push({ ns, entry })
+          hooks.setSource(() => ({ autoStart: false }))
+          hooks.onChange()
+        },
+      },
+    },
+  })
+  assert.doesNotThrow(() => hostIndex.apply(ctx))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(seen.length, 1, 'the namespace is still registered, so the settings page shows the key')
+  assert.deepEqual(seen[0].entry, { autoStart: true }, 'with the documented default')
+  assert.equal(hostIndex.HOST_DIAG.settingsSectionRegistered, true)
+  assert.equal(hostIndex.HOST_DIAG.settingsSectionError, 'settings-scope-unavailable', 'and the panel is told why writes are off')
 })
 
 // --- runner -----------------------------------------------------------------

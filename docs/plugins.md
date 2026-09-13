@@ -26,7 +26,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-session-title-regenerate`](../sub-plugins/dsh-session-title-regenerate/README.md) | 用**最低推理档**摘要本会话全部提问，重生成 ≤60 字标题 | 会话头按钮 / 侧栏行 `⋯` 菜单 / `/regenerate-title` | 客户端 + 宿主命令 | 核心 ≥ 0.1.1-rc.2 |
 | [`dsh-session-time-bucket`](../sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话列表按**今天/昨天/前7天/前30天/更早**分组 | 自动：核心处于「单列表 + 最近更新」时接管观感 | 纯客户端 | 无需操作；切到按工作区/手动排序或搜索时自动退出 |
 | [`dsh-open-session-workdir`](../sub-plugins/dsh-open-session-workdir/README.md) | 一键用**系统文件管理器**打开当前会话的工作目录 | 会话头文件夹图标 | 纯客户端 | 会话有 `cwd` 且宿主有桌面，否则按钮不出现 |
-| [`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md) | 看清 **Hindsight 守护进程**当前跑的是哪个模型，并能改掉它 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据） | 设置 → **Hindsight 模型** | 宿主 + 客户端 | 需 `webServer` 与 `~/.hindsight/coding-agent.json`；缺失时只禁用对应区块，其余照常 |
+| [`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md) | 看清 **Hindsight 守护进程**当前跑的是哪个模型、改掉它，**启停它**，并按需自动拉起 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据） | 设置 → **Hindsight 模型** | 宿主 + 客户端 | 需 `webServer` 与 `~/.hindsight/coding-agent.json`；缺失时只禁用对应区块，其余照常 |
 
 ## 逐个怎么说"怎么用"
 
@@ -99,10 +99,13 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **在哪**：设置页 →「Hindsight 模型」（夹在「本地插件」与「MCP」之间）。它是一个**诊断优先**的面板，不是一组开关。
 - **四层是什么意思**：① `~/.hindsight/profiles/<profile>.env` 落盘值 ② 守护进程启动日志里它**真正读到**的 provider/model/endpoint ③ 会覆盖 ① 的外层值，**分两组**（用户级环境变量 / 宿主进程环境变量）④ 生效判据 = ①② 的三件套是否一致。
 - **⚠️ 为什么 ③ 要分两组**：**用户级**（`HKCU\Environment`）本插件能一键清理（先导出备份）；**宿主进程**那层**清不掉**——它来自你启动 `dsh web` 的上层环境，面板只如实显示并保证自己给的重启命令做了净化。
-- **怎么用**：`从 DSH 读取`（只预填表单、**不写盘**）→ 核对 → `保存`（行级改写 + 备份 + 原子写，留空即删除该键）→ 复制面板给的**净化重启命令**自己去跑 → 回来点 `验证`。
-- **为什么不代你重启**：用户要求自己重启。插件改为给一条命令，其第一行 `Remove-Item Env:…` 清掉会覆盖 profile 的外层变量——**这一步不能省**：上游 `cli.py` 载入 profile 时不覆盖已存在的键，不清就会被写回覆盖。
+- **怎么用**：`从 DSH 读取`（只预填表单、**不写盘**）→ 核对 → `保存`（行级改写 + 备份 + 原子写，留空即删除该键）→ 点 `重启`（或 `启动`/`停止`）→ 点 `验证`。
+- **启停两半实现不同（重要）**：**启动**走官方 CLI，并把子进程环境净化（剔掉全部 profile 管理的键）——**这一步不能省**：上游 `cli.py` 载入 profile 时不覆盖已存在的键，不净化就会被外层变量写回覆盖。**停止不走官方 CLI**：`hindsight-embed daemon stop` 靠解码 `netstat` 找 PID，而 Windows 吐 cp936 字节 ⇒ `Could not find PID` 拒绝停止；关掉 Python 的 UTF-8 模式又会让它读自己那份 UTF-8 profile 时崩（gbk）——**开也错、关也错**。故停止改为：取监听端口 PID → 校验命令行含 `hindsight_api.main`/`--daemon`/端口匹配 → 才终止，保留上游「不向无法确认的进程发信号」的安全性质。`停止/重启` 需二次确认。
 - **⚠️ 生效判据的一个坑**（真机实测后修订）：不能用「进程 StartTime > 文件 mtime」——上游启动路径**自己会回写**该文件，本机实测文件 `18:56:29` 晚于进程 `18:55:46` 而两者取值完全一致，只按时间判会对健康配置长期误报「尚未生效」。正确主判据是「文件三件套 vs 进程实际读到的三件套」。
 - **密钥**：`api_key` 字段**只写不读回**，页面只显示长度；勾选「保存时使用 DSH 的密钥」后由宿主半解析并使用，**明文不出宿主进程**。
+- **按需自动启动（默认开）**：会话开始时先探 `/health` —— 已经在跑就**采纳**（不重启、不写文件），没在跑才**后台冷启动**（约 44–73s，不阻塞会话；失败按 1/5/15/30 分钟退避）。开关是本插件 settings 键 `hindsight-model.autoStart`；宿主不提供会话事件时如实降级为仅手动。官方 `hindsight` 行的自动拉在本机不生效（`detectLlm()` 只看宿主 env，且它的启动器会闪一下控制台），所以这条现在归本插件。
+- **启动前自愈 `pythonw.exe`**：启动前读 `<embed>\.venv\Scripts\pythonw.exe` 的可执行文件头；若是「会分配控制台」的形态，先备份原件到 `.venv` 之外、再换成同一发行版的无控制台版本，然后才启动（换没换都如实报告；取不到替代品或替换失败则**拒绝启动**）。
+- **启动来源与窗口风险**：面板标注守护进程是 **自动 / 手动 / 外部 / 未知** 拉起的（判定只用监听进程与镜像路径，不写标记文件），镜像是控制台程序时同时标「有控制台窗口风险」。
 
 ## UI 触点分布（核对过的槽位与 order）
 
@@ -117,7 +120,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | 斜杠命令 | `/rewind`（客户端 `commandUi` 贡献）· `/regenerate-title`（宿主命令） |
 | 侧栏会话行 `⋯` 菜单 | `dsh-session-title-regenerate`（DOM 注入，核心无插件槽） |
 | 侧栏会话列表 | `dsh-session-time-bucket`（就地注入组头 + `[工作区]` 前缀，非槽位） |
-| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__hindsight-model/{state,save,dsh-model,verify,clean-env}` |
+| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__hindsight-model/{state,save,dsh-model,verify,clean-env,daemon,auto}` |
 
 > ⚠️ 三个插件都往**会话头图标排**放东西（25/27/28），`dsh-open-session-workdir` 的 README 里那句「从左到右：日程(10) → 任务列表(20) → 打开的文件夹(25) → 删除会话(30)」只描述了**没装另两个插件时**的样子，别当成固定顺序。
 

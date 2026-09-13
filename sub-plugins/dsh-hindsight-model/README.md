@@ -32,25 +32,52 @@ Hindsight（Vectorize 的长期记忆层）虽然以 DSH 插件形式装入，�
 - **验证**：回答「生效了没有、生效的是哪套值」，不一致时逐个列出字段及两侧取值。
 - **清理用户级冲突键**：先把这些键（含值）导出到 `~/.hindsight/backups/hkcuenv-<时间戳>.json`，导出成功后才执行删除；二次确认，取消则不动任何键。
 
-### 重启：插件不代劳，但给你一条正确的命令
+### 启停守护进程
 
-本插件**绝不**启动/停止守护进程。面板给出一条可直接复制的命令，形如：
+面板直接提供 **启动 / 停止 / 重启**（外加状态与健康检查）。两半的实现**不一样**，原因必须说明：
 
-```powershell
-Remove-Item Env:HINDSIGHT_API_LLM_MODEL, Env:HINDSIGHT_API_LLM_API_KEY -ErrorAction SilentlyContinue
-uv run --directory "<embedPackagePath>" hindsight-embed daemon --profile <daemonProfile> stop
-uv run --directory "<embedPackagePath>" hindsight-embed daemon --profile <daemonProfile> start
-```
+- **启动**走官方 CLI：`uv run --directory "<embedPackagePath>" hindsight-embed daemon --profile <daemonProfile> start`，profile 名与目录取自本机 `~/.hindsight/coding-agent.json`，不硬编码。**子进程的环境被净化**——所有 profile 管理的键都从子进程 env 里剔除，使权威文件成为唯一真源。这一步不能省：`cli.py` 把 profile 载入 `os.environ` 时**不覆盖已存在的键**，不净化的话外层同名变量会在启动时被写回、覆盖你刚保存的配置。
+- **停止不走官方 CLI**：`hindsight-embed daemon stop` 在这类机器上不可用——它靠解码 `netstat` 输出找 PID，而 Windows 吐的是控制台代码页（cp936）字节，于是 `UnicodeDecodeError` → `Could not find PID for port 9077` → 拒绝停止；把 Python 的 UTF-8 模式关掉也不行，那样它读自己那份 UTF-8 编码的 profile 会崩（`gbk` 解码失败）。**开也错、关也错**。所以停止改为：取监听端口的 PID → **校验它确实是 Hindsight 守护进程**（命令行含 `hindsight_api.main`、带 `--daemon`、`--port` 与当前端口一致）→ 才终止。这保留了上游「不向无法确认的进程发信号」的安全性质（它防的是误杀恰好占用同端口的不相关服务）。
+- **重启 = 停止 → 等端口释放 → 启动**（CLI 没有 `restart` 子命令）。
+- `停止` / `重启` 需要**二次确认**（会中断进行中的记忆操作）；守护进程本就未运行时「停止」按幂等成功处理并如实说明，不报错。
+- **每次启动前自愈解释器启动器**：守护进程是通过 `<embed>\.venv\Scripts\pythonw.exe` 拉起的；在 uv 建的 venv 里这个文件其实是**控制台**跳板（上游只检查它「是否存在」），于是 Windows 会给守护进程新开一个控制台窗口。启动前会读它的可执行文件头：若不分配控制台，什么都不做；若是控制台形态，**先备份原件**（`<embed>\pythonw.exe.uv-orig-<时间戳>`，放在 `.venv` 之外）再换成同一发行版的无控制台版本；取不到替代品或替换失败就**拒绝启动**并说明。换没换过都会如实报告，绝不静默替换；回滚就是用备份原件覆盖回去。
 
-其中 profile 名与 `embedPackagePath` 都取自本机 `~/.hindsight/coding-agent.json`，不硬编码。**开头那行是关键**：它清除会覆盖 profile 的外层变量，使权威文件成为唯一真源。若不清，你在带这些变量的会话里重启，刚落盘的值会被外层值写回覆盖。
+### 自动启动（按需，默认开）
+
+会话开始时（宿主半订阅 `agent/session-start`）**先探一次 `/health`**，然后：
+
+| 探测结果 | 行为 |
+| --- | --- |
+| 通过（已经在跑） | **采纳**：不重启、不写任何文件、进程标识不变 |
+| 不通过 | **后台冷启动**（约 44–73s）：不阻塞会话，面板显示「正在后台冷启动」；失败按 1/5/15/30 分钟**退避**，同一失败不重复提示 |
+
+- 自动启动**复用与手动启动完全同一条命令**（同一净化、同样不调用 `profile create`），所以 profile 仍是唯一真源。
+- 开关是本插件 settings 命名空间里的一个键：`hindsight-model.autoStart`（默认 `true`）。关掉即回到纯手动；settings 服务不可用时开关**禁用并说明**，不会假装已保存。
+- 宿主不提供会话生命周期能力时**降级为仅手动**，面板写明「宿主未提供会话事件」，不报错。
+- 成功/失败都在面板显示「上次自动启动」的结果——**绝不静默**。
+
+### 启动来源与窗口风险
+
+面板标注当前守护进程**是谁拉起的**，以及它**会不会弹控制台**：
+
+| 来源 | 含义 |
+| --- | --- |
+| 自动（本插件） | 由上面的按需自动启动拉起 |
+| 手动（面板） | 由面板的启动 / 重启按钮拉起 |
+| 外部（本插件之外） | 其它途径拉起的（例如官方 `hindsight` 行）：**只采纳、不重启** |
+| 未知 | 监听端口的进程无法确认，**不猜** |
+
+判定只用可观测证据：监听端口的进程、其镜像路径，以及**本进程这次做过什么**（不写标记文件）。若镜像属于会分配控制台的形态，会同时标出「**有控制台窗口风险**」——那正是「用 `uv` 启动但 venv 的 pythonw 是控制台跳板」这类情况唯一的可见信号。
 
 ## 已知行为与能力边界
 
-- **上游会整体重写 `.env`**：任何经过官方启动路径的动作都会 `write_text(render_config(...))` 重建该文件。本插件的行级写入依赖「启动路径会把既有非小写键带过去」这一点存活；**外层存在同名键时，你的写入仍会被覆盖**——这正是面板要把 ③ 列出来的原因。别把它当插件 bug。
-- **宿主进程环境变量清不掉**：它来自启动 `dsh web` 的上层环境，插件只能如实显示并保证自己给出的重启命令做了净化。要彻底清掉，得在你启动 DSH 的地方去掉那个变量。
+- **上游会整体重写 `.env`**：任何经过官方启动路径的动作都会 `write_text(render_config(...))` 重建该文件，且**只把「传入配置里有的键」写成活动行**。本插件的行级写入依赖「启动路径会把既有非小写键带过去」这一点存活；**外层存在同名键、或官方插件用残缺配置走了一次 `profile create --merge` 时，你的键会丢**——这正是面板要把 ③ 列出来的原因。别把它当插件 bug。
+- **官方插件的自动拉起在本机不生效**：它的 `preflightDaemon()` 里 `detectLlm()` 只认宿主进程 env 的 `HINDSIGHT_API_LLM_PROVIDER` / `OPENAI_API_KEY` / … 或 `which claude`（Windows 上没有 `which`），而你的 provider 写在 profile `.env` 里，于是它每次只记一条 `daemon_no_llm` 就返回。**即使把那份 env 补给它也不建议**：它的启动器那条 `spawn(uv)` 没做窗口隐藏（实测会新开一个 `conhost`），并且 `daemonEnv()` 会把宿主 env 里所有 `HINDSIGHT_API_*` 交给 `profile create --merge` 写回 profile——等于让「外层 env 会赢」。**自动启动现在归本插件**（见上文），它走同一条被净化、不碰 `profile create` 的命令；官方那条不动也无妨，已健康就采纳。
+- **只跟随一个 profile**：`coding-agent.json` 里的 `daemonProfile`；不做多 profile 切换，**也不做**开机自启（Windows 服务 / 任务计划）或崩溃监护。
+- **宿主进程环境变量清不掉**：它来自启动 `dsh web` 的上层环境，插件只能如实显示并保证自己 spawn 的子进程做了净化。要彻底清掉，得在你启动 DSH 的地方去掉那个变量。
 - **密钥只写不读回**：`api_key` 字段是单向的；诊断与日志只记键名与长度，不含取值。备份文件（profile 的 `*.bak-*` 与 HKCU 导出）本身含明文，请注意。
-- **只跟随一个 profile**：`coding-agent.json` 里的 `daemonProfile`，不做多 profile 切换。
-- **Windows 限定**：依赖 `reg query` 与 PowerShell；非 Windows 下相关层降级为「未知」，其余照常。
+- **只跟随一个 profile**：`coding-agent.json` 里的 `daemonProfile`，不做多 profile 切换、不做开机自启或崩溃重启。
+- **Windows 限定**：依赖 `reg query` 与 PowerShell；非 Windows 下相关层降级为「未知」，启停区块禁用，其余照常。
 
 ## 宿主端点
 
@@ -63,6 +90,8 @@ uv run --directory "<embedPackagePath>" hindsight-embed daemon --profile <daemon
 | `GET` | `/__hindsight-model/dsh-model` | 预填数据（含密钥元信息，不含明文） |
 | `POST` | `/__hindsight-model/verify` | 生效判定 + 启动日志三件套 + 最近的 LLM 调用 |
 | `POST` | `/__hindsight-model/clean-env` | 导出 HKCU 备份 + 删除冲突键（需 `confirm: true`） |
+| `POST` | `/__hindsight-model/daemon` | `{action: 'start'\|'stop'\|'restart', confirm?}` → 启停并回带新状态（`stop`/`restart` 需 `confirm: true`） |
+| `POST` | `/__hindsight-model/auto` | `{enabled: boolean}` → 写 settings 键 `hindsight-model.autoStart`，回带新状态；settings 服务不可用时 500 并说明缺口 |
 
 方法不符回 `405`，未管理的键回 `400`，内部异常回 `500`（均为 JSON）。
 
@@ -75,7 +104,7 @@ uv run --directory "<embedPackagePath>" hindsight-embed daemon --profile <daemon
 ## 开发 / 验证
 
 ```bash
-node sub-plugins/dsh-hindsight-model/test/bundle.test.mjs   # 逻辑 harness（60 条：纯函数 / 四层读取 / 写入回滚 / 端点契约 / 面板渲染）
+node sub-plugins/dsh-hindsight-model/test/bundle.test.mjs   # 逻辑 harness（113 条：纯函数 / 四层读取 / 写入回滚 / 端点契约 / 面板渲染 / 自动启动与启动器自愈）
 node --check sub-plugins/dsh-hindsight-model/src/index.js
 node --check sub-plugins/dsh-hindsight-model/src/client.js
 node --check sub-plugins/dsh-hindsight-model/src/host-core.js

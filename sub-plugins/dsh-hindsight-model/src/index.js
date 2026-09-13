@@ -21,6 +21,7 @@ import { execFile } from 'node:child_process'
 
 import {
   API_PREFIX,
+  NS,
   PLUGIN_ID,
   createCore,
   parseDaemonProbe,
@@ -37,6 +38,8 @@ const ROUTES = {
   dshModel: `${API_PREFIX}/dsh-model`,
   verify: `${API_PREFIX}/verify`,
   cleanEnv: `${API_PREFIX}/clean-env`,
+  daemon: `${API_PREFIX}/daemon`,
+  auto: `${API_PREFIX}/auto`,
 }
 
 /** The exact route table, exported so the harness can assert it. */
@@ -81,6 +84,39 @@ async function httpGetJson(url) {
   return response.json()
 }
 
+/**
+ * Run one daemon lifecycle step.
+ *
+ * `env` is the SANITIZED environment the core built — passing it through is
+ * what keeps the profile authoritative, so it must never be dropped here.
+ * `uv` is a real executable (not a shell shim), so no shell is needed even on
+ * Windows, which keeps the argv exactly what the panel displays.
+ */
+function spawnCommand(file, args, options = {}) {
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args,
+      {
+        env: options.env,
+        cwd: options.cwd,
+        timeout: options.timeoutMs || 120000,
+        windowsHide: true,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        resolve({
+          ok: !error,
+          code: error && typeof error.code === 'number' ? error.code : (error ? null : 0),
+          timedOut: Boolean(error && (error.killed || error.signal === 'SIGTERM')),
+          stdout: stdout || '',
+          stderr: stderr || '',
+        })
+      },
+    )
+  })
+}
+
 /** `prefix*` listing without pulling in a glob dependency. */
 function listByPrefix(pattern) {
   const dir = path.dirname(pattern)
@@ -113,6 +149,16 @@ function filesystemDeps() {
       }
     },
     writeText: (p, text) => fs.writeFileSync(p, text, 'utf8'),
+    // Binary access exists for ONE reason: the daemon's launcher is judged by
+    // the subsystem its own PE header declares (see healLauncher in the core).
+    readBinary: (p) => {
+      try {
+        return fs.readFileSync(p)
+      } catch {
+        return null
+      }
+    },
+    writeBinary: (p, bytes) => fs.writeFileSync(p, bytes),
     removeFile: (p) => {
       try {
         fs.rmSync(p, { force: true })
@@ -124,6 +170,7 @@ function filesystemDeps() {
     timestamp: () => new Date().toISOString().replace(/[:.]/g, '-'),
     isoNow: () => new Date().toISOString(),
     run: runCommand,
+    spawn: spawnCommand,
     httpGetJson,
     env: process.env,
   }
@@ -384,6 +431,28 @@ export function createHandlers({ core, dsh }) {
       const result = await core.cleanEnv({ keys: body.keys })
       sendJson(res, result.ok ? 200 : 500, result)
     }),
+
+    [ROUTES.daemon]: guard(async (req, res, body) => {
+      if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+      // stop/restart interrupt in-flight memory work, so they need the caller to
+      // say so explicitly — the panel's inline confirm is what sets this.
+      const result = await core.daemonAction(body && body.action, { confirm: body && body.confirm === true })
+      if (result.ok) return sendJson(res, 200, result)
+      const status = result.code === 'busy'
+        ? 409
+        : (['bad-action', 'confirm-required', 'no-command'].includes(result.code) ? 400 : 500)
+      return sendJson(res, status, result)
+    }),
+
+    [ROUTES.auto]: guard(async (req, res, body) => {
+      if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+      // The switch lives in this plugin's settings namespace, so the DSH
+      // settings page and this panel edit the same key.
+      const result = await core.setAutoStart(body && body.enabled)
+      if (result.ok) return sendJson(res, 200, result)
+      const status = result.code === 'invalid-value' ? 400 : 500
+      return sendJson(res, status, result)
+    }),
   }
 }
 
@@ -394,10 +463,212 @@ export function registerRoutes(ctx, host, handlers) {
   }
 }
 
+// --- settings section (optional, dynamic schemastery like sibling plugins) ----
+
+/** The one key this plugin stores in its own settings namespace. */
+export const AUTO_FIELD = 'autoStart'
+export const AUTO_DEFAULT = true
+
+/** Host-side diagnostics: whether the namespace registered, and its value. */
+export const HOST_DIAG = {
+  /** Whether this plugin's settings namespace got registered at all. */
+  settingsSectionRegistered: false,
+  /** Why the WRITE path is unavailable (null when it works). */
+  settingsSectionError: null,
+  /** Which schema registered the namespace: schemastery | fallback | unavailable. */
+  schemaSource: 'unavailable',
+  autoStartValue: null,
+}
+
+/**
+ * Zero-dependency section schema compatible with the settings provider's use of
+ * a schemastery schema — the same fallback the sibling plugins ship. It MUST
+ * register even when `@deepseek-ai/schemastery` cannot be resolved from this
+ * bundle (a `link:`-ed host half resolves bare specifiers against the plugin
+ * source dir), otherwise the panel's write is rejected with "namespace is not
+ * registered" and the switch would be dead.
+ */
+function fallbackSectionSchema(field, fallback) {
+  const schema = (input) => {
+    const source = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {}
+    const raw = source[field]
+    const out = { ...source }
+    out[field] = typeof raw === 'boolean' ? raw : fallback
+    return out
+  }
+  schema.toJSON = () => ({
+    type: 'object',
+    properties: { [field]: { type: 'boolean', default: fallback } },
+  })
+  return schema
+}
+
+/**
+ * Register this plugin's settings namespace and keep a writable handle on it.
+ *
+ * The real API matters here: `installSection()` registers the namespace (what
+ * the settings page and `remote.settings.update` need) but hands back NOTHING,
+ * so a host half could only read. `register(ns, schema, { base })` returns the
+ * owner scope — `get()` / `update(patch)` — which is the only way this half can
+ * write the switch. So: prefer `register`, fall back to `installSection` for a
+ * read-only namespace, and if neither exists the switch degrades to disabled
+ * with a reason rather than pretending to save.
+ *
+ * The schema is schemastery when it can be imported (a `link:`-ed host half
+ * often cannot resolve it) and a zero-dependency equivalent otherwise — the
+ * namespace MUST register either way.
+ */
+/** Survives an HMR re-apply: `register()` fails loud on a duplicate namespace. */
+let autoScope = null
+
+function attachAutoSettings(ctx, bridge, settings) {
+  if (!settings) {
+    HOST_DIAG.settingsSectionError = 'settings-service-unavailable'
+    return
+  }
+  const wireScope = (scope) => {
+    bridge.read = () => {
+      try {
+        const value = scope.get()
+        const raw = value && typeof value === 'object' ? value[AUTO_FIELD] : undefined
+        if (typeof raw === 'boolean') return raw
+      } catch { /* fall through: unknown, the core then uses its default */ }
+      return undefined
+    }
+    bridge.write = async (value) => {
+      try {
+        await scope.update({ [AUTO_FIELD]: value })
+        HOST_DIAG.autoStartValue = value
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: String((error && error.message) || error) }
+      }
+    }
+  }
+  const useSchema = (schema, source) => {
+    HOST_DIAG.schemaSource = source
+    if (typeof settings.register === 'function') {
+      if (autoScope) {
+        wireScope(autoScope)
+        HOST_DIAG.settingsSectionRegistered = true
+        HOST_DIAG.settingsSectionError = null
+        return
+      }
+      try {
+        const scope = settings.register(NS, schema, { base: { [AUTO_FIELD]: AUTO_DEFAULT } })
+        autoScope = scope
+        HOST_DIAG.settingsSectionRegistered = true
+        HOST_DIAG.settingsSectionError = null
+        wireScope(scope)
+        return
+      } catch (error) {
+        HOST_DIAG.settingsSectionError = String((error && error.message) || error)
+      }
+    }
+    if (typeof settings.installSection === 'function') {
+      try {
+        settings.installSection(ctx, NS, schema, { [AUTO_FIELD]: AUTO_DEFAULT }, {
+          setSource(source) {
+            try {
+              const current = source()
+              const raw = current && typeof current === 'object' ? current[AUTO_FIELD] : undefined
+              HOST_DIAG.autoStartValue = typeof raw === 'boolean' ? raw : AUTO_DEFAULT
+            } catch { /* source not ready yet */ }
+          },
+          onChange() { HOST_DIAG.settingsSectionRegistered = true },
+        })
+        HOST_DIAG.settingsSectionRegistered = true
+        // Registered, but this half got no scope: reads work, writes cannot.
+        bridge.read = () => HOST_DIAG.autoStartValue
+        HOST_DIAG.settingsSectionError = 'settings-scope-unavailable'
+        return
+      } catch (error) {
+        HOST_DIAG.settingsSectionError = String((error && error.message) || error)
+      }
+    }
+    HOST_DIAG.settingsSectionError = HOST_DIAG.settingsSectionError || 'settings-service-unavailable'
+  }
+
+  Promise.resolve()
+    .then(() => import('@deepseek-ai/schemastery'))
+    .then((mod) => {
+      const z = mod && mod.default
+      if (!z || typeof z.object !== 'function' || typeof z.boolean !== 'function') {
+        useSchema(fallbackSectionSchema(AUTO_FIELD, AUTO_DEFAULT), 'fallback')
+        return
+      }
+      useSchema(z.object({ [AUTO_FIELD]: z.boolean().default(AUTO_DEFAULT) }), 'schemastery')
+    })
+    .catch(() => {
+      // A `link:`-ed host half cannot resolve @deepseek-ai/schemastery; the
+      // namespace MUST still register or the panel's write would be rejected.
+      useSchema(fallbackSectionSchema(AUTO_FIELD, AUTO_DEFAULT), 'fallback')
+    })
+}
+
+/**
+ * The bridge the host core reads and writes the switch through.
+ *
+ * It starts inert (reads unknown, writes refused) and is filled in only once the
+ * settings service is actually reachable — a missing service degrades the switch
+ * to read-only, it never invents a value.
+ */
+function createAutoBridge() {
+  return {
+    read: () => undefined,
+    write: null,
+  }
+}
+
 export function apply(ctx) {
-  const core = createCore(filesystemDeps())
+  const bridge = createAutoBridge()
+  const deps = filesystemDeps()
+  deps.readAutoStart = () => bridge.read()
+  deps.writeAutoStart = async (value) => {
+    if (typeof bridge.write !== 'function') {
+      return { ok: false, error: HOST_DIAG.settingsSectionError || 'settings service is not available' }
+    }
+    return bridge.write(value)
+  }
+  const core = createCore(deps)
   const dsh = createDshReader(ctx)
   const handlers = createHandlers({ core, dsh })
+
+  // The switch lives in this plugin's settings namespace. Resolve the service
+  // now when it is already there, otherwise wait for it — never block apply().
+  const settingsNow = typeof ctx.get === 'function' ? ctx.get('settings') : null
+  if (settingsNow) {
+    attachAutoSettings(ctx, bridge, settingsNow)
+  } else {
+    try {
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['settings'], (sub) => attachAutoSettings(ctx, bridge, (sub && sub.settings) || sub))
+      }
+    } catch {
+      HOST_DIAG.settingsSectionError = 'settings-service-unavailable'
+    }
+  }
+
+  // On-demand auto start: one session lifecycle hook, fire-and-forget. The
+  // trigger NEVER awaits the cold start (44-73s), so a session is never blocked
+  // by it; the work itself is owned by the core, which de-duplicates.
+  const bindSessionHook = () => {
+    if (typeof ctx.on !== 'function') {
+      core.noteHostEvents('missing')
+      return
+    }
+    try {
+      ctx.on('agent/session-start', () => {
+        try {
+          Promise.resolve(core.ensureDaemon({ reason: 'auto' })).catch(() => { /* recorded in core state */ })
+        } catch { /* a hook must never throw back into the host */ }
+      })
+      core.noteHostEvents('subscription-ok')
+    } catch {
+      core.noteHostEvents('missing')
+    }
+  }
+  bindSessionHook()
 
   const mount = (host) => {
     if (!host || typeof host.register !== 'function') return
@@ -417,4 +688,4 @@ export function apply(ctx) {
   } catch { /* no webServer on this composition */ }
 }
 
-export const _module = { createCore, createDshReader, createHandlers, parseDaemonProbe, ROUTES }
+export const _module = { createCore, createDshReader, createHandlers, parseDaemonProbe, spawnCommand, ROUTES }

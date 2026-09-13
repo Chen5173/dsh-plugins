@@ -421,18 +421,193 @@ export function parseRegQuery(stdout) {
 
 /** Parse `"<pid>|<iso8601>"` produced by the daemon probe. */
 export function parseDaemonProbe(stdout) {
-  if (typeof stdout !== 'string') return { pid: null, startTime: null }
-  const match = /(\d+)\|([0-9T:.Z+-]+)/.exec(stdout)
-  if (!match) return { pid: null, startTime: null }
+  const empty = { pid: null, name: null, commandLine: null, startTime: null }
+  if (typeof stdout !== 'string') return empty
+  // `pid|name|startTime|commandLine` — the command line is last because it can
+  // itself contain the separator, so the split is bounded.
+  const parts = stdout.trim().split('|')
+  if (parts.length < 3) return empty
+  const pid = Number(parts[0])
+  const name = parts[1] || null
+  const stamp = parts[2]
+  const commandLine = parts.length > 3 ? parts.slice(3).join('|') : null
   // PowerShell's `ToString('o')` emits seven fractional-second digits; V8 parses
   // that fine (verified), but the value carries a LOCAL offset, so every
   // comparison against a filesystem mtime must stay instant-based, never
   // string-based.
-  const date = new Date(match[2])
+  const date = new Date(stamp)
+  // Two shapes are accepted: the original `pid|name|startTime|commandLine`, and
+  // the current `pid|name|startTime|exePath|commandLine` (the image path was
+  // added so the panel can tell a console-capable interpreter from a
+  // console-free one). The command line is ALWAYS last: it can itself contain
+  // the separator, so the split has to be bounded from the left.
+  const withImage = parts.length >= 5
+  const exePath = withImage ? (parts[3] || null) : null
+  const rest = withImage ? parts.slice(4) : parts.slice(3)
   return {
-    pid: Number(match[1]),
+    pid: Number.isFinite(pid) ? pid : null,
+    name,
+    exePath,
+    commandLine: rest.length > 0 ? rest.join('|') : null,
     startTime: Number.isNaN(date.getTime()) ? null : date,
   }
+}
+
+// --- launcher form (pure) ---------------------------------------------------
+
+/** PE optional-header subsystem values that matter here. */
+export const PE_SUBSYSTEM_GUI = 2
+export const PE_SUBSYSTEM_CONSOLE = 3
+
+/**
+ * The subsystem declared by one PE image, or null when the bytes are not a PE
+ * image we can read. Only the file's own header is consulted: no version
+ * probing, no upstream internals, no guessing from names.
+ */
+export function peSubsystemOf(bytes) {
+  if (!bytes || typeof bytes.length !== 'number' || bytes.length < 0x40) return null
+  const u16 = (at) => bytes[at] | ((bytes[at + 1] || 0) << 8)
+  const u32 = (at) => (u16(at) | (u16(at + 2) << 16)) >>> 0
+  if (u16(0) !== 0x5a4d) return null // 'MZ'
+  const lfanew = u32(0x3c)
+  if (lfanew < 0x40 || lfanew + 24 + 70 > bytes.length) return null
+  if (u32(lfanew) !== 0x00004550) return null // 'PE\0\0'
+  return u16(lfanew + 24 + 68)
+}
+
+/** `gui` never allocates a console; `console` does; anything else is unknown. */
+export function launcherFormOf(subsystem) {
+  if (subsystem === PE_SUBSYSTEM_GUI) return 'gui'
+  if (subsystem === PE_SUBSYSTEM_CONSOLE) return 'console'
+  return 'unknown'
+}
+
+/** Name-based fallback, used only when the image bytes cannot be read. */
+export function launcherFormFromName(name) {
+  const text = String(name === undefined || name === null ? '' : name).toLowerCase()
+  if (!text) return 'unknown'
+  if (text.includes('pythonw')) return 'gui'
+  if (text.includes('python')) return 'console'
+  return 'unknown'
+}
+
+/** `home = <base install>` out of a venv's `pyvenv.cfg`. */
+export function parsePyvenvHome(text) {
+  if (typeof text !== 'string') return null
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^\s*home\s*=\s*(.+?)\s*$/)
+    if (match && match[1]) return match[1]
+  }
+  return null
+}
+
+/** Where the SAME interpreter release keeps its console-free venv launcher. */
+export function guiLauncherSourceOf(home) {
+  if (!home) return null
+  return `${String(home).replace(/[\\/]+$/, '')}\\Lib\\venv\\scripts\\nt\\pythonw.exe`
+}
+
+/**
+ * Decide whether the launcher must be replaced before the daemon starts.
+ *
+ * `console` ⇒ replace, but ONLY when a console-free launcher of the same release
+ * exists: "no source" is not permission to start (the whole point is to avoid
+ * the window). `gui` and `unknown` both leave the disk untouched.
+ */
+export function planLauncherHeal({ form, guiSourceAvailable } = {}) {
+  if (form === 'console') {
+    return guiSourceAvailable
+      ? { action: 'replace', reason: 'console-launcher' }
+      : { action: 'none', reason: 'no-gui-source', blocked: true }
+  }
+  if (form === 'gui') return { action: 'none', reason: 'already-gui', blocked: false }
+  return { action: 'none', reason: 'form-unknown', blocked: false }
+}
+
+// --- on-demand auto start (pure) --------------------------------------------
+
+/** Backoff after N consecutive failures: 1 / 5 / 15 / 30 minutes, then capped. */
+export const BACKOFF_STEPS_MS = [60_000, 300_000, 900_000, 1_800_000]
+export const AUTO_ORIGINS = ['auto', 'manual', 'external', 'unknown']
+
+export function backoffDelayMs(failures) {
+  const n = Number.isFinite(failures) && failures > 0 ? Math.floor(failures) : 0
+  if (n === 0) return 0
+  return BACKOFF_STEPS_MS[Math.min(n, BACKOFF_STEPS_MS.length) - 1]
+}
+
+/**
+ * Fold one attempt into the auto-start bookkeeping.
+ *
+ * `notice` is non-null only when the picture CHANGED (first failure, or a
+ * different outcome than last time) — that is what keeps the panel from
+ * repeating the same line on every session. A success clears the backoff.
+ */
+export function advanceAutoAttempt(state, { ok, code, at, now } = {}) {
+  const prev = state && typeof state === 'object' ? state : {}
+  const failures = ok === true ? 0 : (prev.failures || 0) + 1
+  const lastResult = { at: at === undefined ? null : at, ok: ok === true, code: code === undefined ? null : code }
+  const previous = prev.lastResult || null
+  // A notice marks a CHANGE of outcome, not every escalation: the failure count
+  // and the retry window ride along in the state, so the panel stays truthful
+  // without repeating the same line on every session.
+  const changed = !previous || previous.code !== lastResult.code
+  return {
+    state: {
+      ...prev,
+      failures,
+      lastResult,
+      backoffUntil: ok === true ? 0 : (now || 0) + backoffDelayMs(failures),
+    },
+    notice: changed && ok !== true ? { kind: 'auto-start-failed', failures, code: lastResult.code } : null,
+  }
+}
+
+/** Whether a trigger is allowed to attempt a start now (backoff window aside). */
+export function autoAttemptDue(state, now) {
+  const current = state && typeof state === 'object' ? state : {}
+  if (!current.failures) return true
+  if (!current.backoffUntil) return true
+  return !(now < current.backoffUntil)
+}
+
+/**
+ * Who started the running daemon, and can it pop a console window?
+ *
+ * Evidence only: the listener's pid, its image name/path (and, when readable,
+ * the subsystem of that image) plus what THIS process did — never a marker file
+ * and never upstream state.
+ */
+export function classifyDaemonOrigin({ known, pid, imageName, imageForm, startedBy } = {}) {
+  const form = imageForm && imageForm !== 'unknown' ? imageForm : launcherFormFromName(imageName)
+  const consoleRisk = form === 'console'
+  if (!known || pid === null || pid === undefined) return { origin: 'unknown', consoleRisk: false, form }
+  const mine = startedBy && startedBy.pid === pid ? startedBy.reason : null
+  if (mine === 'auto' || mine === 'manual') return { origin: mine, consoleRisk, form }
+  return { origin: 'external', consoleRisk, form }
+}
+
+/**
+ * Is the process holding this port REALLY the Hindsight daemon?
+ *
+ * Upstream refuses to signal a listener it cannot positively identify (its
+ * issue #3520): failing to reclaim a port is recoverable, terminating an
+ * unrelated service that merely holds it is not. We keep that property — the
+ * command line must name the daemon module, be a daemon, and be bound to the
+ * port we are looking at.
+ *
+ * Measured on this machine:
+ *   python.exe -m hindsight_api.main --daemon --idle-timeout 0 --port 9077
+ */
+export function identifyHindsightProcess({ name, commandLine, port }) {
+  const cmd = typeof commandLine === 'string' ? commandLine : ''
+  if (!cmd) return { ok: false, reason: 'process-identity-unknown' }
+  if (!/(^|[\\/\s])hindsight_api\.main\b/.test(cmd)) return { ok: false, reason: 'not-a-hindsight-daemon' }
+  if (!/(^|\s)--daemon\b/.test(cmd)) return { ok: false, reason: 'not-a-hindsight-daemon' }
+  if (port && !new RegExp(`--port\\s+${port}(\\s|$)`).test(cmd)) return { ok: false, reason: 'bound-to-another-port' }
+  const procName = typeof name === 'string' ? name.toLowerCase() : ''
+  if (procName && !/python|hindsight/.test(procName)) return { ok: false, reason: `unexpected process name: ${name}` }
+  return { ok: true, reason: null }
 }
 
 /** Validate a requested change set against the managed surface. */
@@ -450,6 +625,66 @@ export function validateChanges(changes) {
     if (typeof value === 'string' && value.includes('\n')) errors.push(`value for ${key} must not contain newlines`)
   }
   return { ok: errors.length === 0, errors }
+}
+
+// --- daemon lifecycle -------------------------------------------------------
+
+/** The three actions the panel exposes. `restart` is NOT a CLI subcommand. */
+export const DAEMON_ACTIONS = ['start', 'stop', 'restart']
+
+/** Generous by design: `uv` cold-starts, and stopping waits for a real exit. */
+export const ACTION_TIMEOUT_MS = { start: 120000, stop: 90000 }
+
+/** How long to wait for the port to free between a restart's stop and start. */
+export const PORT_FREE_WAIT = { attempts: 40, intervalMs: 250 }
+
+/**
+ * A copy of `env` with every profile-owned key removed.
+ *
+ * This is the whole reason the plugin spawns the daemon itself instead of
+ * handing the user a command: `cli.py` loads the profile into `os.environ`
+ * WITHOUT overwriting keys that are already there, so any outer variable of the
+ * same name wins and is then written back over the profile by
+ * `_register_profile()`. Stripping them makes the profile the only source of
+ * truth. The input object is never mutated.
+ */
+export function sanitizedEnv(env, keys = MANAGED_KEYS) {
+  const out = { ...(env || {}) }
+  for (const key of keys) delete out[key]
+  return out
+}
+
+/**
+ * argv (minus the executable) for one daemon action.
+ *
+ * `uv run --directory <embed-project> hindsight-embed daemon --profile <p> …`
+ * Returns null when the machine's layout cannot produce a command — the panel
+ * then disables the block instead of guessing.
+ */
+export function daemonArgs({ embedPackagePath, daemonProfile, action }) {
+  if (!embedPackagePath || !daemonProfile) return null
+  if (action !== 'start' && action !== 'stop') return null
+  return ['run', '--directory', embedPackagePath, 'hindsight-embed', 'daemon', '--profile', daemonProfile, action]
+}
+
+/** What the user would have typed, for display and audit. */
+export function daemonCommandLine(args) {
+  if (!Array.isArray(args) || args.length === 0) return null
+  return `uv ${args.map((part) => (/\s/.test(part) ? `"${part}"` : part)).join(' ')}`
+}
+
+/** Credential-shaped tokens must never reach a log or a response. */
+function redactLine(line) {
+  return line
+    .replace(/([A-Za-z0-9_-]*(?:KEY|TOKEN|SECRET)[A-Za-z0-9_-]*\s*[=:]\s*)(\S+)/gi, '$1<redacted>')
+    .replace(/\bsk-[A-Za-z0-9_-]{6,}/g, 'sk-<redacted>')
+}
+
+/** The tail of a command's output, redacted and bounded. */
+export function tailForDisplay(text, { lines = 12, maxChars = 1200 } = {}) {
+  if (typeof text !== 'string' || text === '') return ''
+  const kept = text.split(/\r?\n/).map(redactLine).slice(-lines).join('\n').trim()
+  return kept.length > maxChars ? `…${kept.slice(-maxChars)}` : kept
 }
 
 // --- IO over injected deps --------------------------------------------------
@@ -542,17 +777,59 @@ export function createCore(deps) {
 
   /** Layer ④: has the daemon actually restarted since the file changed? */
   async function readDaemonProbe(apiPort) {
-    if (!apiPort) return { known: false, reason: 'port-unknown', pid: null, startTime: null }
+    const unknown = { known: false, reason: 'port-unknown', pid: null, name: null, exePath: null, commandLine: null, startTime: null }
+    if (!apiPort) return unknown
+    // The command line is what lets a stop identify the process before
+    // signalling it, so the probe collects it up front. The image path rides
+    // along — BEFORE the command line, which may itself contain the separator —
+    // because "can this interpreter allocate a console?" is a property of the
+    // image, not of the port.
     const script = [
       `$c = Get-NetTCPConnection -LocalPort ${apiPort} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1`,
       'if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue;',
-      "  if ($p) { Write-Output (\"$($c.OwningProcess)|$($p.StartTime.ToString('o'))\") } }",
+      "  if ($p) { $ci = Get-CimInstance Win32_Process -Filter (\"ProcessId=\" + $c.OwningProcess) -ErrorAction SilentlyContinue;",
+      "    Write-Output (\"$($c.OwningProcess)|$($p.ProcessName)|$($p.StartTime.ToString('o'))|$($ci.ExecutablePath)|$($ci.CommandLine)\") } }",
     ].join('; ')
     const result = await deps.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script])
-    if (!result || !result.ok) return { known: false, reason: 'probe-failed', pid: null, startTime: null }
+    if (!result || !result.ok) {
+      return { known: false, reason: 'probe-failed', pid: null, name: null, exePath: null, commandLine: null, startTime: null }
+    }
     const parsed = parseDaemonProbe(result.stdout)
-    if (parsed.pid === null) return { known: false, reason: 'daemon-not-running', pid: null, startTime: null }
-    return { known: true, reason: null, pid: parsed.pid, startTime: parsed.startTime }
+    if (parsed.pid === null) {
+      return { known: false, reason: 'daemon-not-running', pid: null, name: null, exePath: null, commandLine: null, startTime: null }
+    }
+    return {
+      known: true,
+      reason: null,
+      pid: parsed.pid,
+      name: parsed.name,
+      exePath: parsed.exePath || null,
+      commandLine: parsed.commandLine,
+      startTime: parsed.startTime,
+    }
+  }
+
+  /**
+   * The daemon's own health report.
+   *
+   * A refused connection is a RESULT ("not reachable"), not an unknown — the
+   * panel is asked to show a health result, and "unreachable" is exactly that.
+   */
+  async function readHealth(apiPort) {
+    if (!apiPort || typeof deps.httpGetJson !== 'function') {
+      return { known: false, reachable: false, status: null, database: null }
+    }
+    try {
+      const body = await deps.httpGetJson(`http://127.0.0.1:${apiPort}/health`)
+      return {
+        known: true,
+        reachable: true,
+        status: (body && body.status) || null,
+        database: (body && body.database) || null,
+      }
+    } catch {
+      return { known: true, reachable: false, status: null, database: null }
+    }
   }
 
   /** Collect the whole four-layer picture plus everything the panel renders. */
@@ -563,7 +840,9 @@ export function createCore(deps) {
     const userLevel = await readUserLevelEnv()
     const processEnv = readProcessEnv()
     const probe = await readDaemonProbe(layout.apiPort)
+    const health = probe.known ? await readHealth(layout.apiPort) : { known: false, reachable: false, status: null, database: null }
     const envMtime = profile.path ? deps.mtimeOf(profile.path) : null
+    const origin = daemonOriginOf(probe)
 
     const profileMap = profile.parsed ? profile.parsed.byKey : new Map()
     const conflicts = computeConflicts({
@@ -664,6 +943,23 @@ export function createCore(deps) {
         }),
         conflictKeys,
       },
+      daemon: {
+        // The panel may only drive the lifecycle when it can build a real
+        // command AND this host can spawn. Otherwise the block is disabled and
+        // says which piece is missing.
+        canControl: typeof deps.spawn === 'function' && layout.ok && Boolean(layout.embedPackagePath),
+        reason: layout.ok
+          ? (typeof deps.spawn === 'function' ? null : 'this host cannot spawn processes')
+          : layout.reason,
+        running: probe.known,
+        pid: probe.pid,
+        health,
+        commands: daemonCommands(),
+      },
+      // Requirement "启动来源可见": who started this daemon, and can it pop a
+      // console? Evidence = the listener's image + what THIS process did.
+      origin,
+      auto: autoView(origin),
       backups: listBackups(),
       dsh: dshRead,
     }
@@ -833,6 +1129,432 @@ export function createCore(deps) {
     return { ok: failed.length === 0, removed, failed, backupPath }
   }
 
+  /**
+   * Start / stop / restart the daemon.
+   *
+   * Four rules worth stating, because each one is a deliberate choice:
+   *
+   *  - the child runs with a SANITIZED environment (see `sanitizedEnv`): without
+   *    that, starting the daemon would write the outer values back over the
+   *    profile the panel just saved, which is strictly worse than the manual
+   *    command it replaces;
+   *  - STOP DOES NOT GO THROUGH THE OFFICIAL CLI. It cannot work on this class of
+   *    machine: `hindsight-embed daemon stop` finds its PID by decoding
+   *    `netstat` output as UTF-8 while Windows emits the console code page, so it
+   *    reports "Could not find PID for port 9077" and refuses to signal anything.
+   *    Turning UTF-8 mode off does not help either — the CLI then reads its own
+   *    UTF-8 profile with the locale codec and crashes. So the stop uses the PID
+   *    the panel already trusts, verifies it (see `identifyHindsightProcess`) and
+   *    only then terminates it, which keeps upstream's "never signal a process
+   *    you cannot identify" property;
+   *  - stopping something already stopped is idempotent SUCCESS, because
+   *    "stop then start" has to be usable at any time;
+   *  - one action at a time. Two concurrent restarts would race on the port and
+   *    leave the user unable to tell what is running.
+   */
+  let daemonInFlight = false
+
+  async function runDaemonStep(action, layout) {
+    const args = daemonArgs({
+      embedPackagePath: layout.embedPackagePath,
+      daemonProfile: layout.daemonProfile,
+      action,
+    })
+    if (!args) return { action, ok: false, code: 'no-command', exitCode: null, output: '' }
+    const started = Date.now()
+    const result = await deps.spawn('uv', args, {
+      env: sanitizedEnv(deps.env, MANAGED_KEYS),
+      timeoutMs: ACTION_TIMEOUT_MS[action] || ACTION_TIMEOUT_MS.start,
+      cwd: layout.embedPackagePath,
+    })
+    return {
+      action,
+      ok: result.ok === true,
+      exitCode: result.code === undefined ? null : result.code,
+      timedOut: result.timedOut === true,
+      ms: Date.now() - started,
+      output: tailForDisplay(`${result.stdout || ''}\n${result.stderr || ''}`),
+    }
+  }
+
+  /**
+   * Terminate the daemon, but only after proving the listener is really ours.
+   * See the block comment on `daemonAction` for why this does not shell out to
+   * the official stop.
+   */
+  async function stopDaemon(probe, apiPort) {
+    const identity = identifyHindsightProcess({ name: probe.name, commandLine: probe.commandLine, port: apiPort })
+    if (!identity.ok) {
+      return {
+        action: 'stop',
+        ok: false,
+        code: 'not-identified',
+        exitCode: null,
+        output: `${identity.reason}（拒绝向无法确认的进程发信号）`,
+      }
+    }
+    const started = Date.now()
+    const result = await deps.run([
+      'powershell', '-NoProfile', '-NonInteractive', '-Command',
+      `Stop-Process -Id ${probe.pid} -Force -ErrorAction Stop`,
+    ])
+    return {
+      action: 'stop',
+      ok: Boolean(result && result.ok),
+      exitCode: result && result.ok ? 0 : 1,
+      ms: Date.now() - started,
+      output: tailForDisplay(`${(result && result.stdout) || ''}\n${(result && result.stderr) || ''}`),
+    }
+  }
+
+  /** Between a restart's stop and start, the old process must actually let go. */
+  async function waitForPortFree(apiPort) {
+    if (!apiPort) return true
+    const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+    for (let attempt = 0; attempt < PORT_FREE_WAIT.attempts; attempt += 1) {
+      const probe = await readDaemonProbe(apiPort)
+      if (!probe.known) return true
+      await sleep(PORT_FREE_WAIT.intervalMs)
+    }
+    return false
+  }
+
+  // --- launcher self-heal + on-demand auto start -----------------------------
+
+  /**
+   * Auto-start bookkeeping. Nothing here is persisted except the switch itself
+   * (a settings key): everything else is "what happened since this host
+   * started", which is exactly what the panel is asked to show.
+   */
+  const autoState = {
+    enabled: null, // resolved from deps.readAutoStart() on first use
+    triggers: 0,
+    lastTriggerAt: null,
+    failures: 0,
+    backoffUntil: 0,
+    lastResult: null,
+    notice: null,
+    startedBy: null, // { pid, reason, at } — the ONLY thing that makes a pid "ours"
+    heal: null, // latest heal decision
+    healed: null, // last time the launcher was actually replaced
+    hostEvents: 'unknown', // 'subscription-ok' | 'missing'
+    pending: null, // in-flight background start
+  }
+
+  function autoEnabled() {
+    if (autoState.enabled === null) {
+      const read = typeof deps.readAutoStart === 'function' ? deps.readAutoStart() : undefined
+      // Unknown (settings service absent) means "enabled": that is the
+      // documented default, and a silent disable would be the worse surprise.
+      autoState.enabled = read === undefined ? true : read !== false
+    }
+    return autoState.enabled === true
+  }
+
+  /** Persist the switch through the settings namespace, or say why we cannot. */
+  async function setAutoStart(enabled) {
+    if (typeof enabled !== 'boolean') return { ok: false, code: 'invalid-value', errors: ['enabled must be a boolean'] }
+    if (typeof deps.writeAutoStart !== 'function') {
+      return { ok: false, code: 'settings-unavailable', errors: ['this host cannot write plugin settings'] }
+    }
+    const result = await deps.writeAutoStart(enabled)
+    if (!result || result.ok !== true) {
+      return { ok: false, code: 'settings-write-failed', errors: [(result && result.error) || 'settings write failed'] }
+    }
+    autoState.enabled = enabled
+    return { ok: true, code: 'saved', enabled, state: await collectState() }
+  }
+
+  /** The image form of the running daemon — read from the image, name as fallback. */
+  function daemonOriginOf(probe) {
+    let imageForm = 'unknown'
+    if (probe && probe.known && probe.exePath && typeof deps.readBinary === 'function') {
+      try {
+        imageForm = launcherFormOf(peSubsystemOf(deps.readBinary(probe.exePath)))
+      } catch { imageForm = 'unknown' }
+    }
+    return classifyDaemonOrigin({
+      known: Boolean(probe && probe.known),
+      pid: probe ? probe.pid : null,
+      imageName: probe ? probe.name : null,
+      imageForm,
+      startedBy: autoState.startedBy,
+    })
+  }
+
+  /**
+   * Make sure the daemon's launcher cannot allocate a console, before starting.
+   *
+   * The daemon is started through `<venv>\Scripts\pythonw.exe`. In a uv-created
+   * venv that file is a CONSOLE-subsystem launcher and upstream only checks that
+   * it exists — so Windows hands the daemon a fresh console. Swapping in the
+   * same release's console-free venv launcher is the whole fix; the original is
+   * backed up OUTSIDE `.venv` so a rebuilt venv cannot take the backup with it.
+   * The swap is staged and renamed, so a failure can never leave a half-written
+   * launcher behind.
+   */
+  async function healLauncher(layout) {
+    const embed = layout && layout.embedPackagePath
+    const cannotRead = typeof deps.readBinary !== 'function' || !embed
+    if (cannotRead) {
+      return { action: 'heal', ok: true, code: 'skipped', reason: 'cannot-read-binaries', form: 'unknown', occurred: false, blocked: false }
+    }
+    const venv = `${embed}\\.venv`
+    const launcher = `${venv}\\Scripts\\pythonw.exe`
+    let form = 'unknown'
+    try { form = launcherFormOf(peSubsystemOf(deps.readBinary(launcher))) } catch { form = 'unknown' }
+
+    const source = guiLauncherSourceOf(parsePyvenvHome(deps.readText(`${venv}\\pyvenv.cfg`)))
+    let sourceForm = 'unknown'
+    if (source) {
+      try { sourceForm = launcherFormOf(peSubsystemOf(deps.readBinary(source))) } catch { sourceForm = 'unknown' }
+    }
+    const plan = planLauncherHeal({ form, guiSourceAvailable: sourceForm === 'gui' })
+    if (plan.action !== 'replace') {
+      return {
+        action: 'heal',
+        ok: !plan.blocked,
+        code: plan.blocked ? 'blocked' : 'not-needed',
+        reason: plan.reason,
+        form,
+        occurred: false,
+        blocked: Boolean(plan.blocked),
+      }
+    }
+
+    const stamp = deps.timestamp()
+    const backupPath = `${embed}\\pythonw.exe.uv-orig-${stamp}`
+    const staging = `${venv}\\Scripts\\pythonw.exe.heal-${stamp}`
+    try {
+      const original = deps.readBinary(launcher)
+      const replacement = deps.readBinary(source)
+      deps.writeBinary(backupPath, original) // 1. backup outside the venv
+      deps.writeBinary(staging, replacement) // 2. stage beside the target
+      deps.rename(staging, launcher) // 3. atomic swap
+    } catch (error) {
+      try { if (typeof deps.removeFile === 'function') deps.removeFile(staging) } catch { /* best effort */ }
+      return {
+        action: 'heal',
+        ok: false,
+        code: 'replace-failed',
+        reason: String((error && error.message) || error),
+        form,
+        backupPath,
+        occurred: false,
+        blocked: true,
+        output: 'the launcher was left untouched (staged write + rename)',
+      }
+    }
+    return {
+      action: 'heal',
+      ok: true,
+      code: 'replaced',
+      reason: plan.reason,
+      form,
+      backupPath,
+      source,
+      occurred: true,
+      blocked: false,
+      output: `pythonw.exe: console launcher -> console-free launcher (backup: ${backupPath})`,
+    }
+  }
+
+  /** Clock seam: injectable so the backoff window is testable without waiting. */
+  const nowMs = () => (typeof deps.now === 'function' ? deps.now() : Date.now())
+
+  function foldAuto(outcome) {
+    const folded = advanceAutoAttempt(autoState, { ...outcome, at: deps.isoNow(), now: nowMs() })
+    Object.assign(autoState, folded.state)
+    autoState.notice = folded.notice
+  }
+
+  /**
+   * Everything the panel needs to explain the auto-start policy and its last
+   * outcome. `origin` comes from the same probe the four layers use.
+   */
+  function autoView(origin) {
+    const now = nowMs()
+    const writable = typeof deps.writeAutoStart === 'function'
+    return {
+      enabled: autoEnabled(),
+      writable,
+      reason: writable ? null : 'settings-unavailable',
+      triggers: autoState.triggers,
+      lastTriggerAt: autoState.lastTriggerAt,
+      lastResult: autoState.lastResult,
+      failures: autoState.failures,
+      retryInMs: autoState.backoffUntil && now < autoState.backoffUntil ? autoState.backoffUntil - now : 0,
+      starting: Boolean(autoState.pending),
+      notice: autoState.notice,
+      heal: autoState.heal,
+      healed: autoState.healed,
+      hostEvents: autoState.hostEvents,
+      origin: origin || null,
+    }
+  }
+
+  /** The host half reports whether the session hooks could be bound at all. */
+  function noteHostEvents(kind) {
+    autoState.hostEvents = kind === 'subscription-ok' ? 'subscription-ok' : 'missing'
+    return autoState.hostEvents
+  }
+
+  /**
+   * The on-demand trigger: adopt a healthy daemon, otherwise start one in the
+   * background. Returns immediately — `started` is the background promise, and
+   * callers that must not block (session hooks) simply ignore it.
+   */
+  async function ensureDaemon({ reason = 'auto' } = {}) {
+    autoState.triggers += 1
+    autoState.lastTriggerAt = deps.isoNow()
+    if (!autoEnabled()) return { ok: true, code: 'disabled', triggers: autoState.triggers }
+    const layout = readLayout()
+    if (!layout.ok || !layout.daemonProfile || !layout.embedPackagePath) {
+      return { ok: false, code: 'no-command', errors: [layout.reason || 'Hindsight layout is not readable'], triggers: autoState.triggers }
+    }
+
+    const before = await readDaemonProbe(layout.apiPort)
+    if (before.known) {
+      // ADOPT. If the pid is not the one we started, it is not ours any more.
+      if (!autoState.startedBy || autoState.startedBy.pid !== before.pid) autoState.startedBy = null
+      foldAuto({ ok: true, code: 'adopted' })
+      return { ok: true, code: 'adopted', pid: before.pid, triggers: autoState.triggers }
+    }
+
+    const now = nowMs()
+    if (!autoAttemptDue(autoState, now)) {
+      return { ok: true, code: 'backoff', retryInMs: Math.max(0, autoState.backoffUntil - now), triggers: autoState.triggers }
+    }
+    if (daemonInFlight) return { ok: true, code: 'busy', triggers: autoState.triggers }
+
+    const started = daemonAction('start', { confirm: true, reason })
+      .then((result) => {
+        const code = (result && result.code) || 'start-failed'
+        // `busy` is not a failure: someone else is already starting it.
+        foldAuto({ ok: code !== 'busy' && Boolean(result && result.ok), code })
+        autoState.pending = null
+        return result
+      })
+      .catch((error) => {
+        foldAuto({ ok: false, code: 'start-failed' })
+        autoState.pending = null
+        return { ok: false, code: 'start-failed', errors: [String((error && error.message) || error)] }
+      })
+    autoState.pending = started
+    return { ok: true, code: 'starting', started, triggers: autoState.triggers }
+  }
+
+  /**
+   * The one way this plugin starts the daemon: heal the launcher first, then the
+   * official CLI with a sanitized environment. The panel's buttons and the
+   * on-demand trigger share it, so both get the same guard.
+   */
+  async function startDaemon(layout, reason, steps, successCode) {
+    const heal = await healLauncher(layout)
+    autoState.heal = heal
+    if (heal.occurred) autoState.healed = { at: deps.isoNow(), backupPath: heal.backupPath, source: heal.source }
+    // The receipt only carries a heal step when there is something to report:
+    // "checked, nothing to do" belongs in the state, not in the action log.
+    if (heal.occurred || heal.blocked) steps.push(heal)
+    if (heal.blocked) {
+      return {
+        ok: false,
+        code: 'launcher-blocked',
+        steps,
+        errors: [`launcher not usable for a window-free start: ${heal.reason}`],
+        state: await collectState(),
+      }
+    }
+    const started = await runDaemonStep('start', layout)
+    steps.push(started)
+    if (started.ok) {
+      const after = await readDaemonProbe(layout.apiPort)
+      autoState.startedBy = after.known ? { pid: after.pid, reason, at: deps.isoNow() } : null
+    }
+    return {
+      ok: started.ok,
+      code: started.ok ? successCode : 'start-failed',
+      steps,
+      state: await collectState(),
+    }
+  }
+
+  async function daemonAction(action, { confirm, reason = 'manual' } = {}) {
+    if (!DAEMON_ACTIONS.includes(action)) {
+      return { ok: false, code: 'bad-action', errors: [`unknown action: ${action}`] }
+    }
+    if (action !== 'start' && confirm !== true) {
+      return { ok: false, code: 'confirm-required', errors: ['stopping or restarting needs confirmation'] }
+    }
+    if (typeof deps.spawn !== 'function') {
+      return { ok: false, code: 'no-spawn', errors: ['this host cannot spawn processes'] }
+    }
+    const layout = readLayout()
+    if (!layout.ok || !layout.daemonProfile || !layout.embedPackagePath) {
+      return { ok: false, code: 'no-command', errors: [layout.reason || 'Hindsight layout is not readable'] }
+    }
+    if (daemonInFlight) {
+      return { ok: false, code: 'busy', errors: ['another daemon action is already running'] }
+    }
+
+    daemonInFlight = true
+    try {
+      const before = await readDaemonProbe(layout.apiPort)
+      const steps = []
+
+      if (action === 'stop' && !before.known) {
+        return { ok: true, code: 'already-stopped', steps, state: await collectState() }
+      }
+      if (action === 'restart' && !before.known) {
+        return await startDaemon(layout, reason, steps, 'started')
+      }
+
+      if (action === 'start') {
+        return await startDaemon(layout, reason, steps, 'started')
+      }
+
+      const stopped = await stopDaemon(before, layout.apiPort)
+      steps.push(stopped)
+      if (!stopped.ok) {
+        return { ok: false, code: stopped.code || 'stop-failed', steps, state: await collectState() }
+      }
+      autoState.startedBy = null
+      if (action === 'stop') {
+        return { ok: true, code: 'stopped', steps, state: await collectState() }
+      }
+
+      const freed = await waitForPortFree(layout.apiPort)
+      if (!freed) {
+        return { ok: false, code: 'port-busy', steps, state: await collectState() }
+      }
+      return await startDaemon(layout, reason, steps, 'restarted')
+    } finally {
+      daemonInFlight = false
+    }
+  }
+
+  /** The command the panel displays, per action, straight from the same builder. */
+  /**
+   * The commands the buttons actually run, for copying and auditing.
+   *
+   * The two halves differ on purpose: the start really is the official CLI, but
+   * the stop is a port-scoped `Stop-Process` because the CLI's own stop cannot
+   * find its PID here. The panel states the identity check next to it.
+   */
+  function daemonCommands() {
+    const layout = readLayout()
+    const start = daemonCommandLine(daemonArgs({
+      embedPackagePath: layout.embedPackagePath,
+      daemonProfile: layout.daemonProfile,
+      action: 'start',
+    }))
+    const port = layout.apiPort
+    const stop = port
+      ? `powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ${port} -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"`
+      : null
+    return { start, stop }
+  }
+
   return {
     readLayout,
     readProfileLayer,
@@ -845,6 +1567,13 @@ export function createCore(deps) {
     verify,
     cleanEnv,
     listBackups,
+    daemonAction,
+    daemonCommands,
+    ensureDaemon,
+    setAutoStart,
+    noteHostEvents,
+    healLauncher,
+    autoView,
   }
 }
 
@@ -864,7 +1593,15 @@ export const _module = {
   buildRestartCommand,
   parseRegQuery,
   parseDaemonProbe,
+  identifyHindsightProcess,
   validateChanges,
   isSecretKey,
   createCore,
+  DAEMON_ACTIONS,
+  ACTION_TIMEOUT_MS,
+  PORT_FREE_WAIT,
+  sanitizedEnv,
+  daemonArgs,
+  daemonCommandLine,
+  tailForDisplay,
 }

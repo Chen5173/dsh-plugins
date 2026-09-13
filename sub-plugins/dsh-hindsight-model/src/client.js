@@ -38,6 +38,8 @@ window.__ModuleLoader__.load({
       dshModel: '/__hindsight-model/dsh-model',
       verify: '/__hindsight-model/verify',
       cleanEnv: '/__hindsight-model/clean-env',
+      daemon: '/__hindsight-model/daemon',
+      auto: '/__hindsight-model/auto',
     }
 
     /** Keys rendered as write-only fields. */
@@ -99,8 +101,50 @@ window.__ModuleLoader__.load({
       reading: '读取中…',
       copy: '复制',
       copied: '已复制',
-      restartTitle: '重启命令（插件不代为启停，请自行执行）',
+      restartTitle: '重启命令（手动执行时的等价命令，自带环境净化）',
       restartUnavailable: '读不到本机 Hindsight 配置，命令不可用',
+      daemonTitle: '守护进程',
+      daemonRunning: '运行中',
+      daemonStopped: '已停止',
+      daemonStart: '启动',
+      daemonStop: '停止',
+      daemonRestart: '重启',
+      daemonConfirmStop: '确认停止',
+      daemonConfirmRestart: '确认重启',
+      daemonWorking: '执行中…',
+      daemonWarn: '停止 / 重启会中断进行中的记忆操作；启动时会自动清除会覆盖 profile 的外层环境变量。',
+      daemonDisabled: '本机配置不可读，启停不可用',
+      daemonCmdTitle: '面板实际执行的命令',
+      daemonEnvNote: '启动 = 官方 CLI，且子进程环境已净化（外层同名变量不会被写回 profile）；停止 = 取监听端口的 PID、校验它确实是 hindsight（命令行含 hindsight_api.main 且端口匹配）后才终止 —— 上游 CLI 的 stop 在 Windows 上因 netstat 解码 bug 找不到 PID，所以这一半由面板自己做，但仍保留「不向无法确认的进程发信号」这条安全性质。',
+      autoToggle: '自动启动',
+      autoOn: '已开启',
+      autoOff: '已关闭',
+      autoTurnOn: '开启自动启动',
+      autoTurnOff: '关闭自动启动',
+      autoHint: '开启后：会话开始时先探一次 /health —— 已经在跑就采纳（不重启、不改任何文件），没在跑才后台冷启动；失败会退避。',
+      autoUnavailable: '开关不可写（settings 服务不可用），已禁用',
+      autoStarting: '正在后台冷启动（约 44–73s，会话不会被阻塞）',
+      autoNever: '本宿主尚未触发过自动启动',
+      autoNoEvents: '宿主未提供会话事件，自动启动不生效（仅手动启停）',
+      autoDisabledNote: '自动启动已关闭，仅保留手动启停',
+      autoLastOk: '上次自动启动：已采纳现成的守护进程',
+      autoLastStarted: '上次自动启动：已启动',
+      autoLastFailed: '上次自动启动失败',
+      autoBackoff: '已退避',
+      autoRetryAfter: '后重试',
+      autoFailCount: '连续失败',
+      autoTimes: '次',
+      healReplaced: '本次启动前替换了解释器启动器（原件已备份）',
+      healNotNeeded: '启动器无需替换',
+      healBlocked: '启动器不可用于无窗口启动，已拒绝启动',
+      originTitle: '启动来源',
+      originAuto: '自动（本插件）',
+      originManual: '手动（面板）',
+      originExternal: '外部（本插件之外）',
+      originUnknown: '未知',
+      originRisk: '有控制台窗口风险（镜像会分配控制台）',
+      healthDown: '健康：—',
+      healthUnreachable: '健康：不可达',
       cleanTitle: '清理用户级冲突键',
       clean: '清理…',
       cleanConfirm: '确认删除这些用户级环境变量？（会先导出备份）',
@@ -395,6 +439,149 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The daemon block: live status, the four lifecycle actions, and the exact
+     * commands those buttons run.
+     *
+     * The panel spawns the daemon itself — and because it does, it also owns the
+     * environment sanitization that used to be the user's job (their command
+     * text carried a `Remove-Item Env:` line). That is why the displayed
+     * command has no cleanup in it: the cleanup happens in the child's
+     * environment, which a shell line could not express reliably.
+     */
+    function LayerDaemon({ state, onAction, onAuto, busy, confirm, setConfirm }) {
+      const daemon = (state && state.daemon) || {}
+      const applied = (state && state.layers && state.layers.applied) || {}
+      const layout = (state && state.layout) || {}
+      const health = daemon.health || {}
+      const commands = daemon.commands || {}
+      const auto = (state && state.auto) || {}
+      const origin = (state && state.origin) || {}
+      const running = daemon.running === true
+      const can = daemon.canControl === true
+      const busyAny = busy !== null
+      const busyDaemon = typeof busy === 'string' && busy.startsWith('daemon:')
+      const busyAuto = busy === 'auto'
+
+      // --- on-demand auto start: the switch, its policy, and what happened ----
+      const autoWritable = auto.writable === true
+      const autoOn = auto.enabled === true
+      const autoLine = (key, text, style) => React.createElement('div', {
+        key,
+        style: { ...(style || S.muted), marginTop: 4, fontSize: 12 },
+      }, text)
+
+      const autoLines = []
+      if (autoOn && auto.starting) autoLines.push(autoLine('starting', T.autoStarting))
+      if (!autoOn) autoLines.push(autoLine('off', T.autoDisabledNote))
+      if (auto.hostEvents === 'missing') autoLines.push(autoLine('no-events', T.autoNoEvents, S.warn))
+      if (autoOn && auto.hostEvents !== 'missing' && auto.triggers === 0) autoLines.push(autoLine('never', T.autoNever))
+      if (auto.lastResult) {
+        const label = auto.lastResult.ok
+          ? (auto.lastResult.code === 'adopted' ? T.autoLastOk : T.autoLastStarted)
+          : T.autoLastFailed
+        const extras = []
+        if (!auto.lastResult.ok && auto.lastResult.code) extras.push(auto.lastResult.code)
+        if (!auto.lastResult.ok && auto.failures > 0) extras.push(`${T.autoFailCount} ${auto.failures} ${T.autoTimes}`)
+        if (auto.retryInMs > 0) extras.push(`${T.autoBackoff} ${Math.ceil(auto.retryInMs / 1000)}s ${T.autoRetryAfter}`)
+        autoLines.push(autoLine('last', `${label}${extras.length ? ` · ${extras.join(' · ')}` : ''}`,
+          auto.lastResult.ok ? S.muted : S.warn))
+      }
+      if (auto.healed) {
+        autoLines.push(autoLine('healed', `${T.healReplaced}：${auto.healed.backupPath || '—'}`))
+      } else if (auto.heal && auto.heal.blocked) {
+        autoLines.push(autoLine('heal-blocked', `${T.healBlocked}（${auto.heal.reason || '?'}）`, S.warn))
+      }
+      if (origin.origin) {
+        const label = { auto: T.originAuto, manual: T.originManual, external: T.originExternal }[origin.origin] || T.originUnknown
+        autoLines.push(autoLine('origin', `${T.originTitle}：${label}${origin.consoleRisk ? ` · ${T.originRisk}` : ''}`,
+          origin.consoleRisk ? S.warn : S.muted))
+      }
+
+      const autoBlock = React.createElement('div', { key: 'auto', style: { marginTop: 8 } },
+        React.createElement('div', { style: { ...S.row, gap: 8 } },
+          React.createElement(Badge, { spec: autoOn
+            ? { text: `${T.autoToggle} ${T.autoOn}`, style: S.badgeOk }
+            : { text: `${T.autoToggle} ${T.autoOff}`, style: S.badgeMuted } }),
+          React.createElement('button', {
+            style: S.btn,
+            disabled: busyAny || !autoWritable,
+            onClick: () => onAuto(!autoOn),
+          }, busyAuto ? T.daemonWorking : (autoOn ? T.autoTurnOff : T.autoTurnOn)),
+        ),
+        !autoWritable ? autoLine('unwritable', T.autoUnavailable, S.warn) : null,
+        autoLine('hint', T.autoHint),
+        ...autoLines,
+      )
+
+      const healthBadge = !running
+        ? { text: T.healthDown, style: S.badgeMuted }
+        : (health.reachable
+            ? { text: `${health.status || 'healthy'}${health.database ? ` · ${health.database}` : ''}`, style: S.badgeOk }
+            : { text: T.healthUnreachable, style: S.badgeWarn })
+
+      const actionButton = (action, label, needsConfirm) => {
+        if (needsConfirm && confirm === action) {
+          return React.createElement('span', { key: `${action}-confirm`, style: S.row },
+            React.createElement('button', {
+              style: { ...S.btn, ...S.btnDanger },
+              disabled: busyAny,
+              onClick: () => onAction(action),
+            }, action === 'stop' ? T.daemonConfirmStop : T.daemonConfirmRestart),
+            React.createElement('button', { style: S.btn, disabled: busyAny, onClick: () => setConfirm(null) }, T.cancel),
+          )
+        }
+        return React.createElement('button', {
+          key: action,
+          style: S.btn,
+          disabled: busyAny || !can,
+          onClick: () => (needsConfirm ? setConfirm(action) : onAction(action)),
+        }, label)
+      }
+
+      return React.createElement('div', { style: S.card },
+        React.createElement('div', { style: S.cardH }, T.daemonTitle, ' ',
+          React.createElement(Badge, { spec: running
+            ? { text: `${T.daemonRunning}${daemon.pid ? ` · PID ${daemon.pid}` : ''}`, style: S.badgeOk }
+            : { text: T.daemonStopped, style: S.badgeMuted } }),
+          ' ',
+          React.createElement(Badge, { spec: healthBadge })),
+        React.createElement('div', { style: { ...S.mono, ...S.muted } },
+          `port=${layout.apiPort ?? '—'}  startTime=${applied.startTime ?? '—'}`),
+        React.createElement('div', { style: S.row },
+          actionButton('start', T.daemonStart, false),
+          actionButton('stop', T.daemonStop, true),
+          actionButton('restart', T.daemonRestart, true),
+          busyDaemon ? React.createElement('span', { style: { ...S.muted, ...S.mono } }, T.daemonWorking) : null,
+        ),
+        autoBlock,
+        React.createElement('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } }, T.daemonWarn),
+        !can
+          ? React.createElement('div', { style: { ...S.muted, marginTop: 6, fontSize: 12 } },
+              `${T.daemonDisabled}${daemon.reason ? `：${daemon.reason}` : ''}`)
+          : null,
+        can && commands.start
+          ? React.createElement('div', { style: { marginTop: 8 } },
+              React.createElement('div', { style: { ...S.cardH, fontSize: 12 } }, T.daemonCmdTitle),
+              React.createElement('pre', { style: S.pre }, `${commands.start}\n${commands.stop}`),
+              React.createElement('div', { style: { ...S.muted, fontSize: 11, marginTop: 4 } }, T.daemonEnvNote),
+              React.createElement('div', { style: S.row },
+                React.createElement('button', {
+                  style: S.btn,
+                  onClick: async () => {
+                    try {
+                      if (navigator.clipboard && navigator.clipboard.writeText) {
+                        await navigator.clipboard.writeText(`${commands.start}\n${commands.stop}`)
+                      }
+                    } catch { /* clipboard unavailable: the text is selectable anyway */ }
+                  },
+                }, T.copy),
+              ),
+            )
+          : null,
+      )
+    }
+
+    /**
      * One field, as a block rather than a table row.
      *
      * A four-column table could not hold the status chip in a narrow settings
@@ -469,6 +656,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null)
       const [verification, setVerification] = useState(null)
       const [confirming, setConfirming] = useState(false)
+      const [daemonConfirm, setDaemonConfirm] = useState(null)
       const [copied, setCopied] = useState(false)
 
       const load = useCallback(async () => {
@@ -542,6 +730,32 @@ window.__ModuleLoader__.load({
         setConfirming(false)
         await load()
       })
+
+      // `start` is harmless; `stop` and `restart` interrupt in-flight memory
+      // work, so they only fire after the inline confirm — and that confirm is
+      // what sets the `confirm` flag the host insists on.
+      // The switch is one settings key on the host; flipping it is a plain POST.
+      const onAuto = (enabled) => wrap('auto', async () => {
+        const result = await callApi(API.auto, { method: 'POST', body: { enabled } })
+        setMessage([
+          `${T.autoToggle} → ${enabled ? T.autoOn : T.autoOff}`,
+          result && result.code ? result.code : null,
+        ].filter(Boolean).join(' · '))
+        if (result && result.state) setState(result.state)
+      })()
+
+      const onDaemon = (action) => wrap(`daemon:${action}`, async () => {
+        const body = action === 'start' ? { action } : { action, confirm: true }
+        const result = await callApi(API.daemon, { method: 'POST', body })
+        setDaemonConfirm(null)
+        const last = (result.steps || []).slice(-1)[0]
+        setMessage([
+          `${action} → ${result.code}`,
+          last && last.exitCode !== null && last.exitCode !== undefined ? `exit=${last.exitCode}` : null,
+          last && last.output ? last.output : null,
+        ].filter(Boolean).join(' · '))
+        if (result.state) setState(result.state)
+      })()
 
       if (!state && error) {
         return React.createElement('div', { style: S.wrap },
@@ -624,6 +838,15 @@ window.__ModuleLoader__.load({
                 `${T.dshMissing}${((state.dsh && state.dsh.missing) || []).join(', ') || '—'}`)
             : null,
         ),
+
+        React.createElement(LayerDaemon, {
+          state,
+          onAction: onDaemon,
+          onAuto,
+          busy,
+          confirm: daemonConfirm,
+          setConfirm: setDaemonConfirm,
+        }),
 
         React.createElement('div', { style: S.card },
           React.createElement('div', { style: S.cardH }, T.restartTitle),
