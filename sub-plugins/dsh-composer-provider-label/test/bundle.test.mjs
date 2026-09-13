@@ -728,6 +728,32 @@ test('picker: the entry is a menu button and opening it writes nothing', async (
   assert.deepEqual(env.writes, [], 'opening the picker is read-only')
 })
 
+test('entry chrome: the entry is the same 28px pill chip as the model seat next door', async () => {
+  const env = pickerBoot()
+  const tree = await openPicker(env)
+  const style = buttonOf(tree).props.style
+  assert.equal(style.height, '28px', 'same height as the core model trigger')
+  assert.equal(style.borderRadius, '24px', 'pill radius, like the core model trigger')
+  assert.equal(style.padding, '0 10px', 'one step wider than the trigger 8px side pad')
+  assert.equal(style.boxSizing, 'border-box', "the ellipsis cap still measures the whole chip")
+  assert.equal(style.background, 'var(--dsw-alias-interactive-bg-hover-solid)', 'dark chip when no theme repaints it')
+  assert.equal(style.maxWidth, '11em', 'the narrow-window cap is unchanged')
+})
+
+test('entry chrome: the degraded read-only label keeps the identical chip', async () => {
+  const env = boot({
+    withMenu: false,
+    remote: { session: { modelCatalog: async () => ({ ok: true, value: catalogOf() }) } },
+  })
+  env.render(compProps('s1', projectionOf(SESS)))
+  await env.flush()
+  const tree = env.rerender(compProps('s1', projectionOf(SESS)))
+  const style = anchorOf(tree).props.children.props.style
+  assert.equal(style.height, '28px')
+  assert.equal(style.borderRadius, '24px')
+  assert.equal(style.padding, '0 10px')
+})
+
 test('picker: root pane shows the provider and model rows with their current values', async () => {
   const env = pickerBoot()
   const tree = await openPicker(env)

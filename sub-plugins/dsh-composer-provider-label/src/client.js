@@ -741,11 +741,30 @@ window.__ModuleLoader__.load({
 
     // --- the label + menu -----------------------------------------------------
 
+    /**
+     * 胶囊 chip 的外观常量，本插件入口的三种形态共用（可点按钮、无 Menu 原语时的
+     * 只读 span、目录加载失败时的 '!' 错误按钮）。
+     *
+     * 几何抄自旁边核心模型座位的 `ModelSelect.module.css` 的 `.trigger`：28px 高、
+     * 24px 圆角（28px 高下即完整胶囊）；两侧内边距取 10px，比座位那 8px 宽一档，
+     * 免得 provider 名字贴住边框。
+     *
+     * 底色只用主题 token `--dsw-alias-interactive-bg-hover-solid`（深色主题深底、
+     * 浅色主题浅底）。若当前主题/皮肤用 `background-color: … !important` 重绘
+     * composer 里的按钮（ice-princess 的 patches.css 就是这么做的），**让它赢**：
+     * 此时本 chip 会与模型座位拿到同一个底色，正是想要的效果，插件不与其争优先级。
+     *
+     * `box-sizing: border-box` 让 `maxWidth: 11em` 这个省略号上限把内边距算在内，
+     * 窄窗口下不会比以前多占宽度。
+     */
     const labelStyle = {
       color: 'var(--dsw-alias-label-tertiary)',
       display: 'inline-flex',
       alignItems: 'center',
+      justifyContent: 'center',
       gap: '2px',
+      boxSizing: 'border-box',
+      height: '28px',
       maxWidth: '11em',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
@@ -753,9 +772,10 @@ window.__ModuleLoader__.load({
       flex: 'none',
       fontSize: 'inherit',
       lineHeight: 'inherit',
-      background: 'transparent',
+      background: 'var(--dsw-alias-interactive-bg-hover-solid)',
       border: 'none',
-      padding: 0,
+      borderRadius: '24px',
+      padding: '0 10px',
       cursor: 'pointer',
       font: 'inherit',
     }

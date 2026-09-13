@@ -40,6 +40,8 @@ office · DeepSeek-V4-Flash · high
 
 composer 工具行右侧组、**模型选择器左边一格**：`[…] [provider] [DeepSeek-V4-Flash · high] [上下文] [发送]`。
 
+标签本身是一枚**胶囊 chip**：28px 高、24px 圆角、左右各 10px 内边距（几何抄自核心模型座位的 `.trigger`，两枚读起来是一排控件）；底色取主题 token `--dsw-alias-interactive-bg-hover-solid`（深色主题深底、浅色主题浅底）。当前主题/皮肤若用 `background-color: … !important` 重绘 composer 里的按钮（如 ice-princess 的 `patches.css`），**以皮肤为准**——那正是想要的效果：此时它与相邻的模型 chip 同色。
+
 ## 选择菜单
 
 点击标签打开菜单（`Menu` 原语，原地向上弹）：
@@ -98,7 +100,7 @@ dsh-composer-provider-label:
 | 悬停/聚焦标签 | tooltip：provider 完整名 · 模型 id · 当前推理档 · 路由来源 |
 | 点击标签 | 只打开菜单，不改变路由 |
 
-tooltip 文案跟随客户端语言（zh/en）；标签文本是 provider 名字，不翻译。外观只用 `--dsw-*` 主题变量，深色/浅色主题均可读；窗口过窄时 provider 以省略号截断，不挤模型名与上下文用量。
+tooltip 文案跟随客户端语言（zh/en）；标签文本是 provider 名字，不翻译。外观只用 `--dsw-*` 主题变量，深色/浅色主题均可读；窗口过窄时 provider 以省略号截断（`max-width: 11em` 是**含内边距**的整枚 chip），不挤模型名与上下文用量。
 
 ## 设计约束
 
@@ -107,6 +109,7 @@ tooltip 文案跟随客户端语言（zh/en）；标签文本是 provider 名字
 - **数据全部公开契约**：`useProjection('modelSelection')`（槽位标准 props）+ `remote.session.modelCatalog()`（按 host 代际缓存，监听 `llm/adapters-updated`、`settings/document-updated`、`connection/reset` 三个信号刷新——与核心目录同款）。
 - **写操作只有一条**：`remote.session.selectModel({sessionId, provider, model, reasoningEffort?})`，且只在用户显式选择时触发。测试里有一条能力审计：除它之外 `updateQueue`/`prompt`/`rename`/`fork`/… 一个都不许引用，也不写 settings（只 `describe()` 读）。
 - **菜单用核心原语**：`Menu`（`@deepseek-ai/dsh-client-ui-primitives`）+ 自己管理的 pane 状态。不用它的 submenu：子卡片无法用代码展开、不带勾选、还会关掉卡片滚动上限。原地渲染（`side=top`）与核心模型座位同策略。
+- **外观对齐核心模型座位，不写皮肤色值**：`src/client.js` 的 `labelStyle` 与 `ModelSelect.module.css` 的 `.trigger` 同几何（28px 高 / 24px 圆角 / 侧内边距 10px，比它宽 2px）；底色只用 `--dsw-*` token。主题或皮肤用 `!important` 重绘 composer 按钮时让它赢——它会顺手把本 chip 刷成与模型座位同色，插件不与其争优先级。
 - **宿主依赖可缺失**：node 半经动态 import 加载 `@deepseek-ai/schemastery` 来注册 settings 段；导入失败/无 settings 服务时**静默跳过**，标签仍按内置表工作（见上面「已知限制」）。
 
 ## 停用 / 卸载 / 回滚

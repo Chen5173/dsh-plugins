@@ -1,6 +1,6 @@
 # 验收清单 — dsh-composer-provider-label
 
-代码侧的 51 条逻辑断言已由 `test/bundle.test.mjs` 自动覆盖并通过。本清单覆盖**只有装起来在浏览器里才能确认**的部分：真实安装、composer 布局、菜单交互、tooltip 观感、语言切换、三路即时更新、以及「写操作范围」的回归。
+代码侧的 55 条逻辑断言已由 `test/bundle.test.mjs` 自动覆盖并通过。本清单覆盖**只有装起来在浏览器里才能确认**的部分：真实安装、composer 布局、菜单交互、tooltip 观感、语言切换、三路即时更新、以及「写操作范围」的回归。
 
 标 `[H]` 的条目 harness 已断言过，回归时抽查即可；标 `[B]` 的必须人眼看。
 
@@ -31,10 +31,12 @@ dsh --dump-config --profile web | grep -n composer-provider-label   # 应看到�
 
 ## 2. 入口可见性（spec：输入区显示当前生效路由的提供方）
 
-- [x] 2.1 `[B]` 打开一个有会话的聊天 → composer 工具行出现 provider 标签，位置在**模型选择器左边一格**（`[+][模式]  …  [provider][DeepSeek-V4-Flash · high][上下文][发送]`），无边框无背景、弱色、像模型名的前置缀
+- [x] 2.1 `[B]` 打开一个有会话的聊天 → composer 工具行出现 provider 标签，位置在**模型选择器左边一格**（`[+][模式]  …  [provider][DeepSeek-V4-Flash · high][上下文][发送]`），外观是与模型座位**同几何的胶囊 chip**：28px 高、24px 圆角、左右各 10px 内边距，四角圆润、文字不贴边（2026-09-13 用户确认）
 - [x] 2.2 `[B]` 同一模型名挂在多家（ark/codemaker/…）时，分别选到不同 provider → 标签文字不同（`ARK` / `codemaker` / …）
 - [x] 2.3 `[B]` 从没选过模型的新会话 → 标签显示 profile 默认路由的 provider
 - [x] 2.4 `[B]` 空白/无会话欢迎态 → 无标签
+- [x] 2.5 `[B]` 装了会用 `!important` 重绘 composer 按钮底色的皮肤（如 ice-princess）→ 标签与**相邻模型 chip 同色**（皮肤赢），四角圆润、无方角残留（2026-09-13 用户确认）
+- [ ] 2.6 `[B]` 默认主题（无上述皮肤）下标签仍是深色 chip（`--dsw-alias-interactive-bg-hover-solid`），不是透明 —— 换皮肤/关皮肤时抽查一次即可
 
 ## 3. 名字与别名（spec：提供方名称的取值与改写规则）
 
