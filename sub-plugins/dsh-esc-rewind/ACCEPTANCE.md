@@ -1,6 +1,6 @@
 # 验收清单 — dsh-esc-rewind
 
-逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关、提示时机的耐久证据判定、草稿附件双代桥接 0.1.2 旧名 ⇄ 0.1.5 新名、命令描述双契约、未落定输入守卫）由 `test/bundle.test.mjs`（60 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
+逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关、提示时机的耐久证据判定、草稿附件双代桥接 0.1.2 旧名 ⇄ 0.1.5 新名、命令描述双契约、未落定输入三来源与还原时序（含子会话继承残留、晚武装补跑、同页二次回退））由 `test/bundle.test.mjs`（67 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
 
 架构重点：**回退 = fork 分支 + 按开关处置原会话**（默认归档，append-only 日志无原地删除；删除模式经宿主半真删）；armed 是派生状态（running 或 尾部 interrupted + 草稿为空）。
 
@@ -45,6 +45,9 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 2.11 `[B]` **0.1.2-rc.1 核心**上同一场景 → `draftCreateApi === 'createDraftImages'`、`draftRestoreApi === 'addImages'`（旧名不回归）
 - [ ] 2.12 `[B]` **回退时还有排队消息**：先在下一条排队（生成中再发一条）再 `Esc`② 回退 → 排队项被清掉、回退照常完成（`__dsew.pendingCleared ≥ 1`）；若排队项清不掉则**不回退**、出现「还有没发出的消息在排队…」提示（`__dsew.pendingBlocked === true`），且新分支里**不会**出现那条旧消息被执行
 - [ ] 2.13 `[B]` 回退瞬间刚发出一条消息（还在排队）→ 子会话里**不**出现该消息的副本被执行（`__dsew.childPendingCleared` 记录兜底清理条数）
+- [ ] 2.14 `[B]` **0.1.5-rc.2 回归①「旧消息继续执行 / 新消息排队」**：正常结束一轮 → 直接 `Esc`（武装）→ 再 `Esc`（回退）→ 在分支里重发同一条 → **只执行这一条**，不会出现「一条在执行、另一条在队列里等」；`window.__dsew.childPendingCleared ≥ 1`、`childPendingSource` 含 `inbox-projection`、`pendingSource` 与 `childPendingSource` 均为 `null` 也不报错
+- [ ] 2.15 `[B]` **0.1.5-rc.2 回归②「文字没回到输入框」**：同一页面里**连续做两次回退**，两次的输入框都要出现被撤销的提问（`__dsew.pendingApplied` 每次 +1）；若出现 `pendingLateArm ≥ 1` 说明走的是「武装晚于挂载」的补跑路径
+- [ ] 2.16 `[B]` 回退后先输入框里打字（或在 `pendingApplied` 生效前抢着输入）→ 草稿不被覆盖，`__dsew.pendingDropped === 'draft'`
 
 ## 3. /rewind 命令（原生选择器 + 全量预读）
 

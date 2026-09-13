@@ -78,6 +78,13 @@ window.__ModuleLoader__.load({
     const MAX_IMAGES = 9
     /** Pending composer-restore expiry (ms). */
     const PENDING_TTL_MS = 30000
+    /** 还原写入前的等待（ms）：让分支的输入 store 先水合，再 setDraft。 */
+    const RESTORE_DELAY_MS = 80
+    /**
+     * 子会话继承残留的确认预算（ms）：0.1.5 起宿主把收件箱做成耐久投影，随页面 baseline
+     * 下发，正常几十毫秒就到；等不到就退回 queue 镜像的判定（等价于旧行为，不更差）。
+     */
+    const CHILD_PROJECTION_GRACE_MS = 300
     /** Safety cap for the loadOlder fallback loop (loadThrough is preferred). */
     const MAX_OLDER_PAGES = 400
 
@@ -109,6 +116,17 @@ window.__ModuleLoader__.load({
     var __disposeListeners = new Set()
     /** One outstanding "restore me after I mount" draft, keyed by target session. */
     var __pending = null
+    /**
+     * 是否在本页见过宿主 inbox 投影值。核心世代的能力探针（不读版本号）：见过的核心才有
+     * 「收件箱是耐久投影」这回事，子会话的继承残留也才只在这份投影里可见 —— 只有见过的
+     * 时候才值得为它多等一个宽限；旧核心/形状不符时保持旧行为，不凭空多等。
+     */
+    var __inboxProjectionSeen = false
+    /**
+     * 订阅「还原被武装」的桥组件。真机顺序是 open 先于 arm（React 提交早于我们的 await），
+     * 挂载那一刻 __pending 还是 null，只靠挂载 effect 会永久错过 —— 武装时广播一次补跑。
+     */
+    var __pendingListeners = new Set()
     /** sessionId -> seq of the run for which we already issued an ESC stop. */
     var __stopMarks = new Map()
     /** sessionIds currently inside a rewind (dedupe double triggers). */
@@ -168,6 +186,19 @@ window.__ModuleLoader__.load({
       pendingCleared: 0,
       pendingBlocked: false,
       childPendingCleared: 0,
+      // 命中来源（'inbox-projection' | 'queue-mirror' | 'echo'，命中多个时 '+' 连接）：
+      // 宿主 queue 帧只在有活跃 agent 时才广播，inbox 投影帧才无条件广播，真机排障先看这个。
+      pendingSource: null,
+      childPendingSource: null,
+      // 确认「清空」实际等了多久（ms）：0 附近 = 一次读就空，接近预算 = 一直在轮询。
+      pendingConfirmMs: 0,
+      childPendingConfirmMs: 0,
+      // 还原回填：武装次数 / 由晚武装通知补跑的成功次数 / 因草稿非空而放弃的次数。
+      pendingStaged: 0,
+      pendingLateArm: 0,
+      pendingDropped: null,
+      /** 本页是否见过宿主 inbox 投影（核心世代能力探针；旧核心恒 false）。 */
+      inboxProjectionSeen: false,
       titleFail: null,
       archiveFail: null,
       deleteFail: null,
@@ -879,16 +910,18 @@ window.__ModuleLoader__.load({
       return true
     }
 
-    /** Drop still-pending (queued, unexecuted) messages of this session. */
+    /**
+     * Drop still-pending (queued, unexecuted) messages of this session, best effort.
+     * 与 settlePendingInputs 共用同一份来源判定（投影 ∪ 镜像），但不做确认等待；
+     * 回退路径请用 settlePendingInputs（它保证删除落在 fork 切点之前）。
+     */
     async function clearQueue(sessionId) {
       try {
         const binding = __svc.sessions && __svc.sessions.binding(sessionId)
         if (!binding || !binding.session) return
-        const snapshot = typeof binding.session.getSnapshot === 'function' ? binding.session.getSnapshot() : null
-        const queue = snapshot && Array.isArray(snapshot.queue) ? snapshot.queue : []
-        for (const item of queue) {
-          if (!item) continue
-          try { await binding.session.updateQueue(item.id, { kind: 'remove' }) } catch { /* best effort */ }
+        const pending = pendingInputsOf(sessionId)
+        for (const id of pending.ids) {
+          try { await binding.session.updateQueue(id, { kind: 'remove' }) } catch { /* best effort */ }
         }
       } catch { /* best effort */ }
     }
@@ -904,6 +937,74 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 一个会话此刻「未落定输入」的全量清单（三个来源缺一不可）：
+     *   1) 宿主 inbox 投影 `{'next-turn','next-step'}`——0.1.5 起收件箱是**耐久投影**
+     *      （fold `agent/inbox/spliced`），随页面 baseline 与 `projection` 帧下发；fork 的
+     *      事件种子正是这份状态长出来的，所以它是「种子会带出什么」的第一现场。
+     *   2) queue 镜像 `snapshot.queue`——宿主只在「有活跃 agent 且 session 匹配」时才广播
+     *      `{type:'queue'}` 帧（旧核心唯一来源），投影缺席时靠它兜底。
+     *   3) 本地未对账回声 `snapshot.pendingSubmissions`——刚按下回车、宿主还没接收的那一瞬
+     *      （「等待队列」UI 就是拿它渲染的）；此刻 fork，随后落盘的插入事件仍可能被切进种子。
+     *
+     * - 参数类型：sessionId -- string
+     * - 返回值：
+     *     retval: object -- { ids, sources, echoes }
+     *       ids     -- string[]，可直接交给 updateQueue(id,{kind:'remove'}) 的宿主条目 id
+     *       sources -- string[]，命中的来源名（'inbox-projection' | 'queue-mirror' | 'echo'）
+     *       echoes  -- number，尚未对账的本地回声条数（没有宿主 id，只能等它落定）
+     * - 调用样例：
+     *     const p = pendingInputsOf('session-x'); p.ids.length === 0 && p.echoes === 0
+     */
+    function pendingInputsOf(sessionId) {
+      const ids = []
+      const sources = []
+      const noteSource = (source) => { if (sources.indexOf(source) < 0) sources.push(source) }
+      const push = (id) => {
+        if (typeof id !== 'string' || id === '' || ids.indexOf(id) >= 0) return
+        ids.push(id)
+      }
+      let binding = null
+      try { binding = __svc.sessions && typeof __svc.sessions.binding === 'function' ? __svc.sessions.binding(sessionId) : null } catch { binding = null }
+      const session = binding && binding.session ? binding.session : null
+      // 1) 宿主 inbox 投影（新核心；无条件广播，最可靠）。值缺席 = 这一代核心没有该能力。
+      try {
+        const projections = session && session.projections ? session.projections : null
+        const face = projections && typeof projections.faceOf === 'function' ? projections.faceOf('inbox') : null
+        const value = face && typeof face.getSnapshot === 'function' ? face.getSnapshot() : null
+        if (value && typeof value === 'object') {
+          noteSource('inbox-projection')
+          if (!__inboxProjectionSeen) { __inboxProjectionSeen = true; __diag.inboxProjectionSeen = true }
+          for (const target of ['next-turn', 'next-step']) {
+            const rows = Array.isArray(value[target]) ? value[target] : []
+            for (const row of rows) if (row) push(row.id)
+          }
+        }
+      } catch { /* 形状容错：下一来源顶上 */ }
+      // 2) queue 镜像行 + 3) 本地回声的对账判定（同一份快照）。
+      const snapshot = sessionSnapshotOf(sessionId)
+      let echoes = 0
+      try {
+        const rows = snapshot && Array.isArray(snapshot.queue) ? snapshot.queue : []
+        for (const row of rows) {
+          if (!row) continue
+          push(row.id)
+          noteSource('queue-mirror')
+        }
+        const admitted = new Set()
+        for (const row of rows) if (row && typeof row.rpcId === 'string') admitted.add(row.rpcId)
+        const pendingSubmissions = snapshot && Array.isArray(snapshot.pendingSubmissions) ? snapshot.pendingSubmissions : []
+        for (const echo of pendingSubmissions) {
+          if (!echo) continue
+          if (echo.placement !== 'queued' && echo.placement !== 'steering') continue
+          if (typeof echo.requestId === 'string' && admitted.has(echo.requestId)) continue
+          echoes += 1
+        }
+        if (echoes > 0) noteSource('echo')
+      } catch { /* 形状容错 */ }
+      return { ids, sources, echoes }
+    }
+
+    /**
      * 把会话的「未落定输入」清干净并**确认**清空——回退前必须做，否则 fork 的
      * 事件种子会把这条 pending 输入一起复制进子会话（实测：子会话会执行它，
      * 而用户新发的那条排队等待，看起来就像同一条消息被执行了又被挂起）。
@@ -911,33 +1012,48 @@ window.__ModuleLoader__.load({
      * 为什么必须「确认」而不是「发一次删除就算」：删除要作为事件落进宿主日志，
      * 且必须落在 fork 切点**之前**，子会话重放种子时才看不到这条插入。
      *
-     * - 参数类型：sessionId -- string；options.budgetMs -- 有界等待预算（默认 1500ms）
-     * - 返回值：{ cleared, remaining, empty } —— cleared=已请求删除的条数；
-     *   remaining=预算用尽后仍未清空的条数；empty=是否已确认空
+     * - 参数类型：
+     *     sessionId -- string
+     *     options.budgetMs -- number|undefined：有界等待预算（默认 1500ms）
+     *     options.requireProjectionMs -- number|undefined：额外等 inbox 投影出现的宽限
+     *       （ms，0/缺省 = 不等）；用于刚 open 的子会话——它的投影随页面 baseline 到，
+     *       等不到就退回 queue 镜像判定（等价旧行为，不更差）。
+     * - 返回值：
+     *     retval: { cleared, remaining, empty, sources, waitedMs } —— cleared=已请求删除的
+     *       条数；remaining=预算用尽后仍未落定的条数；empty=是否已确认空；
+     *       sources=命中来源；waitedMs=实际等待毫秒数
      */
     async function settlePendingInputs(sessionId, options) {
-      const budgetMs = (options && typeof options.budgetMs === 'number') ? options.budgetMs : 1500
+      const opts = options || {}
+      const budgetMs = typeof opts.budgetMs === 'number' ? opts.budgetMs : 1500
+      const projectionGraceMs = typeof opts.requireProjectionMs === 'number' ? opts.requireProjectionMs : 0
       const stepMs = 60
-      const deadline = Date.now() + budgetMs
+      const started = Date.now()
+      const deadline = started + budgetMs
       let cleared = 0
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+      const sources = []
       for (;;) {
-        const snapshot = sessionSnapshotOf(sessionId)
-        const queue = snapshot && Array.isArray(snapshot.queue) ? snapshot.queue.filter(Boolean) : []
-        if (queue.length === 0) return { cleared, remaining: 0, empty: true }
-        for (const item of queue) {
+        const pending = pendingInputsOf(sessionId)
+        for (const source of pending.sources) if (sources.indexOf(source) < 0) sources.push(source)
+        const projectable = sources.indexOf('inbox-projection') >= 0
+        // 投影还没到时不能宣布「干净」：种子里的继承项只在那份投影里可见。
+        const confirmable = projectionGraceMs <= 0 || projectable || (Date.now() - started) >= projectionGraceMs
+        if (pending.ids.length === 0 && pending.echoes === 0 && confirmable) {
+          return { cleared, remaining: 0, empty: true, sources, waitedMs: Date.now() - started }
+        }
+        for (const id of pending.ids) {
           try {
             const binding = __svc.sessions && __svc.sessions.binding(sessionId)
             if (binding && binding.session) {
-              await binding.session.updateQueue(item.id, { kind: 'remove' })
+              await binding.session.updateQueue(id, { kind: 'remove' })
               cleared += 1
             }
           } catch { /* 单条失败不阻断：下一轮重试 */ }
         }
         if (Date.now() >= deadline) {
-          const after = sessionSnapshotOf(sessionId)
-          const left = after && Array.isArray(after.queue) ? after.queue.filter(Boolean).length : 0
-          return { cleared, remaining: left, empty: left === 0 }
+          const after = pendingInputsOf(sessionId)
+          const left = after.ids.length + after.echoes
+          return { cleared, remaining: left, empty: left === 0, sources, waitedMs: Date.now() - started }
         }
         await sleep(stepMs)
       }
@@ -968,6 +1084,8 @@ window.__ModuleLoader__.load({
         // 等待、内容相同」）。清不掉就放弃本次回退，宁可不回退也不复制一份输入。
         const settled = await settlePendingInputs(sessionId)
         __diag.pendingCleared = settled.cleared
+        __diag.pendingSource = settled.sources.length ? settled.sources.join('+') : null
+        __diag.pendingConfirmMs = settled.waitedMs
         if (!settled.empty) {
           __diag.pendingBlocked = true
           __diag.lastGate = 'pending-input'
@@ -1000,10 +1118,11 @@ window.__ModuleLoader__.load({
           imageDraftIds = createDraftAttachments(__svc.conversation, sessionId, files) || []
         }
 
+        // 分支会话 id：fork/create 之后才能知道，catch 里要用它撤掉已武装的还原。
+        let childId = null
         try {
           const oldSummary = summaryOf(sessionId)
           const oldTitle = oldSummary ? (oldSummary.title || oldSummary.displayTitle) : null
-          let childId
           if (exchange.isFirst === true) {
             // First-exchange edge (D9/D18): no history to fork — new blank
             // session in the same workspace.
@@ -1027,15 +1146,26 @@ window.__ModuleLoader__.load({
               __diag.titleFail = (error && error.message) ? error.message : String(error)
             }
           }
+          // 先武装还原、再 open（理由见 armPendingRestore）。__pending 按 childId 键控，
+          // 父会话的桥不会消费它，所以提前武装是安全的。
+          armPendingRestore(childId, (exchange && exchange.text) || '', imageDraftIds)
           // Open the branch BEFORE disposing the original: opening the child
           // first means the archive/delete only affects the original (never
           // clears the current selection out from under the user).
           sessions.open(childId)
-          // 兜底：万一父会话的 pending 输入还是在切点之前挤进了种子，打开分支后
-          // 立刻清掉它——否则子会话会替用户把那条旧消息执行掉。
-          const childSettled = await settlePendingInputs(childId, { budgetMs: 600 })
+          // 兜底，且这是主因：0.1.5 的 fork 种子 = 父会话 [0, cut)，cut 从边界 turn/end
+          // 一路走到**下一个 turn/start**；被回退那条消息的 inbox 插入事件恰好排在它的
+          // turn/start 之前、claim 之后 ⇒ 种子必然带出一条继承来的 pending 旧消息。
+          // 它不在父会话的队列里（早就被 claim 了），只能打开分支后按投影+镜像清掉；
+          // 否则用户再发消息时 agent 先执行这条旧的，新消息只能排队。
+          const childSettled = await settlePendingInputs(childId, {
+            budgetMs: 900,
+            // 见过 inbox 投影的核心才值得为它多等一个宽限（见 __inboxProjectionSeen）。
+            requireProjectionMs: __inboxProjectionSeen ? CHILD_PROJECTION_GRACE_MS : 0,
+          })
           __diag.childPendingCleared = childSettled.cleared
-          armPendingRestore(childId, (exchange && exchange.text) || '', imageDraftIds)
+          __diag.childPendingSource = childSettled.sources.length ? childSettled.sources.join('+') : null
+          __diag.childPendingConfirmMs = childSettled.waitedMs
           // Dispose the original AFTER the child exists (D8) and — in delete
           // mode — only after the branch is confirmed open & usable (D7). A
           // failed delete degrades to archive; a failed archive is recorded.
@@ -1050,7 +1180,9 @@ window.__ModuleLoader__.load({
           __diag.lastRewind = { from: sessionId, to: childId, seq: exchange ? exchange.seq : null }
           return { ok: true, childId }
         } catch (error) {
-          // Release drafts we created but never delivered.
+          // The branch never became usable: drop the staged restore and release
+          // the drafts we created but never delivered.
+          clearPendingRestore(childId === null ? undefined : childId)
           if (imageDraftIds.length > 0 && __svc.conversation) {
             try { for (const id of imageDraftIds) releaseDraftAttachment(__svc.conversation, id) } catch { /* noop */ }
           }
@@ -1061,15 +1193,32 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Stage a composer restore for the just-opened branch (applied on mount). */
+    /**
+     * Stage a composer restore for the just-forked branch (applied on mount).
+     * **必须在 `sessions.open(childId)` 之前调用**：open 会立刻触发 React 提交，子会话的桥
+     * 先挂载，而挂载 effect 读到的 __pending 仍是 null；只靠挂载那一刻去看，这次还原就永远
+     * 丢了（真机「回退后文字没回到输入框」的成因之一）。武装时同时广播一次，让已经挂载的
+     * 桥也能补跑。
+     */
     function armPendingRestore(sessionId, text, imageDraftIds) {
-      __pending = { sessionId, text, imageDraftIds }
+      __pending = { sessionId, text, imageDraftIds, stagedAt: Date.now() }
       __diag.pendingApplied = 0
+      __diag.pendingStaged += 1
+      __diag.pendingDropped = null
+      for (const listener of [...__pendingListeners]) {
+        try { listener(__pending) } catch { /* 单个订阅者出错不影响其他人 */ }
+      }
       if (typeof setTimeout === 'function') {
         setTimeout(() => {
           if (__pending && __pending.sessionId === sessionId) __pending = null
         }, PENDING_TTL_MS)
       }
+    }
+
+    /** Drop a staged restore (branch never opened / rewind failed after arming). */
+    function clearPendingRestore(sessionId) {
+      if (!__pending) return
+      if (sessionId === undefined || __pending.sessionId === sessionId) __pending = null
     }
 
     function issueStop(sessionId, exchange) {
@@ -1428,8 +1577,6 @@ window.__ModuleLoader__.load({
       // when just switching into an already-unsettled session (running stays
       // false the whole time, so there is no edge).
       const prevRunningRef = useRef(null)
-      // One-restore-per-branch guard for the staged composer restore.
-      const pendingAppliedRef = useRef(false)
 
       const [toast, setToast] = useState(null)
       const toastSeq = useRef(0)
@@ -1574,33 +1721,83 @@ window.__ModuleLoader__.load({
       }, [running, draft, target, tailState, roundEnd])
 
       // Apply the staged composer restore once the rewound branch mounts.
-      useEffect(() => {
-        if (pendingAppliedRef.current) return
-        if (!inputActions) return
+      //
+      // 两个入口，缺一不可：
+      //   a) 挂载/会话切换/输入面变化时的 effect —— 常规路径（武装时间早于挂载）；
+      //   b) 模块级晚武装通知 —— 真机顺序是 open 先于 arm（React 提交早于我们 await 之后
+      //      的那次武装），子会话挂载时 __pending 还是 null，effect 只按
+      //      [sessionId, draft, inputActions] 重跑，之后不会再跑，那次还原就永久丢了。
+      // 「一次回退只回填一次」用「已回填的会话 id」表达，而不是布尔 ref：下一次回退会 open
+      // 出新的 childId，天然可再回填（旧的布尔 ref 会让同页第二次回退永远不回填）。
+      const appliedSessionRef = useRef(null)
+      const restoreScheduledRef = useRef(false)
+      const inputActionsRef = useRef(inputActions)
+      inputActionsRef.current = inputActions
+      // 挂载期间才允许写入：桥卸载（切走会话）后，残留定时器不得再往旧会话的输入面写草稿。
+      const restoreAliveRef = useRef(true)
+      useEffect(() => () => {
+        restoreAliveRef.current = false
+        restoreScheduledRef.current = false
+      }, [])
+
+      /** 把被撤销的提问（含图片草稿）写回输入框；写入成功返回 true。 */
+      const applyPendingRestore = useCallback(() => {
+        if (!restoreAliveRef.current) return false
         const pending = __pending
-        if (!pending || pending.sessionId !== sessionId) return
-        if (draft !== '') {
-          // The user already started typing in the new branch: never clobber.
-          if (__pending && __pending.sessionId === sessionId) __pending = null
-          return
+        if (!pending) return false
+        if (pending.sessionId !== sessionRef.current) return false
+        if (appliedSessionRef.current === pending.sessionId) return false
+        const actions = inputActionsRef.current
+        if (!actions) return false
+        if (draftRef.current !== '') {
+          // 用户已经在分支里打字：放弃这次回填，绝不覆盖用户输入
+          // （与「编辑草稿即解除预备态」同一原则）。
+          __diag.pendingDropped = 'draft'
+          clearPendingRestore(pending.sessionId)
+          return false
         }
-        // Give the branch's input store a beat to hydrate, then apply once.
-        const timer = setTimeout(() => {
-          const still = __pending
-          if (!still || still.sessionId !== sessionId || pendingAppliedRef.current) return
-          pendingAppliedRef.current = true
-          try {
-            if (still.text) inputActions.setDraft(still.text)
-          } catch { /* input not ready yet; drop rather than loop */ }
-          try {
-            if (still.imageDraftIds && still.imageDraftIds.length) restoreDraftAttachments(inputActions, still.imageDraftIds)
-          } catch { /* images are best-effort */ }
-          __pending = null
-          __diag.pendingApplied += 1
-          publishToast(tRef.current('rewind.done'))
-        }, 80)
-        return () => clearTimeout(timer)
-      }, [sessionId, draft, inputActions])
+        appliedSessionRef.current = pending.sessionId
+        try {
+          if (pending.text) actions.setDraft(pending.text)
+        } catch { /* 输入框还没就绪：交由 TTL 丢弃，不循环重试 */ }
+        try {
+          if (pending.imageDraftIds && pending.imageDraftIds.length) restoreDraftAttachments(actions, pending.imageDraftIds)
+        } catch { /* images are best-effort */ }
+        clearPendingRestore(pending.sessionId)
+        __diag.pendingApplied += 1
+        publishToast(tRef.current('rewind.done'))
+        return true
+      }, [])
+
+      /** 等输入 store 水合一个拍子再写入（同一时刻只排一个）。 */
+      const scheduleRestore = useCallback((delayMs) => {
+        if (restoreScheduledRef.current) return
+        restoreScheduledRef.current = true
+        setTimeout(() => {
+          restoreScheduledRef.current = false
+          applyPendingRestore()
+        }, typeof delayMs === 'number' ? delayMs : RESTORE_DELAY_MS)
+      }, [applyPendingRestore])
+
+      useEffect(() => {
+        if (!inputActions) return undefined
+        const pending = __pending
+        if (!pending || pending.sessionId !== sessionId) return undefined
+        scheduleRestore(RESTORE_DELAY_MS)
+        return undefined
+      }, [sessionId, draft, inputActions, scheduleRestore])
+
+      useEffect(() => {
+        const listener = (pending) => {
+          if (!pending || pending.sessionId !== sessionRef.current) return
+          if (appliedSessionRef.current === pending.sessionId) return
+          setTimeout(() => {
+            if (applyPendingRestore()) __diag.pendingLateArm += 1
+          }, RESTORE_DELAY_MS)
+        }
+        __pendingListeners.add(listener)
+        return () => { __pendingListeners.delete(listener) }
+      }, [applyPendingRestore])
 
       if (!toast) return null
       return React.createElement(Toast, {
@@ -1885,7 +2082,8 @@ window.__ModuleLoader__.load({
           tailUnsettled, decideEsc, snippet, timeLabel,
           _module: {
             publishToast, doRewind, issueStop, ensureIdle, clearQueue,
-            settlePendingInputs, probeCoreGeneration, markModernCore, sessionSnapshotOf,
+            settlePendingInputs, pendingInputsOf, armPendingRestore, clearPendingRestore,
+            probeCoreGeneration, markModernCore, sessionSnapshotOf,
             createDraftAttachments, releaseDraftAttachment, restoreDraftAttachments,
             exchangesOfSession, isSubagentSession, sessionFacts,
             refreshHistory, knownExchangesOf, resetHistoryCache,

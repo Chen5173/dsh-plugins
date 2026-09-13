@@ -132,3 +132,19 @@
 - **为什么「删一次」不够**：删除同样要作为事件落进日志，而且必须落在**切点之前**，子会话重放种子时才看不到这条插入 —— 所以必须「删 + 等快照确认」。
 - **改法**：新增 `settlePendingInputs(sessionId, { budgetMs })`——循环「读快照 → 对每条排队项 `updateQueue(id,{kind:'remove'})` → 等 60ms」，直到快照确认没有排队项或用尽预算（默认 1500ms）。`doRewind` 在 fork **前**调用；`empty === false` 时返回 `{ ok:false, code:'pending-input' }` + toast「该会话还有没发出的消息在排队…」并**放弃回退**（宁可不回退，也不复制一份输入过去）。`sessions.open(childId)` 之后再跑一次 600ms 兜底清理，条数记进 `__dsew.childPendingCleared`。
 - **测试**：套件 **60/60**（新增 6 条：命令契约三条——旧核心字符串 / 新核心函数 / 第二信号 props；未落定输入三条——清空后照常 fork、清不掉则拒绝回退且不 fork 不归档、子会话继承残留被清掉）。**红绿验证**：新用例跑在 `HEAD` 版 `client.js` 上 **50/60**（10 条红 = 4 条草稿桥 + 3 条契约 + 3 条 pending），当前实现 **60/60**。
+
+## v7.5（2026-09-13）：v7.4 只修了一半——fork 种子**必然**带出被回退那条消息，还原时序又输给 React 提交
+
+用户报「0.1.5-rc.2 上：① 回退后信息没回到对话框；② 回退后再发消息，新消息排队、之前的信息继续被执行」。逐条复看会话日志 + 宿主源码后，v7.4 的结论要**修正**：
+
+- **② 的主因不是「父会话此刻还 pending」，而是 fork 切点本身**。宿主 `commands.fork`（`packages/api/session-controller/src/commands.ts:202-275`）：
+  `boundary = 第一个 seq ≥ atSeq 的 turn/end`，然后 `cut = boundary.seq+1`，并 `while (cut < len && events[cut].type !== 'turn/start') cut++`。被回退那条消息的 `agent/inbox/spliced`(insert) 恰好排在**它自己的 turn/start 之前**，而 claim (`removedCount:1`) 排在 turn/start **之后** ⇒ 种子 = `[0, cut)` 里只有 insert、没有 claim ⇒ 子会话的 `inbox` 投影（`core/agent-loop/src/inbox.ts` 是事件 fold，**耐久**且随页面 baseline 下发）里就有一条继承来的 pending 旧消息。用户重发时 agent 先 claim 它（`start=0`）并执行，新消息排队 —— 真机三例完全对上：`8c693ecf`（23:19:52 fork，子会话 23:20:16 执行继承的 `e35e7ff4`）、`1aacc7bb`（10:46:53 fork，10:52:58 执行继承的 `858a838b`，用户 10:48/10:52 发的两条在等）、`716995b9`（三次「继续」，先执行继承的 `e947d3bb`）。**结论：这不是竞态，是结构性泄漏，父会话清队列永远清不到它。**
+- **v7.4 的守卫看不到它**：`settlePendingInputs` 只读客户端 queue 镜像 `snapshot.queue`；宿主 queue 帧只在「有活跃 agent 且 session 匹配」时广播（`control.ts:29-40`），而同一次变化的 `projection` 帧（key `inbox`）是无条件广播的；刚按下回车的输入还可能只存在于本地回声 `pendingSubmissions`（`QueueDock` 就是拿它显示「等待中」）。日志里 fork 前**没有任何 removal 事件**，与「守卫看到空队列」自洽。
+- **① 是还原时机**：`doRewind` 原本 `open(child) → await settlePendingInputs(child,600) → armPendingRestore(...)`；中间的 await 会 sleep（正是②的子会话有 pending 的场景），React 先提交子会话挂载，还原 effect 第一跑读到 `__pending === null` 直接 return，而它只按 `[sessionId, draft, inputActions]` 重跑 ⇒ 那次还原永久丢失；用户一打字（draft 变化）还会把它清掉。harness 旧用例是在 `doRewind` 全部结束**之后**才挂载子会话，正好绕开了真实顺序。
+- **改法（客户端，两处一起修）**：
+  1. `pendingInputsOf(sessionId)` 三来源合一：宿主 `inbox` 投影（`session.projections.faceOf('inbox')`，随页面 baseline 到达）∪ queue 镜像 ∪ 未对账的 `pendingSubmissions`（queued/steering 且其 rpcId 未出现在任何宿主行）。`settlePendingInputs` 用它做「删 + 等确认」，`clearQueue` 也复用同一判定。
+  2. **fork 前**清父会话（清不掉仍 `code:'pending-input'` 放弃回退）；**open 分支后**再清一次子会话（继承项只在这里可见），预算 900ms、`budgetMs` 内用 `requireProjectionMs` 宽限等投影到场——只有本页见过 `inbox` 投影（`__dsew.inboxProjectionSeen`）才等，旧核心不多等一分。
+  3. `armPendingRestore` 提到 `sessions.open(childId)` **之前**（`__pending` 按 childId 键控，父会话的桥不会消费）；补模块级武装通知（同 `__toastListeners`）让「武装晚于挂载」也能补跑；「一次回退只回填一次」改为「已回填的会话 id」而非一次性布尔 ref（旧写法同页第二次回退永不回填）。
+- **诊断**：`__dsew.pendingSource / childPendingSource`（`inbox-projection` `queue-mirror` `echo`）、`pendingConfirmMs / childPendingConfirmMs`、`pendingStaged / pendingApplied / pendingLateArm / pendingDropped`、`inboxProjectionSeen`。
+- **测试**：套件 **67/67**（新增 7 条：投影通道清父会话、未对账回声拦住回退、子会话继承项被清、子会话先挂载仍还原、同页二次回退仍还原、晚武装补跑、无投影时降级走 queue 镜像）。**红绿验证**：7 条新用例跑在 v7.4 的 `client.js` 上 **60/67**（7 条全红，报错点分别是「投影项没被删」「回声时仍 fork」「子会话继承项没被删」「晚武装没回填」「第二次没回填」），当前实现 **67/67**。
+- **顺带**：`dsh-open-session-workdir/test/interception.test.mjs` 失败（`isFolderRevealPath not found in client-registry.js — their bundle changed shape`）与本插件无关，是既有的宿主 bundle 形状漂移，未修。

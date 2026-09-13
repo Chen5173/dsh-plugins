@@ -186,16 +186,29 @@ function makeServices(overrides = {}) {
   let nextId = 1
 
   const makeBinding = (id, runningNow) => {
-    const live = { running: runningNow === true, queue: [], hasMore: false }
+    // 真机 SessionSnapshot 的形态：queue（宿主 queue 帧）/ pendingSubmissions（本地回声）
+    // 都在快照里；inbox 走宿主投影通道（projections.faceOf('inbox')），未广播时是 undefined。
+    const live = { running: runningNow === true, queue: [], hasMore: false, pendingSubmissions: [], inbox: undefined }
     const face = {
       sessionId: id,
       live,
       getSnapshot: () => live,
+      // 0.1.5 起宿主把收件箱做成耐久投影（{'next-turn','next-step'}），随页面 baseline 下发。
+      projections: {
+        faceOf: (key) => ({ getSnapshot: () => (key === 'inbox' ? live.inbox : undefined) }),
+      },
       cancel: async () => { calls.cancels.push(id); live.running = false; return { ok: true } },
       updateQueue: async (itemId, action) => {
         calls.queueRemoves.push([itemId, action])
         if (action && action.kind === 'remove' && overrides.stubbornQueue !== true) {
           live.queue = live.queue.filter((item) => item.id !== itemId)
+          // 宿主删除同样落在收件箱投影上，删除后投影必须能被确认清空。
+          if (live.inbox && typeof live.inbox === 'object') {
+            live.inbox = {
+              'next-turn': (live.inbox['next-turn'] || []).filter((m) => m.id !== itemId),
+              'next-step': (live.inbox['next-step'] || []).filter((m) => m.id !== itemId),
+            }
+          }
         }
         return { ok: true }
       },
@@ -239,7 +252,11 @@ function makeServices(overrides = {}) {
       makeBinding(childId, false)
       return childId
     },
-    open: (id) => { calls.opens.push(id) },
+    open: (id) => {
+      calls.opens.push(id)
+      // 真机顺序：open 触发 React 提交（子会话的桥先挂载），插件的 arm 在其后。
+      if (typeof overrides.onOpen === 'function') overrides.onOpen(id)
+    },
   }
   const workspaces = {
     list: { getSnapshot: () => ({ items: [{ workspaceId: 'w1', sessionIds: Object.keys(summaries) }] }) },
@@ -308,10 +325,12 @@ function makeServices(overrides = {}) {
     settings, settingsCalls, setSettingsValue, setSettingsDescribeError, setSettingsUpdateError,
     // 槽位存在性：null = 全部存在（默认）；数组 = 只认这些槽名（模拟旧核心没有 main.conversation）。
     slotsAvailable: Array.isArray(overrides.slotsAvailable) ? overrides.slotsAvailable : null }
-  state.seed = (id, { running = false, title = 'Title', queue = [] } = {}) => {
+  state.seed = (id, { running = false, title = 'Title', queue = [], inbox = undefined, pendingSubmissions = [] } = {}) => {
     summaries[id] = { id, title, displayTitle: title }
     const face = makeBinding(id, running)
     face.live.queue = queue
+    face.live.pendingSubmissions = pendingSubmissions
+    if (inbox !== undefined) face.live.inbox = inbox
     bindings[id] = { sessionId: id, session: face }
   }
   state.setRunning = (id, running) => {
@@ -1321,6 +1340,174 @@ test('pending 输入：子会话若继承了残留，打开后立刻清掉', asy
     services.calls.queueRemoves.some(([id, action]) => id === 'q-inherited' && action.kind === 'remove'),
     '继承来的残留被清掉，不会替用户执行',
   )
+  assert.ok(window.__dsew.childPendingCleared >= 1)
+})
+
+// --- 未落定输入：真机形态（0.1.5 收件箱是耐久投影 + fork 种子会带出插入事件） --------------
+//
+// 真机日志（会话日志即耐久真相）证明了两件事，旧守卫都看不到：
+//   1) `sessions.fork` 的种子 = 父会话 [0, cut)，cut 从边界 turn/end 一路走到下一个
+//      turn/start；被回退那条消息的 `agent/inbox/spliced`(insert) 正好排在它的 turn/start
+//      之前、claim 之后 → 子会话收件箱投影里有一条继承来的 pending 旧消息，用户再发消息时
+//      agent 先执行它，新消息排队（session-8c693ecf / 1aacc7bb / 716995b9 都能对上）。
+//   2) 宿主的 queue 帧只在「有活跃 agent 且 session 匹配」时广播，inbox 投影帧才无条件广播；
+//      刚按下回车的输入还可能只存在于本地回声 pendingSubmissions（「等待队列」UI 就是它）。
+
+/** 宿主 inbox 投影值：`{'next-turn','next-step'}`，条目即待执行输入。 */
+function inboxOf(entries) {
+  return {
+    'next-turn': entries.map(([id, text]) => ({ id, content: [{ type: 'text', text }] })),
+    'next-step': [],
+  }
+}
+
+test('pending 输入：queue 镜像为空但 inbox 投影有排队项时，回退前也要清掉', async () => {
+  const services = makeServices({ chatOf: plainRewindChat })
+  services.seed('s1', { title: 'T', inbox: inboxOf([['m-proj', '还没落盘的提问']]) })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.ok(
+    services.calls.queueRemoves.some(([id, action]) => id === 'm-proj' && action.kind === 'remove'),
+    '宿主投影里的排队项必须被删掉（queue 镜像没广播到也不能漏）',
+  )
+  assert.equal(services.calls.forks.length, 1)
+  assert.match(String(window.__dsew.pendingSource || ''), /inbox-projection/)
+})
+
+test('pending 输入：未对账的本地回声也算未落定，不许 fork', async () => {
+  const services = makeServices({ chatOf: plainRewindChat })
+  services.seed('s1', {
+    title: 'T',
+    pendingSubmissions: [{ requestId: 'r-echo', placement: 'queued', text: '刚按下回车' }],
+  })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, false, '回声还在飞的时候不能 fork')
+  assert.equal(result.code, 'pending-input')
+  assert.equal(services.calls.forks.length, 0, '不得 fork 出带未落定输入的分支')
+  assert.match(String(window.__dsew.pendingSource || ''), /echo/)
+})
+
+test('pending 输入：子会话投影里继承来的旧消息被清掉（不替用户重复执行）', async () => {
+  const services = makeServices({
+    chatOf: plainRewindChat,
+    // 真机形态：种子把被回退那条消息的 inbox 插入带进子会话 —— 投影里有、queue 镜像里没有。
+    onForked: (childId, binding) => { binding.session.live.inbox = inboxOf([['m-inherited', '继续']]) },
+  })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.ok(
+    services.calls.queueRemoves.some(([id, action]) => id === 'm-inherited' && action.kind === 'remove'),
+    '继承来的 pending 必须被删掉，否则用户再发消息时先执行它、新消息只能排队',
+  )
+  assert.ok(window.__dsew.childPendingCleared >= 1)
+  assert.match(String(window.__dsew.childPendingSource || ''), /inbox-projection/)
+})
+
+test('还原时序：子会话先挂载、还原晚武装时，文本仍回到输入框（真机 open 早于 arm 的顺序）', async () => {
+  let childEnv = null
+  const services = makeServices({
+    chatOf: plainRewindChat,
+    onOpen: (id) => { childEnv = mount({ services, sessionId: id, chat: chatOf([]), draft: '' }) },
+  })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.ok(childEnv, '子会话应当在 open 时就挂载（真机顺序）')
+  await new Promise((r) => setTimeout(r, 250))
+  childEnv.rerender()
+  const setDraftCalls = childEnv.inputs.filter(([op]) => op === 'setDraft')
+  assert.equal(setDraftCalls.length, 1, '晚武装也要把被撤销的提问写回输入框')
+  assert.equal(setDraftCalls[0][1], 'q2')
+  assert.equal(window.__dsew.pendingApplied, 1)
+})
+
+test('还原：同一次页面里第二次回退也能把提问写回输入框（不再被一次性 ref 卡住）', async () => {
+  const services = makeServices({ chatOf: plainRewindChat })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const first = await internals()._module.doRewind('s1', target)
+  assert.equal(first.ok, true)
+  const env = mount({ services, sessionId: first.childId, chat: chatOf([]), draft: '' })
+  await new Promise((r) => setTimeout(r, 150))
+  env.rerender()
+  assert.equal(env.inputs.filter(([op]) => op === 'setDraft').length, 1, '第一次回退回填一次')
+  // 第二次回退：同一个桥组件实例被复用（真机会话区按 sessionId keyed，但插件不能依赖它）。
+  const second = await internals()._module.doRewind('s1', target)
+  assert.equal(second.ok, true)
+  env.sessionId = second.childId
+  env.chat = chatOf([])
+  env.draft = ''
+  env.rerender()
+  await new Promise((r) => setTimeout(r, 150))
+  env.rerender()
+  assert.equal(
+    env.inputs.filter(([op]) => op === 'setDraft').length,
+    2,
+    '第二次回退同样要把提问写回输入框',
+  )
+})
+
+test('pending 输入：核心没有 inbox 投影时降级走 queue 镜像（不报错、诊断可见）', async () => {
+  const services = makeServices({ chatOf: plainRewindChat })
+  services.seed('s1', { title: 'T', queue: [{ id: 'q-old-core', placement: 'queued' }] })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.ok(services.calls.queueRemoves.some(([id]) => id === 'q-old-core'), '旧核心仍走 queue 镜像')
+  assert.match(String(window.__dsew.pendingSource || ''), /queue-mirror/)
+})
+
+test('还原：武装晚于挂载（open→arm 的极端顺序）时，模块级通知补跑一次回填', async () => {
+  const services = makeServices()
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  // 桥先挂载（此时 __pending 为 null，挂载 effect 什么也看不到）……
+  const env = mount({ services, sessionId: 's1', chat: chatOf([]), draft: '' })
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(env.inputs.filter(([op]) => op === 'setDraft').length, 0)
+  // ……武装才到（真机：open 早于 arm）。
+  internals()._module.armPendingRestore('s1', '晚到的提问', [])
+  await new Promise((r) => setTimeout(r, 150))
+  env.rerender()
+  const calls = env.inputs.filter(([op]) => op === 'setDraft')
+  assert.equal(calls.length, 1, '晚武装必须由通知补跑，不能永久错过')
+  assert.equal(calls[0][1], '晚到的提问')
+  assert.equal(window.__dsew.pendingLateArm, 1)
+})
+
+test('真机场景合体：子会话继承旧提问 + 子会话先挂载 → 继承项清掉且问题照样回到输入框', async () => {
+  let childEnv = null
+  const services = makeServices({
+    chatOf: plainRewindChat,
+    onForked: (childId, binding) => { binding.session.live.inbox = inboxOf([['m-inherited', 'q2']]) },
+    onOpen: (id) => { childEnv = mount({ services, sessionId: id, chat: chatOf([]), draft: '' }) },
+  })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.ok(
+    services.calls.queueRemoves.some(([id, action]) => id === 'm-inherited' && action.kind === 'remove'),
+    '继承项必须清掉（否则重发时先执行它、新消息排队）',
+  )
+  await new Promise((r) => setTimeout(r, 250))
+  childEnv.rerender()
+  const setDraftCalls = childEnv.inputs.filter(([op]) => op === 'setDraft')
+  assert.equal(setDraftCalls.length, 1, '清理子会话的同时，提问仍要回到输入框')
+  assert.equal(setDraftCalls[0][1], 'q2')
+  assert.equal(window.__dsew.pendingApplied, 1)
   assert.ok(window.__dsew.childPendingCleared >= 1)
 })
 

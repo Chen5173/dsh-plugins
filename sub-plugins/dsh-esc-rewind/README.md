@@ -15,7 +15,8 @@
 | 自然正常结束的回合 | **不可回退**：尾部是 settled assistant，`Esc` 不接管（防误删）；**也不会弹「再按 Esc 回退本轮」提示**（该提示只认宿主耐久停止证据，见下） |
 | 「再按 Esc 回退本轮」提示的时机 | 仅在**本会话内出现过 running→idle** **且该轮有宿主耐久停止证据**时出现：尾部 assistant 带 `interrupted`，或该轮 `turn/end` 为 `aborted`/`user`（覆盖「尚无内容即被停」）。判据在该轮**定型后**结算，因此提示可能晚于停止动作一两帧；自然结束（settled / `completed` 等）永不提示，切进历史上被中断/失败的会话也不提示 |
 | 编辑了输入框草稿 | 解除预备态：再按 `Esc` 不回退（防覆盖你正在写的新内容） |
-| 回退时该会话还有**没落定的排队消息** | 先把排队项清掉并**确认清空**再 fork；**清不掉就放弃本次回退**并提示「该会话还有没发出的消息在排队…」——宿主的 fork 用事件种子重建子会话，父会话里那条刚发出、还没落盘的排队输入会被一起复制过去，子会话会先执行它而用户新发的消息只能排队（真机复现过，见下） |
+| 回退时该会话还有**没落定的排队消息** | 先把未落定输入清掉并**确认清空**再 fork；**清不掉就放弃本次回退**并提示「该会话还有没发出的消息在排队…」——宿主的 fork 用事件种子重建子会话，父会话里那条刚发出、还没落盘的排队输入会被一起复制过去，子会话会先执行它而用户新发的消息只能排队（真机复现过，见下）。未落定 = 宿主 `inbox` 投影 ∪ queue 镜像 ∪ 还没对账的本地回声（刚按下回车那一瞬；「等待队列」UI 也是拿它渲染的），三个来源缺一不可 |
+| 分支**继承来的旧提问**（0.1.5 起） | 分支打开后再清一次它自己的收件箱：宿主的 fork 种子 = 父会话 `[0, cut)`，`cut` 从边界 `turn/end` 一路走到**下一个 `turn/start`**，于是被回退那条消息的 `agent/inbox/spliced` 插入事件必然被复制进分支（它的 claim 事件落在切点之外）⇒ 分支收件箱里有一条继承来的 pending 旧消息。清不掉这条，用户重发时 agent 会先执行它、新消息只能排队（真机「一条在执行、一条在等待」的成因） |
 | 有新发送 / 切换会话 | 解除预备态（按会话派生，天然失效） |
 | 弹层/菜单/输入补全打开 | 不接管 `Esc`（让给核心“关闭弹层”），先关弹层再谈停止/回退 |
 | `/rewind` 命令 | 打开**原生命令选择器**（popupSelect）：**首次**打开时 `session.loadThrough(0)` **一次性把全部历史读进客户端**（shell 原生显示“加载中”），随后列出**每一个**“用户提问回合”，**最新在最上**，行 = 序号+截断文本+相对时间；读完后原生支持 `↑/↓` 逐条、直接打字过滤搜索、超长自动滚动——**更早内容即使从未在聊天里渲染也能选到**，不是逐页动态追加 |
@@ -59,7 +60,8 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 ## 版本要求
 
 - **命令描述契约（0.1.5-rc.2 起）**：`CommandContribution.description` 由**字符串**改成 **`() => string`**（核心会调用它）；旧核心把值当 React 子节点渲染，函数会直接抛 `Functions are not valid as a React child`。两个契约无法用同一个值同时满足，所以本插件用**能力探测**（0.1.5 起才有的 `main.conversation` 槽位，或槽位新标准 props `usePanelInfo`/`useResource`，任一出现即判新契约）在**读取时**决定形态（`description` 写成 getter），**不读版本号**；结果见 `__dsew.commandDescShape`。
-- **未落定输入守卫（0.1.5-rc.2 起）**：0.1.5 把 agent 收件箱写进事件日志（`agent/inbox/spliced`），而 fork 用事件种子重建子会话，于是「父会话里刚发出、尚未落盘」的排队输入会被一并复制。回退因此在 fork 前调用 `settlePendingInputs`：删掉排队项并**等到快照确认没有排队项**才继续；清不掉则返回 `code:'pending-input'` 放弃本次回退。
+- **未落定输入守卫（0.1.5-rc.2 起）**：0.1.5 把 agent 收件箱写进事件日志（`agent/inbox/spliced`）并做成**耐久投影**（`inbox`），而 fork 用事件种子重建子会话，于是两处都会把旧输入带进新分支：①「父会话里刚发出、尚未落盘」的排队输入；②**被回退那条消息自己的插入事件**（它排在自身 `turn/start` 之前，而 fork 的切点正是那个 `turn/start`）。回退因此在两处清：fork 前 `settlePendingInputs(parent)`（宿主 `inbox` 投影 ∪ queue 镜像 ∪ 未对账本地回声，删掉并**等确认空**，清不掉则返回 `code:'pending-input'` 放弃本次回退），open 分支后 `settlePendingInputs(child)` 清掉继承项。诊断：`__dsew.pendingSource / childPendingSource / pendingCleared / childPendingCleared / pendingBlocked / pendingConfirmMs / childPendingConfirmMs / inboxProjectionSeen`。
+- **还原时机的确定性（0.1.5-rc.2 起暴露）**：还原必须在 `sessions.open(childId)` **之前**武装（open 会立刻触发 React 提交，子会话的桥先挂载，那一刻读到的 `__pending` 还是 null；旧实现在 open 之后、且在一次可能 sleep 的 await 之后才武装 ⇒ 真机「回退后文字没回到输入框」）。另外挂载 effect 只按 `[sessionId, draft, inputActions]` 重跑，武装晚到时不会补跑 ⇒ 补了模块级武装通知（同 `__toastListeners` 套路）让已挂载的桥补跑一次；「一次回退只回填一次」用「已回填的会话 id」表达，而不是一次性布尔 ref（旧写法会让同页第二次回退永不回填）。诊断：`__dsew.pendingStaged / pendingApplied / pendingLateArm / pendingDropped`。
 
 - **最低**：核心 ≥ **0.1.2-rc.1**（本插件一直支持的世代）。缺能力时一律**降级而不是报错**，且把探测结果写进 `window.__dsew`。
 - **核心 ≥ 0.1.5-rc.2**：核心把「图片草稿」泛化为「附件草稿」并改名——`conversation.createDraftImages(files)` → `createDrafts(sessionId, files)`、`releaseDraftImage(id)` → `releaseDraftAttachment(id)`、`inputActions.addImages(ids)` → `addAttachments(ids)`。本插件**不读版本号**，按能力探测优先新名、回退旧名，两代同一份代码都可用；探测结果见 `__dsew.draftCreateApi` / `__dsew.draftRestoreApi`（`'createDrafts'` / `'createDraftImages'` / `null`）。
@@ -90,7 +92,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 ## 开发 / 验证
 
 ```bash
-node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（60 条，含删除模式、提示时机、草稿附件双代桥接、命令描述契约与未落定输入守卫用例）
+node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（67 条，含删除模式、提示时机、草稿附件双代桥接、命令描述契约、未落定输入三来源与还原时序用例）
 node --check sub-plugins/dsh-esc-rewind/src/client.js
 node --check sub-plugins/dsh-esc-rewind/src/index.js
 ```
