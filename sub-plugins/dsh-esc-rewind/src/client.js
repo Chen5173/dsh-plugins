@@ -26,7 +26,8 @@
 //  a branch (like the core Branch button), archive the original (the row-menu
 //  Archive action keeps the log recoverable). The only client services used:
 //  sessions (binding/fork/open/create/loadOlder/loadThrough), workspaces
-//  (archiveSession), conversation (cancel/updateQueue/createDraftImages),
+//  (archiveSession), conversation (cancel/updateQueue/createDrafts — pre-0.1.5
+//  core spells the last one createDraftImages; both are probed by capability),
 //  uiConversation (per-session node snapshots), commandUi (the '/'-menu).
 //
 // Why a document capture listener: the composer is a Lexical contenteditable
@@ -135,6 +136,9 @@ window.__ModuleLoader__.load({
     /** Locale helpers (wired lazily, like the sibling plugins). */
     var __locale = null
 
+    // 核心世代标志（命令描述契约用）：'string' = 旧核心当值渲染，'function' = 新核心会调用。
+    var __commandDescShape = 'string'
+
     var __diag = {
       loaded: true,
       applied: false,
@@ -152,6 +156,18 @@ window.__ModuleLoader__.load({
       lastAction: null,
       rewindAvail: null,
       imageFail: null,
+      // 草稿附件桥接探测结果：createDrafts（新）/createDraftImages（旧）/null（都缺）；
+      // addAttachments（新）/addImages（旧）/null（都缺）。真机排障时一眼看出核心世代。
+      draftCreateApi: null,
+      draftRestoreApi: null,
+      // 命令描述契约形态：0.1.5-rc.2 起核心把 `description` 由字符串改成 `() => string`。
+      // 值 = 'function'（新契约，核心会调用） / 'string'（旧契约，核心当值渲染）。
+      commandDescShape: 'string',
+      // 回退前后的「未落定输入」处理：清掉的排队项数 / 是否因清不掉而放弃回退 /
+      // 子会话打开后清掉的继承残留数（见 settlePendingInputs）。
+      pendingCleared: 0,
+      pendingBlocked: false,
+      childPendingCleared: 0,
       titleFail: null,
       archiveFail: null,
       deleteFail: null,
@@ -178,6 +194,7 @@ window.__ModuleLoader__.load({
       'rewind.image.only': '（图片消息）',
       'rewind.round': '第 {n} 轮',
       'rewind.none': '没有可回退的历史回合',
+      'rewind.pending': '该会话还有没发出的消息在排队，等它落定后再回退（避免把它复制进新分支）',
       'esc.hint.delete': '已停止 · 再按 Esc 将删除本轮并重来（不可恢复）',
       'dispose.title.archive': '回退后归档旧会话（可恢复）',
       'dispose.title.delete': '回退后删除旧会话（不可恢复）',
@@ -198,6 +215,7 @@ window.__ModuleLoader__.load({
       'rewind.image.only': '(image message)',
       'rewind.round': 'Turn {n}',
       'rewind.none': 'No rewindable exchanges in this session',
+      'rewind.pending': 'A message is still queued in this session — rewind once it lands (avoids copying it into the new branch)',
       'esc.hint.delete': 'Stopped · press Esc again to DELETE this turn and restart (irreversible)',
       'dispose.title.archive': 'After rewinding, archive the old session (recoverable)',
       'dispose.title.delete': 'After rewinding, DELETE the old session (irreversible)',
@@ -325,6 +343,76 @@ window.__ModuleLoader__.load({
         }
       }
       return refs
+    }
+
+    // --- draft-attachment bridge (shape-tolerant across core generations) -----
+
+    /**
+     * 创建浏览器侧草稿附件，返回其 id 数组。
+     * - 0.1.5-rc.2 起核心把「图片草稿」泛化为「附件草稿」，签名变为
+     *   `createDrafts(sessionId, files)`；旧版是 `createDraftImages(files)`。
+     *   两代都返回 `[{ id }]`，所以只按能力探测选名字，不按版本号分支。
+     * - 参数类型：conversation -- object|undefined：注入的 conversation 服务；
+     *   sessionId -- string：目标会话（新签名需要）；files -- File[]
+     * - 返回值：string[]｜null —— id 数组；两代 API 都不可用时返回 null
+     */
+    function createDraftAttachments(conversation, sessionId, files) {
+      if (!conversation || !Array.isArray(files) || files.length === 0) return null
+      __diag.draftCreateApi = null
+      try {
+        if (typeof conversation.createDrafts === 'function' && sessionId) {
+          __diag.draftCreateApi = 'createDrafts'
+          const drafts = conversation.createDrafts(sessionId, files)
+          return Array.isArray(drafts) ? drafts.map((draft) => draft && draft.id).filter(Boolean) : []
+        }
+        if (typeof conversation.createDraftImages === 'function') {
+          __diag.draftCreateApi = 'createDraftImages'
+          const drafts = conversation.createDraftImages(files)
+          return Array.isArray(drafts) ? drafts.map((draft) => draft && draft.id).filter(Boolean) : []
+        }
+      } catch (error) {
+        __diag.imageFail = (error && error.message) ? error.message : String(error)
+      }
+      return null
+    }
+
+    /**
+     * 释放未被采用的草稿附件（回退失败时不留垃圾草稿）。
+     * - 新名 `releaseDraftAttachment(id)`（0.1.5-rc.2 起），旧名 `releaseDraftImage(id)`。
+     * - 参数类型：conversation -- object|undefined；id -- string
+     * - 返回值：boolean —— true 表示已调用某个世代的释放 API
+     */
+    function releaseDraftAttachment(conversation, id) {
+      if (!conversation || !id) return false
+      if (typeof conversation.releaseDraftAttachment === 'function') {
+        conversation.releaseDraftAttachment(id)
+        return true
+      }
+      if (typeof conversation.releaseDraftImage === 'function') {
+        conversation.releaseDraftImage(id)
+        return true
+      }
+      return false
+    }
+
+    /**
+     * 把草稿附件 id 交回编辑器（回退后恢复原提问里的图片）。
+     * - 新名 `addAttachments(ids)`（0.1.5-rc.2 起），旧名 `addImages(ids)`。
+     * - 参数类型：actions -- object|undefined：槽位注入的 inputActions；ids -- string[]
+     * - 返回值：boolean —— true 表示已交给某个世代的 API
+     */
+    function restoreDraftAttachments(actions, ids) {
+      if (!actions || !Array.isArray(ids) || ids.length === 0) return false
+      if (typeof actions.addAttachments === 'function') {
+        __diag.draftRestoreApi = 'addAttachments'
+        try { actions.addAttachments(ids); return true } catch { return false }
+      }
+      if (typeof actions.addImages === 'function') {
+        __diag.draftRestoreApi = 'addImages'
+        try { actions.addImages(ids); return true } catch { return false }
+      }
+      __diag.draftRestoreApi = null
+      return false
     }
 
     /** Ordered node list from a 'chat' view snapshot (tolerant of shapes). */
@@ -805,6 +893,56 @@ window.__ModuleLoader__.load({
       } catch { /* best effort */ }
     }
 
+    /** 读取一个会话的当前快照（拿不到就返回 null）。 */
+    function sessionSnapshotOf(sessionId) {
+      try {
+        const binding = __svc.sessions && __svc.sessions.binding(sessionId)
+        if (!binding || !binding.session) return null
+        if (typeof binding.session.getSnapshot !== 'function') return null
+        return binding.session.getSnapshot() || null
+      } catch { return null }
+    }
+
+    /**
+     * 把会话的「未落定输入」清干净并**确认**清空——回退前必须做，否则 fork 的
+     * 事件种子会把这条 pending 输入一起复制进子会话（实测：子会话会执行它，
+     * 而用户新发的那条排队等待，看起来就像同一条消息被执行了又被挂起）。
+     *
+     * 为什么必须「确认」而不是「发一次删除就算」：删除要作为事件落进宿主日志，
+     * 且必须落在 fork 切点**之前**，子会话重放种子时才看不到这条插入。
+     *
+     * - 参数类型：sessionId -- string；options.budgetMs -- 有界等待预算（默认 1500ms）
+     * - 返回值：{ cleared, remaining, empty } —— cleared=已请求删除的条数；
+     *   remaining=预算用尽后仍未清空的条数；empty=是否已确认空
+     */
+    async function settlePendingInputs(sessionId, options) {
+      const budgetMs = (options && typeof options.budgetMs === 'number') ? options.budgetMs : 1500
+      const stepMs = 60
+      const deadline = Date.now() + budgetMs
+      let cleared = 0
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+      for (;;) {
+        const snapshot = sessionSnapshotOf(sessionId)
+        const queue = snapshot && Array.isArray(snapshot.queue) ? snapshot.queue.filter(Boolean) : []
+        if (queue.length === 0) return { cleared, remaining: 0, empty: true }
+        for (const item of queue) {
+          try {
+            const binding = __svc.sessions && __svc.sessions.binding(sessionId)
+            if (binding && binding.session) {
+              await binding.session.updateQueue(item.id, { kind: 'remove' })
+              cleared += 1
+            }
+          } catch { /* 单条失败不阻断：下一轮重试 */ }
+        }
+        if (Date.now() >= deadline) {
+          const after = sessionSnapshotOf(sessionId)
+          const left = after && Array.isArray(after.queue) ? after.queue.filter(Boolean).length : 0
+          return { cleared, remaining: left, empty: left === 0 }
+        }
+        await sleep(stepMs)
+      }
+    }
+
     // --- the rewind engine ----------------------------------------------------
 
     /**
@@ -824,17 +962,29 @@ window.__ModuleLoader__.load({
         if (!binding) return { ok: false, code: 'no-binding' }
         const idle = await ensureIdle(sessionId)
         if (!idle) return { ok: false, code: 'stop-timeout' }
-        await clearQueue(sessionId)
+        // 未落定输入必须先清掉并**确认**为空再 fork：宿主的 fork 用事件种子重建子
+        // 会话，父会话里那条刚发出、还没落盘的排队输入会被一并复制过去，于是子会话
+        // 会先执行它，而用户此刻新发的消息只能排队（真机实测的「一条在执行、一条在
+        // 等待、内容相同」）。清不掉就放弃本次回退，宁可不回退也不复制一份输入。
+        const settled = await settlePendingInputs(sessionId)
+        __diag.pendingCleared = settled.cleared
+        if (!settled.empty) {
+          __diag.pendingBlocked = true
+          __diag.lastGate = 'pending-input'
+          publishToast(__t('rewind.pending'))
+          return { ok: false, code: 'pending-input' }
+        }
+        __diag.pendingBlocked = false
 
         // Best-effort image restore (D11): durable refs -> bytes -> draft files.
         let imageDraftIds = []
         const imageRefs = exchange && Array.isArray(exchange.imageRefs) ? exchange.imageRefs : []
         if (imageRefs.length > 0 && __svc.conversation
-          && typeof __svc.conversation.createDraftImages === 'function'
+          && (typeof __svc.conversation.createDrafts === 'function'
+            || typeof __svc.conversation.createDraftImages === 'function')
           && typeof File !== 'undefined') {
-          const created = []
+          const files = []
           try {
-            const files = []
             for (const ref of imageRefs.slice(0, MAX_IMAGES)) {
               if (!ref || !ref.attachmentId) continue
               const result = await binding.session.readAttachment(ref.attachmentId).catch(() => null)
@@ -844,14 +994,10 @@ window.__ModuleLoader__.load({
               const name = attachment.name || imageFileName(ref.mediaType || attachment.mediaType)
               files.push(new File([data], name, { type: attachment.mediaType || 'image/png' }))
             }
-            if (files.length > 0) {
-              const drafts = __svc.conversation.createDraftImages(files)
-              for (const draft of drafts) created.push(draft.id)
-            }
           } catch (error) {
             __diag.imageFail = (error && error.message) ? error.message : String(error)
           }
-          imageDraftIds = created
+          imageDraftIds = createDraftAttachments(__svc.conversation, sessionId, files) || []
         }
 
         try {
@@ -885,6 +1031,10 @@ window.__ModuleLoader__.load({
           // first means the archive/delete only affects the original (never
           // clears the current selection out from under the user).
           sessions.open(childId)
+          // 兜底：万一父会话的 pending 输入还是在切点之前挤进了种子，打开分支后
+          // 立刻清掉它——否则子会话会替用户把那条旧消息执行掉。
+          const childSettled = await settlePendingInputs(childId, { budgetMs: 600 })
+          __diag.childPendingCleared = childSettled.cleared
           armPendingRestore(childId, (exchange && exchange.text) || '', imageDraftIds)
           // Dispose the original AFTER the child exists (D8) and — in delete
           // mode — only after the branch is confirmed open & usable (D7). A
@@ -901,9 +1051,8 @@ window.__ModuleLoader__.load({
           return { ok: true, childId }
         } catch (error) {
           // Release drafts we created but never delivered.
-          if (imageDraftIds.length > 0 && __svc.conversation
-            && typeof __svc.conversation.releaseDraftImage === 'function') {
-            try { for (const id of imageDraftIds) __svc.conversation.releaseDraftImage(id) } catch { /* noop */ }
+          if (imageDraftIds.length > 0 && __svc.conversation) {
+            try { for (const id of imageDraftIds) releaseDraftAttachment(__svc.conversation, id) } catch { /* noop */ }
           }
           throw error
         }
@@ -1119,13 +1268,45 @@ window.__ModuleLoader__.load({
       return __deleteMode === true
     }
 
+    // --- 核心世代探测（命令描述契约） ----------------------------------------
+
+    /**
+     * 标记「核心 ≥ 0.1.5-rc.2 的命令契约（description 为函数）」。
+     * - 参数类型：无（幂等；重复调用只覆盖同一个标志）
+     * - 返回值：无
+     */
+    function markModernCore() {
+      __commandDescShape = 'function'
+      __diag.commandDescShape = 'function'
+    }
+
+    /**
+     * 探测核心世代。**不读版本号**，只用 0.1.5-rc.2 起才存在的两个能力信号：
+     * 1) 新增的 `main.conversation` 槽位注册成功；
+     * 2) 槽位标准 props 里出现 `useResource` / `usePanelInfo`（由 EscBridge 上报）。
+     * 任一成立即判定新契约。信号都缺席时保持旧契约（安全默认：旧核心把
+     * description 当值渲染，函数会抛 "Functions are not valid as a React child"）。
+     * - 参数类型：ctx -- 客户端 cordis 上下文
+     * - 返回值：无
+     */
+    function probeCoreGeneration(ctx) {
+      try {
+        ctx.slots.inject('main.conversation', () => markModernCore())
+      } catch { /* 旧核心没有这个槽位：保持旧契约 */ }
+    }
+
     // --- /rewind contribution (ctx.commandUi popupSelect, full history) -------
 
     function registerRewindContribution(commandUi) {
       try {
         const disposer = commandUi.register({
           name: REWIND_COMMAND,
-          description: __t('rewind.cmd.desc'),
+          // 契约双代兼容：旧核心读这个属性当字符串渲染，新核心读到的值必须是函数。
+          // 用 getter 在「读取时」决定形态，所以探测晚于注册也没关系。
+          get description() {
+            if (__commandDescShape === 'function') return () => __t('rewind.cmd.desc')
+            return __t('rewind.cmd.desc')
+          },
           // Availability is decoupled from the loaded history window: a normal
           // (non-subagent, non-blank) session can always open /rewind, which
           // reads the whole history before showing the options.
@@ -1192,8 +1373,10 @@ window.__ModuleLoader__.load({
 
     // --- the bridge component -------------------------------------------------
 
-    function EscBridge({ sessionId, useSession, useConversation, useInput, inputActions, t: seatT }) {
+    function EscBridge({ sessionId, useSession, useConversation, useInput, inputActions, t: seatT, usePanelInfo, useResource }) {
       const t = typeof seatT === 'function' ? seatT : __t
+      // 世代探测的第二信号：0.1.5-rc.2 起槽位会额外下发这两个标准 props。
+      if (typeof usePanelInfo === 'function' || typeof useResource === 'function') markModernCore()
 
       const session = useSession ? useSession((s) => s) : undefined
       const running = !!(session && session.running)
@@ -1410,7 +1593,7 @@ window.__ModuleLoader__.load({
             if (still.text) inputActions.setDraft(still.text)
           } catch { /* input not ready yet; drop rather than loop */ }
           try {
-            if (still.imageDraftIds && still.imageDraftIds.length) inputActions.addImages(still.imageDraftIds)
+            if (still.imageDraftIds && still.imageDraftIds.length) restoreDraftAttachments(inputActions, still.imageDraftIds)
           } catch { /* images are best-effort */ }
           __pending = null
           __diag.pendingApplied += 1
@@ -1604,6 +1787,9 @@ window.__ModuleLoader__.load({
         ctx.effect(() => () => { for (const d of disposers) { try { d() } catch { /* noop */ } } })
       } catch { /* effect may be absent in the harness */ }
 
+      // 命令描述契约的世代探测（不读版本号，见 probeCoreGeneration）。
+      probeCoreGeneration(ctx)
+
       // Register the conversation overlay bridge once the slot exists.
       ctx.slots.inject(SLOT, () => ctx.slots.register({
         name: SLOT,
@@ -1699,6 +1885,8 @@ window.__ModuleLoader__.load({
           tailUnsettled, decideEsc, snippet, timeLabel,
           _module: {
             publishToast, doRewind, issueStop, ensureIdle, clearQueue,
+            settlePendingInputs, probeCoreGeneration, markModernCore, sessionSnapshotOf,
+            createDraftAttachments, releaseDraftAttachment, restoreDraftAttachments,
             exchangesOfSession, isSubagentSession, sessionFacts,
             refreshHistory, knownExchangesOf, resetHistoryCache,
             loadDeleteMode, setDeleteMode, deleteOldSession, deleteModeOn,

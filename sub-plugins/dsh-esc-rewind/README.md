@@ -2,7 +2,7 @@
 
 给 DSH Web 会话加「停止 + 回退重来」：`Esc` 一次=停止当前生成；再按一次 `Esc` = 把刚被停的**整个最后一轮**撤销重来；另有 `/rewind` 命令，可从**历史任意一轮**重新开始。重来一律走 DSH 官方机制——**fork 分支 + 打开分支 + 还原问题到输入框**；旧会话如何处置由一个**会话头开关**控制：默认**归档**（隐藏出主列表、日志保留可恢复），可切到**删除**（经宿主半真删磁盘日志，不可恢复）。
 
-客户端为主（`sessions` binding/fork/open/create、`workspaces` archiveSession、`conversation` cancel/updateQueue/createDraftImages、`uiConversation` 节点快照、`commandUi` popupSelect 贡献）；**删除模式额外带一个宿主半**（`src/index.js`）：注册 settings 命名空间 `esc-rewind`（字段 `deleteOldOnRewind`，默认 `false`）+ 自建删除端点 `/__esc-rewind/session/delete` 与模型工具，不依赖任何第三方删除实现。架构上与核心“Branch(分叉)/Archive(归档)”行菜单同源，不碰 append-only 日志（删除模式是用户显式开启后的真删）。
+客户端为主（`sessions` binding/fork/open/create、`workspaces` archiveSession、`conversation` cancel/updateQueue/createDrafts（0.1.5-rc.2 起；旧核心为 `createDraftImages`，按能力探测兼容）、`uiConversation` 节点快照、`commandUi` popupSelect 贡献）；**删除模式额外带一个宿主半**（`src/index.js`）：注册 settings 命名空间 `esc-rewind`（字段 `deleteOldOnRewind`，默认 `false`）+ 自建删除端点 `/__esc-rewind/session/delete` 与模型工具，不依赖任何第三方删除实现。架构上与核心“Branch(分叉)/Archive(归档)”行菜单同源，不碰 append-only 日志（删除模式是用户显式开启后的真删）。
 
 ## 行为
 
@@ -15,6 +15,7 @@
 | 自然正常结束的回合 | **不可回退**：尾部是 settled assistant，`Esc` 不接管（防误删）；**也不会弹「再按 Esc 回退本轮」提示**（该提示只认宿主耐久停止证据，见下） |
 | 「再按 Esc 回退本轮」提示的时机 | 仅在**本会话内出现过 running→idle** **且该轮有宿主耐久停止证据**时出现：尾部 assistant 带 `interrupted`，或该轮 `turn/end` 为 `aborted`/`user`（覆盖「尚无内容即被停」）。判据在该轮**定型后**结算，因此提示可能晚于停止动作一两帧；自然结束（settled / `completed` 等）永不提示，切进历史上被中断/失败的会话也不提示 |
 | 编辑了输入框草稿 | 解除预备态：再按 `Esc` 不回退（防覆盖你正在写的新内容） |
+| 回退时该会话还有**没落定的排队消息** | 先把排队项清掉并**确认清空**再 fork；**清不掉就放弃本次回退**并提示「该会话还有没发出的消息在排队…」——宿主的 fork 用事件种子重建子会话，父会话里那条刚发出、还没落盘的排队输入会被一起复制过去，子会话会先执行它而用户新发的消息只能排队（真机复现过，见下） |
 | 有新发送 / 切换会话 | 解除预备态（按会话派生，天然失效） |
 | 弹层/菜单/输入补全打开 | 不接管 `Esc`（让给核心“关闭弹层”），先关弹层再谈停止/回退 |
 | `/rewind` 命令 | 打开**原生命令选择器**（popupSelect）：**首次**打开时 `session.loadThrough(0)` **一次性把全部历史读进客户端**（shell 原生显示“加载中”），随后列出**每一个**“用户提问回合”，**最新在最上**，行 = 序号+截断文本+相对时间；读完后原生支持 `↑/↓` 逐条、直接打字过滤搜索、超长自动滚动——**更早内容即使从未在聊天里渲染也能选到**，不是逐页动态追加 |
@@ -35,7 +36,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 1. **fork** 于目标回合的上一完整回合边界（与 Branch 按钮同款 `sessions.fork({atSeq})`，`increaseTitle:false` 后按需改回原标题）；
 2. **按开关处置原会话**：默认 `workspaces.archiveSession`（归档隐藏、日志保留可恢复）；开启删除后，fork+open 新分支确认可用才经宿主半真删（磁盘日志目录 + 投影缓存 + 工作区记账一并移除）；
-3. **open 分支**并还原问题文本（`inputActions.setDraft`，图片经 `readAttachment`→`createDraftImages`→`addImages` 尽力还原）。
+3. **open 分支**并还原问题文本（`inputActions.setDraft`，图片经 `readAttachment` → 草稿附件桥（新核心 `createDrafts`/`addAttachments`，旧核心 `createDraftImages`/`addImages`，按能力探测选名字）尽力还原）。
 
 **为什么删除不是默认**：客户端没有任何官方“删除会话”verb，真删必须宿主动盘（`src/index.js` 自建端点/工具），且**不可恢复**。因此开关默认关闭（归档=安全侧），只有用户显式打开才进入删除态；删除态下**无二次确认**（已接受误触即永久丢失的风险），防误触靠：默认关闭 + 图标红叉状态 + 切换/停止/执行的 toast 警示。
 
@@ -54,6 +55,15 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 - armed 是**派生状态**而非记忆状态：running（可停止）或尾部为 `interrupted` assistant（已停）且草稿为空；自然完成的 settled 尾部永不 armed。
 - 自动提示（工具栏 Stop 路径）**不读瞬态投影**：下降沿只记「候选回合」，由**宿主耐久证据**结算（尾部 `interrupted` 或该轮 `turn/end` 为 `aborted`/`user`）。原因见 `docs/knowledge/2026-09-08-dsh-esc-rewind.md` v7.2：运行中的 assistant 行在 `chat.legacy.nodes` 里不产出节点，下降沿那一帧的尾巴是本轮刚发出的 user 提问，用「尾部非 settled」判停止会在自然结束时误弹。
 - 按会话隔离：切换会话即失效；诊断快照 `window.__dsew`（计数/最后门控/删除模式位，不含消息内容），其中 `hintToasts`/`lastHint` 专用于排查「提示为什么弹/没弹」。
+
+## 版本要求
+
+- **命令描述契约（0.1.5-rc.2 起）**：`CommandContribution.description` 由**字符串**改成 **`() => string`**（核心会调用它）；旧核心把值当 React 子节点渲染，函数会直接抛 `Functions are not valid as a React child`。两个契约无法用同一个值同时满足，所以本插件用**能力探测**（0.1.5 起才有的 `main.conversation` 槽位，或槽位新标准 props `usePanelInfo`/`useResource`，任一出现即判新契约）在**读取时**决定形态（`description` 写成 getter），**不读版本号**；结果见 `__dsew.commandDescShape`。
+- **未落定输入守卫（0.1.5-rc.2 起）**：0.1.5 把 agent 收件箱写进事件日志（`agent/inbox/spliced`），而 fork 用事件种子重建子会话，于是「父会话里刚发出、尚未落盘」的排队输入会被一并复制。回退因此在 fork 前调用 `settlePendingInputs`：删掉排队项并**等到快照确认没有排队项**才继续；清不掉则返回 `code:'pending-input'` 放弃本次回退。
+
+- **最低**：核心 ≥ **0.1.2-rc.1**（本插件一直支持的世代）。缺能力时一律**降级而不是报错**，且把探测结果写进 `window.__dsew`。
+- **核心 ≥ 0.1.5-rc.2**：核心把「图片草稿」泛化为「附件草稿」并改名——`conversation.createDraftImages(files)` → `createDrafts(sessionId, files)`、`releaseDraftImage(id)` → `releaseDraftAttachment(id)`、`inputActions.addImages(ids)` → `addAttachments(ids)`。本插件**不读版本号**，按能力探测优先新名、回退旧名，两代同一份代码都可用；探测结果见 `__dsew.draftCreateApi` / `__dsew.draftRestoreApi`（`'createDrafts'` / `'createDraftImages'` / `null`）。
+- 其余用到的核心面（槽位 `conversation.input.overlay` / `conversation.session.header.actions`、`sessions.binding|fork|open|create`、`workspaces.archiveSession`、`commandUi.register`、`remote.settings`、`chat.legacy.nodes` 与 `chat.timeline`、宿主 `turn/end` 的 `aborted`/`user` 与 `assistant/message.interrupted`）在 0.1.2-rc.1 → 0.1.5-rc.2 之间**逐项核对无变化**（审计方法与结论见 `docs/knowledge/2026-09-12-dsh-015-core-api-compat-audit.md`）。
 
 ## 安装 / 启停
 
@@ -80,7 +90,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 ## 开发 / 验证
 
 ```bash
-node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（49 条，含删除模式与提示时机的真机形态用例）
+node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（60 条，含删除模式、提示时机、草稿附件双代桥接、命令描述契约与未落定输入守卫用例）
 node --check sub-plugins/dsh-esc-rewind/src/client.js
 node --check sub-plugins/dsh-esc-rewind/src/index.js
 ```

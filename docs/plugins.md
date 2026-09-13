@@ -50,6 +50,8 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **旧会话怎么处置**：会话头右侧一个图标切换（档案柜 = 归档，默认；红色带叉垃圾桶 = 真删）。这是**全局偏好**，持久化在 settings 命名空间 `esc-rewind.deleteOldOnRewind`（默认 `false`），设置页也能改。删除态**没有二次确认**，且删除失败会自动降级为归档而不是让回退失败。
 - **防误触**：自然正常结束的回合**不会** armed（尾部是 settled assistant 时 `Esc` 不接管）；编辑过输入框草稿、切换会话、有弹层/菜单打开时都会让路或失效。
 - **`/rewind` 性能语义**：同一页面内首次打开会 `session.loadThrough(0)` 一次性读全历史（之后直接读活会话），刷新后走 localStorage 缓存 + 水位判定，过期才合并重载。
+- **回退前会先清「未落定的排队消息」**：宿主的 fork 用事件种子重建子会话，父会话里刚发出、还没落盘的排队输入会被一起复制过去（子会话会先执行它、用户新发的只能排队）。所以回退前会删排队项并**等到快照确认清空**；清不掉就**放弃本次回退**并提示「该会话还有没发出的消息在排队…」。诊断：`__dsew.pendingCleared` / `pendingBlocked` / `childPendingCleared`。
+- **跨核心世代的契约**（都用能力探测，不读版本号）：草稿附件族（0.1.5 起 `createDrafts`/`releaseDraftAttachment`/`addAttachments`，旧名回退）；命令描述（0.1.5 起 `description` 由字符串变函数，用 getter 在读取时定型，见 `__dsew.commandDescShape`）。
 - **诊断**：宿主 `GET /__esc-rewind/status`（settings 段是否注册成功 + 当前删除模式）、删除走 `POST /__esc-rewind/session/delete`；客户端 `window.__dsew`（门控计数，不含消息内容）。
 - **改宿主半（`src/index.js`）需重启 GUI host**，改 `src/client.js` 刷新页面即可。
 

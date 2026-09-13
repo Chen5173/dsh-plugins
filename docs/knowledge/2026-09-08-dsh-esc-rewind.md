@@ -93,3 +93,42 @@
 - **新增纯函数**：`tailStatus(list)`（尾部 assistant 行状态或 null）、`lastTurnEndEvidence(chat)`（读 `chat.timeline.turnOrder/turns[n].end.data.reason`，返回 `aborted:user` / `completed` / …）。`tailUnsettled()` 继续只服务 **Esc armed 判定**（按键时用实时 list 重算，不受本缺陷影响）。
 - **顺带**：`decideEsc` 调用点的 `unsettled` 是**死参数**（函数内用 list 重算）已删除；`__diag` 增 `hintToasts` / `lastHint`（此前 hint effect 不写任何诊断，缺陷无法自证）。
 - **测试**：套件 49/49（新增真机形态构造器 `legacyUser/legacyAssistant/legacyChatOf` + 10 条：自然结束不弹（含投影落后）、下降沿只记候选、无内容停止走 `turn/end aborted/user`、非 user 的 abort/失败轮不弹、切进历史中断会话不弹、草稿非空消耗候选不弹、确定停止证据优先于 settled 尾的歧义情形、删除模式文案、纯函数契约与形状容错）。**红绿验证**：把新用例跑在 `HEAD` 版 client.js 上 8 条全红（41/49），跑在当前实现上 49/49。
+## v7.3（2026-09-12）：宿主 0.1.5-rc.2 适配——草稿附件一族改名，改走能力探测双代兼容
+
+- **触发**：DSH 升级到 `0.1.5-rc.2`（源码检出 `D:ChenSirDocumentGitHub-Projectsdeepseek-harness`，`git describe` = `dsh-v0.1.5-rc.2-2-g30841f98c8`）。
+- **核对方式（可复用，详见 `docs/knowledge/2026-09-12-dsh-015-core-api-compat-audit.md`）**：`git diff --name-only dsh-v0.1.2-rc.1..dsh-v0.1.5-rc.2 -- packages/client packages/api packages/core/session` 圈出 252 个变更源文件（去测试）→ 每个文件抽「公开成员名」（`^s+(readonly )?name(:|()`）求两 tag 差集 → **只对出现删除的文件**读代码确认；再用生成物 `slot-catalog.ts` / `api-catalog.ts` 做槽位与客户端 API 的二道核对。
+- **唯一实锤失配（同一族改名，三处）**：
+
+  | 0.1.2-rc.1 | 0.1.5-rc.2 | 本插件用处 |
+  | --- | --- | --- |
+  | `conversation.createDraftImages(files)` | `createDrafts(sessionId, files)` | 回退时把耐久图片引用变回浏览器草稿 |
+  | `conversation.releaseDraftImage(id)` | `releaseDraftAttachment(id)` | 回退中途失败时释放未采用的草稿 |
+  | `inputActions.addImages(ids)` | `addAttachments(ids)` | 分支挂载后把草稿 id 交回编辑器 |
+
+  （同族的 `removeImage`→`removeAttachment`、`pruneImages`→`pruneAttachments`、`InputState.imageIds`→`attachments`、`ComposerAttachmentsOwnerProps.onAddImages`→`onAddFiles` 本插件未使用。）
+- **为什么不是「版本号分支」**：仓库既有约定就是**能力探测 + 降级 + 失败可见**（见 `2026-09-09-plugin-host-half-no-core-import.md`、provider-label 的 `readRemoteSettings`）；且用户当前仍跑 0.1.2-rc.1，双代兼容让**同一份代码两边都可用**。
+- **改动**：新增三个桥接纯函数——`createDraftAttachments(conversation, sessionId, files)`、`releaseDraftAttachment(conversation, id)`、`restoreDraftAttachments(actions, ids)`；每个内部先探新名、再回退旧名，三个调用点改为统一入口。`__diag` 新增 `draftCreateApi` / `draftRestoreApi`（`'createDrafts'` / `'createDraftImages'` / `null`），把「这一代核心到底给不给草稿能力」变成**可见诊断**；三个函数进 `_module` 导出供 harness 断言。
+- **行为不变**：图片还原仍是 best-effort（字节读不到就只还原文本），两代都缺时静默跳过、**回退本身照常成功**；`imageFail` 诊断保留；删除模式、提示时机等一概不动。
+- **测试**：套件 **54/54**（原 49 + 新增 5：新世代建草稿且回填、旧世代同场景、两代各一条「建完草稿后中途失败要释放」、两代都缺静默降级）。**红绿验证**：新用例跑在 `HEAD` 版 `client.js` 上 4 条红（新世代两条是能力断言 `0 !== 1`；旧世代与降级两条红在新增诊断字段 `undefined`），跑在当前实现上 54/54。
+- **顺带核对为未变**（清单见适配审计篇）：五个槽位名与标准 props（只新增 `useResource`/`usePanelInfo`）、`chat.legacy.nodes`、`timeline.turnOrder`/`turns`/`TurnLocation.end`、`turn/end` 的 `aborted` + `AgentCancelCause{kind:'user'}`、`assistant/message{interrupted:true}`、`sessions.binding|fork|open|create|list`、`workspaces.archiveSession|list|openPath`、`commandUi.register`、`remote.session.modelCatalog|selectModel`、`connection.api.host.openPath`、宿主 `sessions.get|flush|store|detachEntered`、`agents.get|cancel|whenIdle`、`storageDomain`；侧栏 `sessionRow/searchTree/searchExpanded/listArea/flatList/sectionHeader/headerActions` 与 `[data-composer-input]`、`dsh.workspace.view.v5`、profile `cordis.patch.yml` 与 `dsh plugin` CLI 也都未变。
+## v7.4（2026-09-12）：真机 0.1.5-rc.2 上的两个缺陷（/rewind 消失、回退后同一条消息被执行又被挂起）
+
+### 缺陷 1：`/rewind` 在 0.1.5 上从 `/` 菜单消失
+
+- **根因（类型级契约变更——v7.3 审计方法漏掉的那一类）**：`CommandContribution.description` 在 0.1.2-rc.1 是 `readonly description: string`，0.1.5-rc.2 改为 `readonly description: () => string`，候选装配相应改为 `description: contribution.description()`（`packages/client/ui-commands/src/client/service.ts:217`）。本插件传的是**字符串** ⇒ 核心调用它时抛 `TypeError` ⇒ 整个候选装配失败 ⇒ 命令不出现。
+- **为什么 v7.3 没抓到**：那轮审计只对撞了**成员名**（`description` 两版都在 ⇒ 不进「只删不加」的差集），没有对撞**类型签名**。已把「类型级差分」补进审计方法（`docs/knowledge/2026-09-12-dsh-015-core-api-compat-audit.md` 步骤 2b）。
+- **为什么不能双形态共存**：旧核心把该值**直接作为 React 子节点**渲染（`MenuView.tsx:157` 的 `<span>{item.description}</span>`），函数会抛 `Functions are not valid as a React child`；新核心则必须拿到可调用的函数。同一个值不可能两边都对，所以只能探测。
+- **改法（能力探测，不读版本号）**：`description` 写成 **getter**，读取时按 `__commandDescShape` 决定返回字符串还是函数；世代判定用两个 0.1.5 才有的能力信号——新增的 `main.conversation` 槽位注册成功、或槽位新标准 props（`usePanelInfo`/`useResource`）出现。结果落 `__dsew.commandDescShape`。
+
+### 缺陷 2：回退后「同一条消息被执行了、又有一条在等待」
+
+- **真机取证（会话日志就是耐久真相）**：多帧 zstd 日志要用 `zstandard.stream_reader(..., read_across_frames=True)` 才能整份解出（Node 的 `zstdDecompressSync` 只解第一帧，会误判成「只有 1 行」）。`~/.dsh/sessions/.../session-8c693ecf-.../session.v3.jsonl.zstd` 的事件流：
+  - `#78 turn/end {aborted, reason:{kind:'user'}}`（Esc 停止，本插件）
+  - `#79 agent/inbox/spliced` 插入用户消息 A —— **刚发出、尚未落盘**
+  - `#80 session/end-seed {inherited:true}` ★ fork 切点：种子把 `#0..#79` 整段复制进子会话
+  - `#81` 子会话里用户又发出 B（回退还原出来的文本）→ 排在 A 之后
+  - `#85` A 落盘并被执行；B 直到 `#160/#167` 才被消费
+- **根因**：0.1.5 把 agent 收件箱写进**事件日志**（`agent/inbox/spliced`），而 fork 用事件种子重建子会话 ⇒ 父会话里那条 pending 输入被复制进新分支，并被新分支的 agent 执行；用户看到的就是「一条在执行、一条在等待、内容相同」。
+- **为什么「删一次」不够**：删除同样要作为事件落进日志，而且必须落在**切点之前**，子会话重放种子时才看不到这条插入 —— 所以必须「删 + 等快照确认」。
+- **改法**：新增 `settlePendingInputs(sessionId, { budgetMs })`——循环「读快照 → 对每条排队项 `updateQueue(id,{kind:'remove'})` → 等 60ms」，直到快照确认没有排队项或用尽预算（默认 1500ms）。`doRewind` 在 fork **前**调用；`empty === false` 时返回 `{ ok:false, code:'pending-input' }` + toast「该会话还有没发出的消息在排队…」并**放弃回退**（宁可不回退，也不复制一份输入过去）。`sessions.open(childId)` 之后再跑一次 600ms 兜底清理，条数记进 `__dsew.childPendingCleared`。
+- **测试**：套件 **60/60**（新增 6 条：命令契约三条——旧核心字符串 / 新核心函数 / 第二信号 props；未落定输入三条——清空后照常 fork、清不掉则拒绝回退且不 fork 不归档、子会话继承残留被清掉）。**红绿验证**：新用例跑在 `HEAD` 版 `client.js` 上 **50/60**（10 条红 = 4 条草稿桥 + 3 条契约 + 3 条 pending），当前实现 **60/60**。

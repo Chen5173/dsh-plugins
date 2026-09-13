@@ -177,6 +177,9 @@ function makeServices(overrides = {}) {
     readAttachments: [],
     loadThrough: [],
     loadOlder: [],
+    // 草稿附件桥接：记录实际被调用的世代（新名/旧名各一条）。
+    draftCreates: [],
+    draftReleases: [],
   }
   const bindings = {}
   const summaries = {}
@@ -191,13 +194,17 @@ function makeServices(overrides = {}) {
       cancel: async () => { calls.cancels.push(id); live.running = false; return { ok: true } },
       updateQueue: async (itemId, action) => {
         calls.queueRemoves.push([itemId, action])
-        if (action && action.kind === 'remove') {
+        if (action && action.kind === 'remove' && overrides.stubbornQueue !== true) {
           live.queue = live.queue.filter((item) => item.id !== itemId)
         }
         return { ok: true }
       },
       rename: async (title) => { calls.renames.push([id, title]); summaries[id].title = title; return { ok: true, value: { title, seq: 0 } } },
-      readAttachment: async (attachmentId) => { calls.readAttachments.push(attachmentId); return { ok: false } },
+      readAttachment: async (attachmentId) => {
+        calls.readAttachments.push(attachmentId)
+        if (typeof overrides.readAttachment === 'function') return overrides.readAttachment(attachmentId)
+        return { ok: false }
+      },
       loadThrough: async (seq) => {
         calls.loadThrough.push([id, seq])
         if (typeof overrides.onLoadThrough === 'function') await overrides.onLoadThrough(face, seq)
@@ -218,9 +225,11 @@ function makeServices(overrides = {}) {
     binding: (id) => bindings[id] || undefined,
     fork: async (opts) => {
       calls.forks.push(opts)
+      if (overrides.failFork === true) throw new Error('fork exploded')
       const childId = 'child-' + (nextId++)
       summaries[childId] = { id: childId, title: 'Fork Title', displayTitle: 'Fork Title' }
       makeBinding(childId, false)
+      if (typeof overrides.onForked === 'function') overrides.onForked(childId, bindings[childId])
       return childId
     },
     create: async (opts) => {
@@ -236,10 +245,27 @@ function makeServices(overrides = {}) {
     list: { getSnapshot: () => ({ items: [{ workspaceId: 'w1', sessionIds: Object.keys(summaries) }] }) },
     archiveSession: async (id) => { calls.archived.push(id) },
   }
-  const conversation = {
-    createDraftImages: (files) => files.map((file, i) => ({ id: 'img-' + (nextId++) + '-' + i, file })),
-    releaseDraftImage: () => {},
-  }
+  // 草稿附件桥接的夹具：0.1.5-rc.2 起核心把「图片草稿」泛化为「附件草稿」并改名，
+  // 所以 fixture 可以按世代装配——'legacy'（0.1.2 及更早）/ 'next'（0.1.5+）/ 'none'。
+  // 插件必须只靠能力探测选名字，两代都走通，缺能力时降级而不是抛错。
+  const draftApi = overrides.draftApi || 'legacy'
+  const conversation = draftApi === 'none'
+    ? {}
+    : draftApi === 'next'
+      ? {
+          createDrafts: (sessionId, files) => {
+            calls.draftCreates.push(['createDrafts', sessionId, files.length])
+            return files.map((file, i) => ({ id: 'att-' + (nextId++) + '-' + i, file }))
+          },
+          releaseDraftAttachment: (id) => { calls.draftReleases.push(['releaseDraftAttachment', id]) },
+        }
+      : {
+          createDraftImages: (files) => {
+            calls.draftCreates.push(['createDraftImages', undefined, files.length])
+            return files.map((file, i) => ({ id: 'img-' + (nextId++) + '-' + i, file }))
+          },
+          releaseDraftImage: (id) => { calls.draftReleases.push(['releaseDraftImage', id]) },
+        }
   const contributions = []
   const uiConversation = {
     binding: (id) => {
@@ -279,7 +305,9 @@ function makeServices(overrides = {}) {
   const setSettingsUpdateError = (e) => { settingsUpdateError = e || null }
 
   const state = { bindings, summaries, sessions, workspaces, conversation, uiConversation, commandUi, contributions, calls,
-    settings, settingsCalls, setSettingsValue, setSettingsDescribeError, setSettingsUpdateError }
+    settings, settingsCalls, setSettingsValue, setSettingsDescribeError, setSettingsUpdateError,
+    // 槽位存在性：null = 全部存在（默认）；数组 = 只认这些槽名（模拟旧核心没有 main.conversation）。
+    slotsAvailable: Array.isArray(overrides.slotsAvailable) ? overrides.slotsAvailable : null }
   state.seed = (id, { running = false, title = 'Title', queue = [] } = {}) => {
     summaries[id] = { id, title, displayTitle: title }
     const face = makeBinding(id, running)
@@ -320,7 +348,10 @@ function makeCtx(services) {
       return () => {}
     },
     slots: {
-      inject: (slotName, build) => { build() },
+      inject: (slotName, build) => {
+        const available = services.slotsAvailable
+        if (available === null || available.includes(slotName)) build()
+      },
       register: (options, component) => { registered.push({ options, component }); return { dispose() {} } },
     },
   }
@@ -427,7 +458,7 @@ function legacyChatOf(nodes, turnEntries = []) {
 
 // --- component mounting ------------------------------------------------------
 
-function mount({ services, sessionId, chat, running = false, draft = '', interruptedTail = false }) {
+function mount({ services, sessionId, chat, running = false, draft = '', interruptedTail = false, inputsApi = 'legacy', extraProps = {} }) {
   const component = services.registered[0].component
   const env = {
     sessionId,
@@ -438,7 +469,11 @@ function mount({ services, sessionId, chat, running = false, draft = '', interru
   }
   env.inputActions = {
     setDraft: (text) => { env.inputs.push(['setDraft', text]); env.draft = text },
-    addImages: (ids) => { env.inputs.push(['addImages', ids]); return true },
+  }
+  // 附件回填的世代：'legacy' = addImages（0.1.2 及更早），'next' = addAttachments（0.1.5+）。
+  if (inputsApi !== 'none') {
+    const name = inputsApi === 'next' ? 'addAttachments' : 'addImages'
+    env.inputActions[name] = (ids) => { env.inputs.push([name, ids]); return true }
   }
   env.state = { running, subagent: null, queue: [] }
   const props = () => ({
@@ -448,6 +483,7 @@ function mount({ services, sessionId, chat, running = false, draft = '', interru
     useInput: (sel) => sel({ draft: env.draft }),
     inputActions: env.inputActions,
     t: (k, vars) => k,
+    ...extraProps,
   })
   const render = (first) => { if (first) freshInstance(); else beginRender(); return component(props()) }
   const materialize = (tree) => {
@@ -1110,6 +1146,182 @@ test('pending restore applies the prompt on the branch mount', async () => {
   assert.equal(setDraftCalls.length, 1, 'prompt restored exactly once on the branch')
   assert.equal(setDraftCalls[0][1], 'rewind me')
   assert.ok(toasts.some((t) => t === 'rewind.done'), 'done toast expected')
+})
+
+// --- 草稿附件 API 桥接（0.1.2-rc.1 ⇄ 0.1.5-rc.2） -----------------------------
+//
+// 0.1.5-rc.2 把「图片草稿」泛化为「附件草稿」并改名：
+//   conversation.createDraftImages(files) → createDrafts(sessionId, files)
+//   conversation.releaseDraftImage(id)    → releaseDraftAttachment(id)
+//   inputActions.addImages(ids)           → addAttachments(ids)
+// 插件不读宿主版本号，只按能力探测选名字：两代都必须走通，两代都缺时必须降级
+// （不抛错、不误报），并把探测结果留在 __dsew 诊断里。
+
+/** 可回退的最后一轮：带图提问 + 运行中的 assistant。 */
+function imageRewindChat() {
+  return chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, '带图提问', ['att-9']), runningAssistant(4)])
+}
+
+/** readAttachment 成功响应（真机形态：attachment 元数据 + 字节）。 */
+function imageBytes() {
+  return { ok: true, value: { attachment: { mediaType: 'image/png', name: 'shot.png' }, data: new Uint8Array([1, 2, 3]) } }
+}
+
+for (const [generation, createName, restoreName] of [
+  ['next', 'createDrafts', 'addAttachments'],
+  ['legacy', 'createDraftImages', 'addImages'],
+]) {
+  test(`draft bridge (${generation}): 图片回退经 ${createName} 建草稿并经 ${restoreName} 回填`, async () => {
+    const chat = imageRewindChat()
+    const services = makeServices({ chatOf: () => chat, draftApi: generation, readAttachment: imageBytes })
+    services.seed('s1', { title: 'T' })
+    applyWith(services)
+    const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+    assert.ok(target, '带图的那一轮可回退')
+    const result = await internals()._module.doRewind('s1', target)
+    assert.equal(result.ok, true)
+    // 新签名带 sessionId，旧签名不带——这一处差异必须真的被区分。
+    assert.equal(services.calls.draftCreates.length, 1, '恰好建一次草稿')
+    assert.equal(services.calls.draftCreates[0][0], createName)
+    assert.equal(services.calls.draftCreates[0][2], 1, '一个附件')
+    // 读走的是耐久引用，字节从 readAttachment 来。
+    assert.deepEqual(services.calls.readAttachments, ['att-9'])
+    // 分支挂载后回填草稿附件。
+    const childEnv = mount({ services, sessionId: result.childId, chat: chatOf([]), draft: '', inputsApi: generation })
+    await new Promise((r) => setTimeout(r, 150))
+    const added = childEnv.inputs.filter(([op]) => op === restoreName)
+    assert.equal(added.length, 1, `${restoreName} 恰好调用一次`)
+    assert.equal(added[0][1].length, 1, '回填一个草稿 id')
+    assert.equal(window.__dsew.draftCreateApi, createName)
+    assert.equal(window.__dsew.draftRestoreApi, restoreName)
+  })
+
+  test(`draft bridge (${generation}): 回退中途失败会释放已建草稿（${restoreName ? '同名世代' : ''}）`, async () => {
+    const chat = imageRewindChat()
+    const services = makeServices({ chatOf: () => chat, draftApi: generation, readAttachment: imageBytes, failFork: true })
+    services.seed('s1', { title: 'T' })
+    applyWith(services)
+    const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+    await assert.rejects(() => internals()._module.doRewind('s1', target), /fork exploded/)
+    const releaseName = generation === 'next' ? 'releaseDraftAttachment' : 'releaseDraftImage'
+    assert.equal(services.calls.draftReleases.length, 1, '未采用的草稿必须释放')
+    assert.equal(services.calls.draftReleases[0][0], releaseName)
+  })
+}
+
+test('draft bridge: 两代草稿 API 都缺时静默降级，回退本身仍然成功', async () => {
+  const chat = imageRewindChat()
+  const services = makeServices({ chatOf: () => chat, draftApi: 'none', readAttachment: imageBytes })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true, '缺草稿能力不影响回退')
+  assert.equal(services.calls.draftCreates.length, 0)
+  assert.deepEqual(services.calls.readAttachments, [], '不会白读附件字节')
+  assert.equal(window.__dsew.draftCreateApi, null, '诊断留存「两代都没有」')
+  assert.ok(services.calls.archived.includes('s1'), '归档路径不受影响')
+})
+
+// --- 0.1.5 契约：命令描述（字符串 ⇄ 函数）与「未落定输入」 -----------------------
+//
+// 两处 0.1.5-rc.2 的真实破坏，都由真机日志/源码核出：
+// 1) `CommandContribution.description` 由字符串变成 `() => string`（核心会调用它）；
+//    旧核心把它当 React 子节点渲染，函数会抛 "Functions are not valid as a React child"
+//    ⇒ 两个契约无法用同一个值满足，只能按能力探测选形态（不读版本号）。
+// 2) fork 用事件种子重建子会话，父会话里「刚发出、还没落盘」的排队输入会被一起复制
+//    过去（真机日志：session/end-seed 之前就有 agent/inbox/spliced 的那条插入）
+//    ⇒ 必须在 fork 前清掉并**确认**为空，清不掉就放弃回退。
+
+/** 可回退的最后一轮（普通形态，不带图片）。 */
+function plainRewindChat() {
+  return chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'q2'), runningAssistant(4)])
+}
+
+test('command contract: 旧核心（无 main.conversation 槽）注册字符串 description', () => {
+  const services = makeServices({ slotsAvailable: ['conversation.input.overlay', 'conversation.session.header.actions'] })
+  applyWith(services)
+  const contribution = services.contributions[0]
+  assert.ok(contribution, '贡献已注册')
+  assert.equal(typeof contribution.description, 'string', '旧核心按值渲染')
+  assert.equal(window.__dsew.commandDescShape, 'string')
+})
+
+test('command contract: 新核心（有 main.conversation 槽）注册函数 description 且调用得文案', () => {
+  const services = makeServices()
+  applyWith(services)
+  const contribution = services.contributions[0]
+  assert.equal(typeof contribution.description, 'function', '新核心会调用它')
+  assert.equal(typeof contribution.description(), 'string')
+  assert.ok(contribution.description().length > 0, '调用后得到非空文案')
+  assert.equal(window.__dsew.commandDescShape, 'function')
+})
+
+test('command contract: 槽位新标准 props（usePanelInfo）作为第二信号也能判定新核心', () => {
+  const services = makeServices({ slotsAvailable: ['conversation.input.overlay', 'conversation.session.header.actions'] })
+  applyWith(services)
+  assert.equal(window.__dsew.commandDescShape, 'string', '探针未命中前保持旧契约')
+  const env = mount({ services, sessionId: 's1', chat: chatOf([user(1, 'q')]), extraProps: { usePanelInfo: () => {} } })
+  env.render()
+  assert.equal(window.__dsew.commandDescShape, 'function', 'props 信号生效')
+  assert.equal(typeof services.contributions[0].description, 'function')
+})
+
+test('pending 输入：回退前清掉排队项并确认清空，仍照常 fork', async () => {
+  const services = makeServices({ chatOf: plainRewindChat })
+  services.seed('s1', { title: 'T', queue: [{ id: 'q-pending', placement: 'queued' }] })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.ok(
+    services.calls.queueRemoves.some(([id, action]) => id === 'q-pending' && action.kind === 'remove'),
+    '排队项被删除',
+  )
+  assert.equal(services.calls.forks.length, 1, '清空后照常 fork')
+  assert.ok(window.__dsew.pendingCleared >= 1)
+  assert.equal(window.__dsew.pendingBlocked, false)
+})
+
+test('pending 输入：清不掉就放弃本次回退（不 fork、不复制进新分支）并明确提示', async () => {
+  const services = makeServices({ chatOf: plainRewindChat, stubbornQueue: true })
+  services.seed('s1', { title: 'T', queue: [{ id: 'q-stuck', placement: 'queued' }] })
+  applyWith(services)
+  toasts.length = 0
+  // 挂上桥组件，才能把 doRewind 发布的 toast 渲染出来（toast 走 bridge 的局部状态）。
+  const env = mount({ services, sessionId: 's1', chat: plainRewindChat() })
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  env.rerender()
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'pending-input')
+  assert.equal(services.calls.forks.length, 0, '绝不 fork 出带 pending 输入的分支')
+  assert.equal(services.calls.opens.length, 0)
+  assert.equal(services.calls.archived.length, 0, '原会话也不动')
+  assert.equal(window.__dsew.pendingBlocked, true)
+  assert.equal(window.__dsew.lastGate, 'pending-input')
+  assert.ok(
+    toasts.some((text) => text.includes('还有没发出的消息在排队')),
+    `给出可理解的提示（实际：${JSON.stringify(toasts)}）`,
+  )
+})
+
+test('pending 输入：子会话若继承了残留，打开后立刻清掉', async () => {
+  const services = makeServices({
+    chatOf: plainRewindChat,
+    // 模拟「父会话已清空，但切点之前仍挤进了一条」：孩子建好后塞一条继承来的排队项。
+    onForked: (childId, binding) => { binding.session.live.queue = [{ id: 'q-inherited', placement: 'queued' }] },
+  })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.ok(
+    services.calls.queueRemoves.some(([id, action]) => id === 'q-inherited' && action.kind === 'remove'),
+    '继承来的残留被清掉，不会替用户执行',
+  )
+  assert.ok(window.__dsew.childPendingCleared >= 1)
 })
 
 // --- delete mode (group 7) ---------------------------------------------------

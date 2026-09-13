@@ -1,6 +1,6 @@
 # 验收清单 — dsh-esc-rewind
 
-逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关、提示时机的耐久证据判定）由 `test/bundle.test.mjs`（49 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
+逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关、提示时机的耐久证据判定、草稿附件双代桥接 0.1.2 旧名 ⇄ 0.1.5 新名、命令描述双契约、未落定输入守卫）由 `test/bundle.test.mjs`（60 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
 
 架构重点：**回退 = fork 分支 + 按开关处置原会话**（默认归档，append-only 日志无原地删除；删除模式经宿主半真删）；armed 是派生状态（running 或 尾部 interrupted + 草稿为空）。
 
@@ -16,6 +16,7 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 0.0 `[B]` 面板启用后：profile `devDependencies` 出现本插件的 `link:`、`dsh.profile.bundles` 里本地条目仍**只有 `dsh-plugin-manager`**、`cordis.patch.yml` 里 `esc-rewind` 行**只有一行**
 - [ ] 0.1 `[B]` 刷新/强刷 GUI 后 Console 无报错；`window.__dsew` 存在且 `applied:true`；核心一切如常
 - [ ] 0.2 `[B]` 会话输入框输入 `/` → 命令菜单出现 `rewind`（描述为中文/英文对应 locale）
+- [ ] 0.3 `[B]` **0.1.5-rc.2 上 /rewind 仍可用**：菜单里能找到并打开原生命令选择器；`window.__dsew.commandDescShape === 'function'`（旧核心上为 `'string'`，两者都不得报错）
 
 ## 1. Esc 停止
 
@@ -40,6 +41,10 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 2.7 `[B]` 停止后发送了新消息或切换了会话再按 `Esc` → 不回退
 - [ ] 2.8 `[B]` 回退后原会话可从“归档/隐藏”视图恢复（日志保留）——非破坏性
 - [ ] 2.9 `[B]` 会话第一条消息生成中被停 → `Esc`② → 打开同工作区**新空会话**并还原问题；原空会话归档
+- [ ] 2.10 `[B]` **0.1.5-rc.2 核心**上回退带图提问 → 图片仍还原到输入框，且 `window.__dsew.draftCreateApi === 'createDrafts'`、`draftRestoreApi === 'addAttachments'`（走新名）
+- [ ] 2.11 `[B]` **0.1.2-rc.1 核心**上同一场景 → `draftCreateApi === 'createDraftImages'`、`draftRestoreApi === 'addImages'`（旧名不回归）
+- [ ] 2.12 `[B]` **回退时还有排队消息**：先在下一条排队（生成中再发一条）再 `Esc`② 回退 → 排队项被清掉、回退照常完成（`__dsew.pendingCleared ≥ 1`）；若排队项清不掉则**不回退**、出现「还有没发出的消息在排队…」提示（`__dsew.pendingBlocked === true`），且新分支里**不会**出现那条旧消息被执行
+- [ ] 2.13 `[B]` 回退瞬间刚发出一条消息（还在排队）→ 子会话里**不**出现该消息的副本被执行（`__dsew.childPendingCleared` 记录兜底清理条数）
 
 ## 3. /rewind 命令（原生选择器 + 全量预读）
 
@@ -62,6 +67,8 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 4.2 `[B]` 长时间运行无重复 toast/无限重试；连续多次回退均成功且分支无重复
 - [ ] 4.3 `[B]` 无报错时 `window.__dsew.lastGate` 能解释每次“为什么没接管”（诊断只含计数与门控，不含消息内容）
 - [ ] 4.4 `[B]` 提示时机可自证：`window.__dsew.hintToasts`（自动提示发布次数）与 `lastHint`（`'tail-interrupted'` / `'turn-aborted'`）能解释最近一次提示的依据；自然结束的回合两者都不变
+- [ ] 4.5 `[B]` 草稿附件桥可自证：`window.__dsew.draftCreateApi` / `draftRestoreApi` 能说明最近一次回退走的是哪一代核心名；两代都缺时两者为 `null`，回退**仍成功**（只丢图片还原，不报错）
+- [ ] 4.6 `[B]` 0.1.5 契约三件套可自证：`__dsew.commandDescShape`（`'function'`/`'string'`）、`pendingCleared`、`pendingBlocked`、`childPendingCleared` 能解释「命令为什么在/不在」与「回退前后排队项去哪了」
 
 ## 5. 删除模式（开关 + 宿主半真删）
 
