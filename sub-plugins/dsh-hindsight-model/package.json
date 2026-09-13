@@ -1,0 +1,42 @@
+{
+  "name": "dsh-hindsight-model",
+  "version": "0.1.0",
+  "description": "Hindsight inference-model panel for the DSH settings page. Hindsight is Vectorize's long-term memory layer, but its backend is a separate Python daemon that shares nothing with DSH — no process, no credentials, no model semantics — so it must be configured on its own, and its authoritative profile .env is silently rewritten by the daemon start path whenever an outer environment variable of the same name exists. This plugin renders four layers side by side (the profile .env on disk, the values the running daemon actually uses, the outer conflict sources, and the StartTime-vs-mtime proof of whether a restart happened), edits the profile with a line-level read-modify-write plus a timestamped backup, and can prefill the DSH default model (provider/model plus the route's baseURL, with the API key resolved host-side and never sent to the browser). It never starts or stops the daemon: it hands the user a copy-paste restart command that clears the conflicting variables first, plus a verify action that answers 'did it actually take effect'. Host half uses injected services only (no @deepseek-ai/* imports); client half is a settings.section panel served by the host's webServer.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "hindsight",
+    "memory",
+    "model",
+    "settings",
+    "llm"
+  ],
+  "files": [
+    "src/",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  }
+}
