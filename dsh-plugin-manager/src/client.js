@@ -56,6 +56,11 @@ window.__ModuleLoader__.load({
       batchFailed: '失败 {n} 项：',
       enableAllHint: '把本仓库全部受管本地插件打开（未安装的会自动装依赖，只跑一次安装）',
       disableAllHint: '把本仓库全部受管本地插件停用（保留激活行与依赖，可随时再开启）',
+      removeAll: '全部移除',
+      removeAllConfirm: '将删除全部 {n} 个本地插件的激活行与 devDependencies 依赖链接（源码目录保留，可随时重新开启）。插件会立刻停止运行。继续？',
+      removeAllHint: '清空本仓库全部受管本地插件的激活行与依赖链接——迁移/换机器后残留的旧绝对路径也会一并清掉，重新开启时会按当前目录重新定位',
+      removeAllDone: '已移除 {n} 个本地插件的激活行与依赖',
+      removeAllDiscarded: '（{n} 次未落盘的开关操作随行一起作废）',
       applying: '正在应用（宿主正在重应用配置树，界面可能短暂无响应）…',
       stateActive: '已激活',
       stateDisabled: '已停用',
@@ -95,6 +100,11 @@ window.__ModuleLoader__.load({
       batchFailed: '{n} failed: ',
       enableAllHint: 'Enable every managed local plugin of this repo (missing ones install their dependency first, in a single install pass)',
       disableAllHint: 'Disable every managed local plugin of this repo (rows and dependencies are kept, re-enable anytime)',
+      removeAll: 'Remove all',
+      removeAllConfirm: 'This deletes the activation rows and devDependency links of all {n} local plugins (sources are kept and can be re-enabled anytime). They stop running immediately. Continue?',
+      removeAllHint: 'Clear every managed local plugin of this repo — including stale absolute paths left behind by a move/machine change; re-enabling relocates them from the current directory',
+      removeAllDone: 'Removed the rows and dependencies of {n} local plugin(s)',
+      removeAllDiscarded: ' ({n} unflushed switch(es) discarded with them)',
       applying: 'Applying (the host is re-applying its config tree; the UI may briefly stall)…',
       stateActive: 'Active',
       stateDisabled: 'Disabled',
@@ -185,7 +195,20 @@ window.__ModuleLoader__.load({
         }
         return { count, skippedLegacy, skippedInactive, skippedInvalid }
       }
-      return { enable: one(true), disable: one(false) }
+      // 「全部移除」的兜底口径与 host-core 的 removePlan 一致：有痕迹（装过或有行）才计数。
+      const removable = () => {
+        let count = 0
+        let skippedLegacy = 0
+        let skippedInvalid = 0
+        for (const p of Array.isArray(plugins) ? plugins : []) {
+          if (!p || typeof p.dir !== 'string') continue
+          if (!p.valid || p.state === 'invalid') { skippedInvalid += 1; continue }
+          if (p.state === 'legacy' || p.legacyBundle === true) { skippedLegacy += 1; continue }
+          if (p.installed === true || p.hasRow === true) count += 1
+        }
+        return { count, skippedLegacy, skippedInactive: 0, skippedInvalid }
+      }
+      return { enable: one(true), disable: one(false), remove: removable() }
     }
 
     const API = '/__dsh-plugin-manager'
@@ -314,22 +337,30 @@ window.__ModuleLoader__.load({
       const batchCounts = (data && data.batchCounts) || localBatchCounts(plugins)
 
       // 批量动作：宿主一次安装 + 一次写入；这里只负责确认、发起与逐项结果呈现。
-      const runBatch = (enabled) => {
-        const info = (enabled ? batchCounts.enable : batchCounts.disable) || { count: 0 }
+      // mode: 'on' 全部开启 | 'off' 全部关闭 | 'remove' 全部移除（破坏性）。
+      const runBatch = (mode) => {
+        const enabled = mode === 'on'
+        const removing = mode === 'remove'
+        const info = (enabled ? batchCounts.enable : removing ? batchCounts.remove : batchCounts.disable) || { count: 0 }
         const n = info.count || 0
         if (n === 0) return
-        let msg = (enabled ? t('batchConfirmOn') : t('batchConfirmOff')).replace('{n}', String(n))
+        let msg = (enabled ? t('batchConfirmOn') : removing ? t('removeAllConfirm') : t('batchConfirmOff')).replace('{n}', String(n))
         if (info.skippedLegacy > 0) msg += `\n${t('batchSkipLegacy').replace('{n}', String(info.skippedLegacy))}`
         if (typeof window !== 'undefined' && window.confirm && !window.confirm(msg)) return
-        run(API + '/set-all-enabled', { enabled }, enabled ? 'all:on' : 'all:off').then((json) => {
+        const url = removing ? `${API}/remove-all` : `${API}/set-all-enabled`
+        run(url, removing ? {} : { enabled }, removing ? 'all:remove' : enabled ? 'all:on' : 'all:off').then((json) => {
           if (!json) return
           const results = json.results || []
           const counts = json.counts || {}
           const applied = results.filter((r) => r.outcome === 'applied')
           const failed = results.filter((r) => r.outcome === 'failed')
           const skippedLegacy = results.filter((r) => r.outcome === 'skipped' && r.reason === 'legacy-layout').length
-          const lines = [(enabled ? t('batchDoneOn') : t('batchDoneOff')).replace('{n}', String(applied.length))]
+          const lines = [(enabled ? t('batchDoneOn') : removing ? t('removeAllDone') : t('batchDoneOff')).replace('{n}', String(applied.length))]
           if (counts.installed > 0) lines[0] += t('batchInstalled').replace('{n}', String(counts.installed))
+          // 合并窗口里被作废的开关操作要如实说明，不能静默吞掉用户刚点的动作。
+          if (removing && Number(json.discardedIntents || 0) > 0) {
+            lines[0] += t('removeAllDiscarded').replace('{n}', String(json.discardedIntents))
+          }
           if (skippedLegacy > 0) lines.push(t('batchSkipLegacy').replace('{n}', String(skippedLegacy)))
           // 带浏览器界面的子插件被改动后，界面要刷新一次才会出现/消失（沿用既有约定，不自动刷新）。
           if (applied.some((r) => r.hasClient)) {
@@ -343,17 +374,20 @@ window.__ModuleLoader__.load({
         })
       }
 
-      const batchButton = (enabled) => {
-        const info = (enabled ? batchCounts.enable : batchCounts.disable) || { count: 0 }
+      const batchButton = (mode) => {
+        const enabled = mode === 'on'
+        const removing = mode === 'remove'
+        const info = (enabled ? batchCounts.enable : removing ? batchCounts.remove : batchCounts.disable) || { count: 0 }
         const n = info.count || 0
-        const label = `${enabled ? t('enableAll') : t('disableAll')} (${n})`
-        // 只有被点的那一个显示「处理中…」，另一个保持置灰可读。
-        const running = busy === (enabled ? 'all:on' : 'all:off')
+        const base = enabled ? t('enableAll') : removing ? t('removeAll') : t('disableAll')
+        const label = `${base} (${n})`
+        // 只有被点的那一个显示「处理中…」，其余保持置灰可读。
+        const running = busy === (removing ? 'all:remove' : enabled ? 'all:on' : 'all:off')
         return React.createElement('button', {
-          style: { ...S.button, ...(n === 0 ? S.buttonDisabled : {}) },
+          style: { ...S.button, ...(removing ? S.buttonDanger : {}), ...(n === 0 ? S.buttonDisabled : {}) },
           disabled: Boolean(busy) || n === 0,
-          title: enabled ? t('enableAllHint') : t('disableAllHint'),
-          onClick: () => runBatch(enabled),
+          title: enabled ? t('enableAllHint') : removing ? t('removeAllHint') : t('disableAllHint'),
+          onClick: () => runBatch(mode),
         }, running ? t('workingAll') : label)
       }
 
@@ -386,7 +420,7 @@ window.__ModuleLoader__.load({
           }, busy === 'migrate' ? t('migrateBusy') : t('migrate')),
         ),
         React.createElement('div', { style: S.toolbar },
-          React.createElement('div', { style: S.toolbarGroup }, batchButton(true), batchButton(false)),
+          React.createElement('div', { style: S.toolbarGroup }, batchButton('on'), batchButton('off'), batchButton('remove')),
           React.createElement('button', { style: S.button, onClick: load, disabled: Boolean(busy) }, t('refresh')),
         ),
         plugins.length === 0

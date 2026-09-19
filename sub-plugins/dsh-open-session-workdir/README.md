@@ -1,5 +1,17 @@
 # dsh-open-session-workdir
 
+> ## ⛔ 已退役（2026-09-18）——不要再启用
+>
+> **核心里已经有这个功能了。** `@deepseek-ai/dsh-client-ui-open-in-app`（`dsh-web-app` bundle 自带的行 `ui-open-in-app`）会在会话头部 `conversation.session.header.utilities` 放一枚「Open In…」**分体按钮**：主按钮用**上次选过的应用**打开当前会话的 `cwd`，右侧箭头列出宿主探测到的**全部已装应用**（Windows 上通常是 Explorer + Git Bash + 编辑器），选择持久化在 `dsh.open-in-app.choice`。也就是说「下拉选择 + 图标随上次选择切换」这套交互核心已经实现，本插件成了重复品。
+>
+> 因此：
+> - **管理器面板不再列出它** —— `dsh-plugin-manager/src/host-core.js` 的 `RETIRED_PLUGIN_DIRS` 里登记了 `dsh-open-session-workdir`，扫描直接跳过（`dsh-plugin-manager/test/root-install-shell.test.mjs` 有一条断言钉住「源码在、面板不列」）。
+> - **源码、本文档、`ACCEPTANCE.md` 与两个测试全部保留**，作为「外部插件如何绕开被劫持的 opener」「能力门控 + 失败卡片」的参考实现。
+> - **不要**把它从 `RETIRED_PLUGIN_DIRS` 里删掉再启用：它做的事核心已经在做，两枚按钮会并排出现。
+> - 退役的完整原因、调查过程与实测证据：[`docs/knowledge/2026-09-18-retire-open-session-workdir.md`](../../docs/knowledge/2026-09-18-retire-open-session-workdir.md)。
+>
+> 下面保留的是退役前的原始说明，**只作历史参考**（其中的安装/启停步骤已不再适用）。
+
 在 DSH Web GUI 的会话头部动作条上加一枚按钮：**打开当前会话的工作目录**（Windows 上即资源管理器打开到该目录内部）。
 
 纯客户端插件。它**不含任何宿主端点、不注册模型工具、不新增攻击面**——把路径交给 DSH 核心已有的原生打开链路：`connection.api.host.openPath({path}, signal)` → 宿主 `openNativePath`（次选 `workspaces.openPath`，若某版本让它容器可见）。

@@ -25,7 +25,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-composer-provider-label`](../sub-plugins/dsh-composer-provider-label/README.md) | 在模型名左边显示**实际打到哪个 provider**，并给出提供方/模型两级选择菜单 | composer 右侧标签（点开即菜单） | 客户端 + 可选宿主设置段 | 核心 **≥ 0.1.2-rc.1**；无 `Menu` 原语时退化为只读标签 |
 | [`dsh-session-title-regenerate`](../sub-plugins/dsh-session-title-regenerate/README.md) | 用**最低推理档**摘要本会话全部提问，重生成 ≤60 字标题 | 会话头按钮 / 侧栏行 `⋯` 菜单 / `/regenerate-title` | 客户端 + 宿主命令 | 核心 ≥ 0.1.1-rc.2 |
 | [`dsh-session-time-bucket`](../sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话列表按**今天/昨天/前7天/前30天/更早**分组 | 自动：核心处于「单列表 + 最近更新」时接管观感 | 纯客户端 | 无需操作；切到按工作区/手动排序或搜索时自动退出 |
-| [`dsh-open-session-workdir`](../sub-plugins/dsh-open-session-workdir/README.md) | 一键用**系统文件管理器**打开当前会话的工作目录 | 会话头文件夹图标 | 纯客户端 | 会话有 `cwd` 且宿主有桌面，否则按钮不出现 |
+| ~~[`dsh-open-session-workdir`](../sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~一键用**系统文件管理器**打开当前会话的工作目录~~ —— 核心已自带「Open In…」分体按钮（探测已装应用 + 记住上次选择） | 不再出现在管理器面板；源码保留在仓库 | — | 退役中：管理器扫描跳过它（`RETIRED_PLUGIN_DIRS`），无法再激活 |
 | [`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md) | 看清 **Hindsight 守护进程**当前跑的是哪个模型、改掉它，**启停它**，并按需自动拉起 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据） | 设置 → **Hindsight 模型** | 宿主 + 客户端 | 需 `webServer` 与 `~/.hindsight/coding-agent.json`；缺失时只禁用对应区块，其余照常 |
 
 ## 逐个怎么说"怎么用"
@@ -33,9 +33,10 @@ dsh plugin --profile web add <本机仓库根>                                  
 ### dsh-plugin-manager — 本地插件管理器
 
 - **入口**：设置页左侧一级导航「本地插件」（`settings.section`，`order: 16`）。
-- **能做什么**：列出仓库 `sub-plugins/` 下全部 `dsh-*`（管理器自己不列入），每行一个主开关 + 「移除」；顶部有 **全部开启 / 全部关闭** 两个批量按钮（按钮上的数字就是本次真正会改动的项数，跳过的旧布局/仅依赖/非插件目录不计）与「一键接管/迁移」。
+- **能做什么**：列出仓库 `sub-plugins/` 下全部 `dsh-*`（管理器自己不列入），每行一个主开关 + 「移除」；顶部有 **全部开启 / 全部关闭 / 全部移除** 三个批量按钮（按钮上的数字就是本次真正会改动的项数，跳过的旧布局/非插件目录不计）与「一键接管/迁移」。
 - **开关语义**：开 = 自动补 profile `devDependencies` 的 `link:` + 写激活行；关 = 行保留、写 `disabled: true`（可随时再开，不丢配置）；移除 = 删激活行 + 摘依赖（**仓库源码目录保留**）。
-- **诊断**：`GET /__dsh-plugin-manager/status`（含 `pendingWrites` 未落盘数与 `lastFlushError`）、`GET /list`。
+- **全部移除**（破坏性，`POST /__dsh-plugin-manager/remove-all`）：一次清空全部受管子插件的激活行与依赖键、只跑一次 `pnpm install`；源码目录不动，之后可逐个或全部重新启用。**迁移过 profile / 换过 `DSH_HOME` 后**旧 `link:` 是绝对路径、面板只会显示「未激活(仅依赖)」且单行开关不会自愈——先「全部移除」再重新启用，管理器就按子插件当前实际目录重写链接。合并窗口里未落盘的开关点击会随行作废（结果里报出作废条数）。
+- **诊断**：`GET /__dsh-plugin-manager/status`（含 `pendingWrites` 未落盘数、`lastFlushError`、`lastBatch`）、`GET /list`（`batchCounts` 含 `enable`/`disable`/`remove` 三向计数）。
 - **注意**：切换带界面的子插件后，面板只会**提示**你刷新，不会自动刷新页面。
 
 ### dsh-composer-history-recall — 输入框历史召回
@@ -86,7 +87,11 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **明确保留的核心原生行为**：状态点、悬停提示卡、行尾 `⋯` 菜单、点行打开、拖拽排序——插件一律不接管。窄栏（rail）不激活。
 - **实现约束值得知道**：它读核心的 localStorage 视图状态 `dsh.workspace.view.v5` 判定是否激活，并会按「桶序 + updatedAt」重排官方行；核心「+新会话」复用空白旧会话的特例被单独处理（始终落在「今天」且桶内最新）。
 
-### dsh-open-session-workdir — 打开会话工作目录
+### ~~dsh-open-session-workdir — 打开会话工作目录~~（已退役 2026-09-18）
+
+> **不要再启用它。** 它当年补的那个缺口，核心已经自己补上了：`@deepseek-ai/dsh-client-ui-open-in-app` 在会话头部 `conversation.session.header.utilities` 放了一枚「Open In…」分体按钮 —— 主按钮用**上次选过的应用**打开会话 `cwd`、右侧箭头列出宿主探测到的**全部已装应用**（Explorer / Git Bash / 编辑器 / 终端）。本插件源码、README、ACCEPTANCE 与测试全部保留在仓库里作参考，但 `dsh-plugin-manager` 的扫描会跳过它（`src/host-core.js` 的 `RETIRED_PLUGIN_DIRS`），因此它不再出现在「本地插件」面板、也无法再被激活。退役原因与实测证据见 [`docs/knowledge/2026-09-18-retire-open-session-workdir.md`](knowledge/2026-09-18-retire-open-session-workdir.md)。
+>
+> 下面几段是它退役前的行为记录，只作历史参考：
 
 - **在哪**：会话头部那一行右侧图标排，只有图标（悬停「打开工作目录」）。不在左侧列表行上，也不在右侧文件面板里。
 - **怎么用**：点一下 → 系统文件管理器打开该会话 `cwd`；成功 Toast「已交给系统打开」。
@@ -115,14 +120,14 @@ dsh plugin --profile web add <本机仓库根>                                  
 |---|---|
 | composer 覆盖层 `conversation.input.overlay` | `dsh-composer-history-recall`（50）· `dsh-esc-rewind`（60） |
 | composer 右侧组 `conversation.input.right` | `dsh-composer-provider-label`（10，紧邻核心模型选择器左侧） |
-| 会话头操作区 `conversation.session.header.actions` | `dsh-open-session-workdir`（25）· `dsh-session-title-regenerate`（27）· `dsh-esc-rewind` 处置开关（28）；核心自身另有 日程(10)/任务(20)/删除(30) |
+| 会话头操作区 `conversation.session.header.actions` | `dsh-session-title-regenerate`（27）· `dsh-esc-rewind` 处置开关（28）；核心自身另有 日程(10)/任务(20)/删除(30)。~~`dsh-open-session-workdir`（25）~~ 已于 2026-09-18 退役 |
 | 设置页 `settings.section` | `dsh-plugin-manager`「本地插件」（16）· `dsh-hindsight-model`「Hindsight 模型」（17） |
 | 斜杠命令 | `/rewind`（客户端 `commandUi` 贡献）· `/regenerate-title`（宿主命令） |
 | 侧栏会话行 `⋯` 菜单 | `dsh-session-title-regenerate`（DOM 注入，核心无插件槽） |
 | 侧栏会话列表 | `dsh-session-time-bucket`（就地注入组头 + `[工作区]` 前缀，非槽位） |
 | 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__hindsight-model/{state,save,dsh-model,verify,clean-env,daemon,auto}` |
 
-> ⚠️ 三个插件都往**会话头图标排**放东西（25/27/28），`dsh-open-session-workdir` 的 README 里那句「从左到右：日程(10) → 任务列表(20) → 打开的文件夹(25) → 删除会话(30)」只描述了**没装另两个插件时**的样子，别当成固定顺序。
+> ⚠️ 会话头图标排现在只剩**两个**插件行（27/28，`dsh-open-session-workdir` 的 25 已随插件退役）：`dsh-session-title-regenerate` 与 `dsh-esc-rewind`。核心自身另有 日程(10)/任务(20)/删除(30)，以及**另一枚分体按钮**「Open In…」——它不在 `actions` 槽，而在 `conversation.session.header.utilities`。
 
 ## 核对方法（本页怎么保证不是抄来的假信息）
 

@@ -33,7 +33,7 @@ dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins
 | [`dsh-composer-provider-label`](sub-plugins/dsh-composer-provider-label/README.md) | 显示并切换实际打到的提供方与模型 | 输入框右侧模型标签 |
 | [`dsh-session-title-regenerate`](sub-plugins/dsh-session-title-regenerate/README.md) | 重新生成会话标题 | 会话头按钮 / 侧栏 `⋯` / `/regenerate-title` |
 | [`dsh-session-time-bucket`](sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话按时间分组 | 自动（无按钮） |
-| [`dsh-open-session-workdir`](sub-plugins/dsh-open-session-workdir/README.md) | 用系统文件管理器打开会话工作目录 | 会话头文件夹图标 |
+| ~~[`dsh-open-session-workdir`](sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~用系统文件管理器打开会话工作目录~~ | 核心已自带「Open In…」分体按钮；源码保留，面板不再列出（见该插件 README 顶部） |
 
 详细前提（是否要重启、核心版本要求、副作用、与其他插件共存）见 [`docs/plugins.md`](docs/plugins.md)。
 

@@ -16,7 +16,8 @@
 //   - root manifest present, named dsh-plugin-manager  -> dep key
 //     `dsh-plugin-manager`, bundles gains exactly one `dsh-plugin-manager`,
 //     `dsh --dump-default-config` composes `- id: dsh-plugin-manager`, and the
-//     manager scans the clone's sub-plugins/ and finds all 6 children.
+//     manager scans the clone's sub-plugins/ and finds every managed child
+//     (minus the manager itself and the RETIRED_PLUGIN_DIRS entries).
 //   - root manifest ABSENT -> pnpm names the dependency after the repo dir
 //     (`dsh-plugins.git`), reconcile prints "declares no dsh.bundle — installed
 //     as a plain dependency, not a profile layer", and nothing ever activates.
@@ -37,6 +38,7 @@ import { fileURLToPath } from 'node:url'
 import {
   MANAGER_ID,
   PLUGINS_DIRNAME,
+  RETIRED_PLUGIN_DIRS,
   listRepoPluginDirs,
   pluginAbsDirOf,
   pluginRootsOf,
@@ -177,6 +179,21 @@ test('from the installed layout the shell still resolves repo root and sub-plugi
   for (const dir of dirs) {
     const meta = readPluginMeta(repoRoot, dir)
     assert.ok(meta.valid, `child ${dir} has no readable plugin manifest`)
+  }
+})
+
+test('retired plugins stay in the clone as source but never reach the panel', () => {
+  // Retirement is a SCAN exclusion (host-core RETIRED_PLUGIN_DIRS), not a
+  // deletion: the directory and its README/ACCEPTANCE/tests stay in the repo,
+  // while the panel stops offering and the manager stops activating it.
+  const listed = listRepoPluginDirs(REPO_ROOT)
+  for (const dir of RETIRED_PLUGIN_DIRS) {
+    assert.ok(
+      fs.existsSync(path.join(REPO_ROOT, PLUGINS_DIRNAME, dir)),
+      `retired plugin ${dir} must stay on disk as reference source`,
+    )
+    assert.ok(!listed.includes(dir), `retired plugin ${dir} must not be listed by the panel`)
+    assert.equal(readPluginMeta(REPO_ROOT, dir).valid, true, `retired plugin ${dir} must keep a readable manifest`)
   }
 })
 

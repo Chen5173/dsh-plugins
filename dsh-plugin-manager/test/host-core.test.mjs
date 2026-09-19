@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   MANAGER_DIR,
+  RETIRED_PLUGIN_DIRS,
   listRepoPluginDirs,
   readPluginMeta,
   rowIdOfDir,
@@ -37,6 +38,8 @@ import {
   upsertManagedMany,
   batchPlan,
   BATCH_REASONS,
+  removePlan,
+  REMOVE_REASONS,
 } from '../src/host-core.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -99,6 +102,25 @@ function samplePlugins(root) {
   assert.equal(bad2.error, 'no-plugin-package')
   assert.equal(rowIdOfDir('dsh-session-time-bucket'), 'session-time-bucket')
   assert.equal(linkSpecOf('D:\\a b\\c'), 'link:D:/a b/c')
+}
+
+{
+  // Retired plugin dirs: the source stays in the repo, the panel never lists it.
+  const repo = path.join(tmpRoot, 'retired')
+  fs.mkdirSync(repo, { recursive: true })
+  writeRepo(path.join(repo, PLUGINS_DIRNAME), ['dsh-keep', ...RETIRED_PLUGIN_DIRS])
+  writeRepo(repo, [...RETIRED_PLUGIN_DIRS]) // the half-migrated copy must be skipped too
+  assert.ok(RETIRED_PLUGIN_DIRS.length > 0, 'sanity: the retired list is expected to hold the superseded plugin')
+  assert.deepEqual(
+    listRepoPluginDirs(repo),
+    ['dsh-keep'],
+    'a retired plugin dir is skipped by the scan even when it sits in both roots',
+  )
+  assert.equal(
+    readPluginMeta(repo, RETIRED_PLUGIN_DIRS[0]).valid,
+    true,
+    'the retired plugin keeps a readable manifest: retirement is a scan exclusion, not a deletion',
+  )
 }
 
 // --- patch row transforms ----------------------------------------------------
@@ -355,6 +377,65 @@ function samplePlugins(root) {
   const fresh = applyIntents(rows, [{ id: 'ccc', name: 'dsh-ccc', enabled: true }])
   assert.equal(fresh.length, 2, 'an intent for an unknown row becomes a new canonical insert item')
   assert.deepEqual(fresh[1].insert[0], { id: 'ccc', name: 'dsh-ccc' })
+}
+
+// --- bulk removal planning (全部移除) -----------------------------------------
+
+{
+  const repo = path.join(tmpRoot, 'remove')
+  fs.mkdirSync(repo, { recursive: true })
+  writeRepo(repo, ['dsh-aaa', 'dsh-bbb', 'dsh-ccc', 'dsh-ddd', 'dsh-old'])
+  fs.mkdirSync(path.join(repo, 'dsh-notreal'), { recursive: true }) // no package.json → invalid
+  const plugins = listRepoPluginDirs(repo).map((d) => readPluginMeta(repo, d))
+
+  // 与批量开关同一份六态现场：aaa 已激活、bbb 已停用（有行）、ccc 仅依赖（无行）、
+  // ddd 从未安装、old 旧布局、notreal 非插件目录。
+  const manifest = {
+    dependencies: {
+      'dsh-aaa': 'link:./dsh-aaa',
+      'dsh-bbb': 'link:./dsh-bbb',
+      'dsh-ccc': 'link:./dsh-ccc',
+      'dsh-old': 'link:./dsh-old',
+    },
+    dsh: { profile: { bundles: ['dsh-old'] } },
+  }
+  const rows = [
+    { insert: [{ id: 'aaa', name: 'dsh-aaa' }] },
+    { insert: [{ id: 'bbb', name: 'dsh-bbb', disabled: true }] },
+  ]
+  const states = deriveStates({ repoPlugins: plugins, manifest, rows })
+
+  const plan = removePlan(states)
+  // 有痕迹的三项都计入：active（行+依赖）、disabled（行+依赖）、inactive（仅依赖=陈旧链接）。
+  assert.equal(plan.count, 3, 'remove counts every plugin that left a trace in the profile')
+  assert.deepEqual(plan.targets.map((t) => [t.dir, t.state]), [
+    ['dsh-aaa', 'active'],
+    ['dsh-bbb', 'disabled'],
+    ['dsh-ccc', 'inactive'],
+  ])
+  assert.deepEqual(Object.fromEntries(plan.skipped.map((s) => [s.dir, s.reason])), {
+    'dsh-ddd': REMOVE_REASONS.notInstalled,
+    'dsh-notreal': REMOVE_REASONS.invalidDir,
+    'dsh-old': REMOVE_REASONS.legacyLayout,
+  }, 'skipped rows carry machine-readable reasons')
+
+  // N=0 的判据：全新现场（谁都没装过）不该给出可点的按钮。
+  const fresh = deriveStates({ repoPlugins: plugins.filter((p) => p.dir !== 'dsh-notreal' && p.dir !== 'dsh-old'), manifest: {}, rows: [] })
+  assert.equal(removePlan(fresh).count, 0, 'nothing installed and no rows → N=0')
+  assert.equal(removePlan(fresh).skipped.length, 4)
+
+  // 纯函数：不改输入，容忍空/非法入参，未知状态走兜底 reason。
+  assert.equal(states.length, 6, 'removePlan does not modify its input')
+  assert.deepEqual(removePlan([]), { targets: [], skipped: [], count: 0 })
+  assert.equal(removePlan(undefined).count, 0)
+  assert.equal(removePlan([{ dir: 'dsh-weird', name: 'dsh-weird', valid: true, state: 'who-knows', installed: true }]).targets.length, 0)
+  assert.equal(
+    removePlan([{ dir: 'dsh-weird', name: 'dsh-weird', valid: true, state: 'who-knows', installed: true }]).skipped[0].reason,
+    REMOVE_REASONS.unsupportedState,
+  )
+  // 只有行没有依赖（或反之）也算有痕迹 —— 半状态同样必须能被清掉。
+  assert.equal(removePlan([{ dir: 'dsh-x', rowId: 'x', name: 'dsh-x', valid: true, state: 'inactive', installed: false, hasRow: true }]).count, 1)
+  assert.equal(removePlan([{ dir: 'dsh-y', rowId: 'y', name: 'dsh-y', valid: true, state: 'inactive', installed: true, hasRow: false }]).count, 1)
 }
 
 // --- batch switch planning (全部开启 / 全部关闭) ------------------------------

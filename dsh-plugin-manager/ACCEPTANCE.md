@@ -150,3 +150,22 @@
 - [ ] 需真机（私有仓库）：本仓库是 public，凭据面未覆盖。若日后转私有，pnpm 直接调用系统 git，需保证 git 侧有可用凭据（SSH key / credential helper）；失败形态预计是 git 侧鉴权报错而非 dsh 报错。
 - [ ] 需真机：从 git 装的 clone 里在面板点「启用」某个子插件 → 面板显示「已激活」且其宿主行为生效（本项的链接与解析部分已由上面的自动化实测覆盖）。
 
+
+## A13 批量全部移除（2026-09-18）
+
+对照 `openspec/specs/plugin-manager/spec.md`「批量全部移除的作用范围与计数口径」「全部移除一次落盘、一次安装、失败可回滚」「移除后可重新启用并按当前目录重新定位」「批量操作的面板交互与生效提示」。动机：`linkSpecOf()` 写出的 `link:` 一律是**绝对路径**，profile 被迁移（换机器 / 换 `DSH_HOME`）后旧路径失效；`deriveStates` 只看键是否存在，所以陈旧链接仍显示为「未激活(仅依赖)」而**不会自愈**（单行开关的 `present` 守卫会跳过 `ensureDevDep`）。「全部移除」先清空痕迹，再重新启用即可按子插件**当前实际目录**重写链接。
+
+- [x] 自动化：`removePlan` 纯逻辑六态混合现场——`active`/`disabled`/`inactive(仅依赖)` 三项计入 N，`uninstalled`/`legacy`/`invalid` 跳过且 reason 分别为 `not-installed`/`legacy-layout`/`invalid-dir`；全新现场 N=0；不改入参、容忍 `undefined`/`[]`/未知状态（host-core.test「bulk removal planning」）。
+- [x] 自动化：`/list` 带 `batchCounts.remove.count`，且该口径与 `removePlan` 同源（batch-remove-all.test 用例 1 首条断言 + 用例 4 断言移除后降为 0）。
+- [x] 自动化：一次「全部移除」= 对 `cordis.patch.yml` **恰好 1 次** `writeFileSync` + 对 `package.json` **恰好 1 次** + `pnpm` **恰好 1 次** `install`（在 `node:fs` 上打桩计数，非 mtime 采样）；全部受管行与依赖键消失、状态回到 `uninstalled`。
+- [x] 自动化：不变式——`mcp-*` 行与 `dsh.profile.bundles` 逐字节保留，管理器自身依赖键 `dsh-plugin-manager` 不被摘除（batch-remove-all.test 用例 1）。
+- [x] 自动化：排队意图被**丢弃**且如实回报——先 `set-enabled`（意图仍在 400 ms 窗口）再 `remove-all`，响应 `discardedIntents: 1`、总写入次数仍为 1，且等过合并窗口后没有迟到 flush 让该行复活（batch-remove-all.test 用例 2）。
+- [x] 自动化：失败双回滚——pnpm 桩返回失败时 `package.json` 与 `cordis.patch.yml` 都逐字节回到操作前内容，两项均报 `failed`、无一项误报 `applied`，响应带可读 `warning`（batch-remove-all.test 用例 3）。
+- [x] 自动化：noop 路径——无痕迹现场下 `noop: true`，patch/manifest 写入次数与安装次数均为 0，且全部项报 `skipped`（batch-remove-all.test 用例 4）。
+- [x] 自动化：面板第三个按钮「全部移除 (N)」渲染、N 取自 `batchCounts.remove.count`、N=0 时 `disabled`；点击后确认框含数量与「源码目录保留」语义，只发一次 `POST /remove-all` 且**不带** `enabled` 字段；结果提示报出移除数量与「N 次未落盘的开关操作随行一起作废」；取消时**不发任何请求**（bundle.test「batch toolbar renders all three buttons…」「全部移除 confirms…」）。
+- [x] 自动化：执行期间三个批量按钮 + 每行开关 + 「一键接管/迁移」全部 `disabled`（bundle.test「the panel locks rows and migrate…」）；改动含带界面子插件时给出「刷新页面使界面生效」且 `reloaded === false`（不自动刷新）。
+- [x] 红能力（2026-09-18 逐条实跑）：把端点里的「一次 `dropDevDeps`」改成逐项 `dropDevDep` → harness 判红在「恰好 1 次 manifest 写入」（actual 2）；还原后再把 `dropDevDeps` 改成连跑两次 `pnpm install` → 判红在「恰好 1 次 pnpm install」（actual 2）。两次变异后恢复源码，全绿。
+- [x] 隔离 profile 实测：本机 `~/.dsh/profiles/web` 的 `node_modules/js-yaml` 被 junction 进一次性 `$DSH_HOME`，**全程未触碰运行中的 web profile**、未起端口、未真跑 pnpm（`__setPnpmRunner` 桩）。
+- [ ] 需真机：在真实 web profile 上点「全部移除 (6)」→ 确认框 → 面板 6 行全变「未激活」、只卡顿一次；随后点「全部开启 (6)」→ 6 个重新装上并按**当前** `sub-plugins/` 绝对路径写 `link:`，`dsh --profile web --dump-config` 组合成功、无 `Cannot find package`。
+- [ ] 需真机：把 `DSH_HOME` 整体复制到另一路径后启动 → 面板显示「未激活(仅依赖)」（陈旧绝对路径）→ 点「全部移除」再「全部开启」→ 插件恢复且 `devDependencies` 里的 `link:` 指向**新路径**。这正是本功能要解决的场景，但需要一份可丢弃的真实 profile。
+- [ ] 未复验：`openspec/specs/plugin-manager/spec.md` 中本次并入的 3 条新增 Requirement 与 1 条 MODIFIED Requirement 已由 `openspec validate plugin-manager --strict` 判为有效（2026-09-18），但**归档动作本身尚未执行**——归档需用户明确指示。

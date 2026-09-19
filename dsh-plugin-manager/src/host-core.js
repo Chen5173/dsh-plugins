@@ -25,6 +25,22 @@ export const DEFAULT_PROFILE = 'web'
 export const PLUGIN_DIR_PREFIX = 'dsh-'
 /** Sub-directory holding the sibling plugin packages (preferred layout). */
 export const PLUGINS_DIRNAME = 'sub-plugins'
+/**
+ * Plugin directories that stay in the repo as readable source but are RETIRED:
+ * the scan skips them, so they never appear in Settings → 本地插件 and the
+ * manager can no longer activate them. Retire by ADDING a name here (with the
+ * date and the reason) instead of deleting the directory — the code, its
+ * README/ACCEPTANCE and its tests keep working as reference.
+ */
+export const RETIRED_PLUGIN_DIRS = [
+  // 2026-09-18 — superseded by DSH core: `@deepseek-ai/dsh-client-ui-open-in-app`
+  // already puts an "Open In…" split button on the session header
+  // (`conversation.session.header.utilities`), launches the remembered
+  // application on the session cwd, and lists every app the host probed as
+  // installed (Explorer, Git Bash, editors, terminals). This local plugin was
+  // the stopgap for that gap and is now redundant. Source kept for reference.
+  'dsh-open-session-workdir',
+]
 /** Profile devDependency the host needs for patch-file YAML round-trips. */
 export const YAML_PKG = 'js-yaml'
 export const YAML_PKG_RANGE = '^4.1.0'
@@ -122,7 +138,9 @@ export function pluginAbsDirOf(repoRoot, dir) {
 
 /**
  * dsh-* plugin directory names across the candidate roots, deduped by name
- * (the nested copy wins) and sorted. The manager's own dir is excluded.
+ * (the nested copy wins) and sorted. The manager's own dir and every
+ * {@link RETIRED_PLUGIN_DIRS} entry are excluded: a retired plugin is still
+ * source in the repo, but it is not a manageable plugin any more.
  */
 export function listRepoPluginDirs(repoRoot) {
   const seen = new Set()
@@ -137,6 +155,7 @@ export function listRepoPluginDirs(repoRoot) {
       if (!e.isDirectory()) continue
       if (!e.name.startsWith(PLUGIN_DIR_PREFIX)) continue
       if (e.name === MANAGER_DIR) continue
+      if (RETIRED_PLUGIN_DIRS.includes(e.name)) continue
       seen.add(e.name)
     }
   }
@@ -480,6 +499,67 @@ export function batchPlan(derived, enabled) {
   }
 
   return { enabled: open, targets, skipped, count: targets.length }
+}
+
+// --- bulk removal planning (全部移除) ----------------------------------------
+
+/**
+ * 「全部移除」的跳过原因（机器可读；与 BATCH_REASONS 分开是因为词表不同）。
+ */
+export const REMOVE_REASONS = {
+  notInstalled: 'not-installed',
+  legacyLayout: 'legacy-layout',
+  invalidDir: 'invalid-dir',
+  /** 兜底：出现了 deriveStates 之外的未知状态。 */
+  unsupportedState: 'unsupported-state',
+}
+
+/**
+ * 功能作用：按面板派生状态算出「全部移除」的目标集与跳过集（纯函数）。目标 = 在 profile 中留下
+ *           痕迹的受管子插件（有激活行，或有 dependencies/devDependencies 键）——「未激活(仅依赖)」
+ *           正是换机器/换 DSH_HOME 后遗留绝对 link: 的状态，必须计入。
+ * 参数：
+ *   derived: Array -- deriveStates() 的结果，例如 [{ dir:'dsh-aaa', rowId:'aaa', state:'active', installed:true, hasRow:true, ... }]
+ * 返回值：
+ *   { targets: [{ dir, rowId, name, hasClient, dirPath, state }], skipped: [{ dir, name, hasClient, reason }], count: number }
+ *   例：removePlan(states) → { targets: [6 个有痕迹项], skipped: [未安装/旧布局/非插件目录], count: 6 }
+ * 调用样例：
+ *   const plan = removePlan(s.derived); if (plan.count === 0) return noop()
+ */
+export function removePlan(derived) {
+  const list = Array.isArray(derived) ? derived : []
+  const targets = []
+  const skipped = []
+  const skip = (p, reason) => skipped.push({
+    dir: p.dir,
+    name: p.name || p.dir,
+    hasClient: Boolean(p.hasClient),
+    reason,
+  })
+
+  for (const p of list) {
+    if (!p || typeof p.dir !== 'string' || p.dir === '') continue
+    const state = p.state
+    if (!p.valid || state === 'invalid') { skip(p, REMOVE_REASONS.invalidDir); continue }
+    if (state === 'legacy' || p.legacyBundle === true) { skip(p, REMOVE_REASONS.legacyLayout); continue }
+    // 有痕迹 = 装过（依赖键在）或激活过（行在）；两者皆无则没有可清理的东西。
+    const hasTrace = p.installed === true || p.hasRow === true
+    if (!hasTrace) { skip(p, REMOVE_REASONS.notInstalled); continue }
+    if (state !== 'active' && state !== 'disabled' && state !== 'inactive') {
+      skip(p, REMOVE_REASONS.unsupportedState)
+      continue
+    }
+    targets.push({
+      dir: p.dir,
+      rowId: p.rowId,
+      name: p.name || p.dir,
+      hasClient: Boolean(p.hasClient),
+      dirPath: p.dirPath,
+      state,
+    })
+  }
+
+  return { targets, skipped, count: targets.length }
 }
 
 // --- migration planning ------------------------------------------------------

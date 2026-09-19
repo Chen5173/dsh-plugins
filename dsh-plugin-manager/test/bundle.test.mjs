@@ -50,12 +50,14 @@ globalThis.document = { addEventListener() {}, removeEventListener() {} }
 const BATCH_COUNTS = () => ({
   enable: { count: 1, needsInstall: 1, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
   disable: { count: 1, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+  remove: { count: 1, needsInstall: 0, skippedLegacy: 0, skippedInactive: 0, skippedInvalid: 1 },
 })
 const state = {
   legacyDetected: false,
   pendingWrites: 0,
   batchCounts: BATCH_COUNTS(),
   batchResults: null,
+  discardedIntents: 0,
   holdBatch: false,
   releaseBatch: null,
   plugins: [
@@ -102,6 +104,27 @@ async function fetchStub(url, opts) {
       return { ok: true, json: async () => res }
     }
     // Deferred mode lets a test observe the panel while the batch is in flight.
+    if (state.holdBatch) return new Promise((resolve) => { state.releaseBatch = () => resolve(respond()) })
+    return respond()
+  }
+  if (url === '/__dsh-plugin-manager/remove-all') {
+    const respond = () => {
+      // 全部移除后：每个有痕迹的项都回到「未激活」，依赖键也没了。
+      state.plugins = state.plugins.map((p) => (p.installed || p.hasRow ? { ...p, state: 'uninstalled', active: false, installed: false, hasRow: false } : p))
+      const res = payload()
+      res.results = state.batchResults || []
+      res.discardedIntents = state.discardedIntents || 0
+      res.counts = {
+        total: res.results.length,
+        applied: res.results.filter((r) => r.outcome === 'applied').length,
+        skipped: res.results.filter((r) => r.outcome === 'skipped').length,
+        failed: res.results.filter((r) => r.outcome === 'failed').length,
+        installed: 0,
+        ranPnpm: true,
+        wrotePatch: true,
+      }
+      return { ok: true, json: async () => res }
+    }
     if (state.holdBatch) return new Promise((resolve) => { state.releaseBatch = () => resolve(respond()) })
     return respond()
   }
@@ -383,7 +406,7 @@ test('legacy rows show migrate banner; migrate asks confirmation', async () => {
 
 // --- batch switch (全部开启 / 全部关闭) -------------------------------------
 
-test('batch toolbar renders both buttons with the host-provided counts', async () => {
+test('batch toolbar renders all three buttons with the host-provided counts', async () => {
   fetchCalls.length = 0
   state.batchCounts = BATCH_COUNTS()
   state.batchResults = null
@@ -400,15 +423,18 @@ test('batch toolbar renders both buttons with the host-provided counts', async (
   const tree = section()
   const enableBtn = byType(tree, 'button').find((b) => /全部开启/.test(textOf(b)))
   const disableBtn = byType(tree, 'button').find((b) => /全部关闭/.test(textOf(b)))
-  assert.ok(enableBtn && disableBtn, 'both batch buttons render in the toolbar')
+  const removeBtn = byType(tree, 'button').find((b) => /全部移除/.test(textOf(b)))
+  assert.ok(enableBtn && disableBtn && removeBtn, 'all three batch buttons render in the toolbar')
   assert.equal(textOf(enableBtn), '全部开启 (1)', 'count comes from /list batchCounts, not from the panel')
   assert.equal(textOf(disableBtn), '全部关闭 (1)')
-  assert.ok(!enableBtn.props.disabled && !disableBtn.props.disabled)
+  assert.equal(textOf(removeBtn), '全部移除 (1)', 'the removal count comes from batchCounts.remove')
+  assert.ok(!enableBtn.props.disabled && !disableBtn.props.disabled && !removeBtn.props.disabled)
 
   // N = 0 → greyed out, so an empty batch can never be fired.
   state.batchCounts = {
     enable: { count: 0, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
     disable: { count: 0, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+    remove: { count: 0, needsInstall: 0, skippedLegacy: 0, skippedInactive: 0, skippedInvalid: 1 },
   }
   const section2 = mountSection()
   fresh()
@@ -418,9 +444,11 @@ test('batch toolbar renders both buttons with the host-provided counts', async (
   const tree2 = section2()
   const enable2 = byType(tree2, 'button').find((b) => /全部开启/.test(textOf(b)))
   const disable2 = byType(tree2, 'button').find((b) => /全部关闭/.test(textOf(b)))
+  const remove2 = byType(tree2, 'button').find((b) => /全部移除/.test(textOf(b)))
   assert.equal(textOf(enable2), '全部开启 (0)')
   assert.ok(enable2.props.disabled, 'enable-all is greyed out at N=0')
   assert.ok(disable2.props.disabled, 'disable-all is greyed out at N=0')
+  assert.ok(remove2.props.disabled, 'remove-all is greyed out at N=0')
   state.batchCounts = BATCH_COUNTS()
 })
 
@@ -466,6 +494,56 @@ test('全部关闭 confirms with the count, posts the batch endpoint and hints a
   assert.match(after, /刷新页面使界面生效/, 'a client plugin was touched → reload hint')
   assert.equal(reloaded, false, 'never auto-reloads')
   state.batchResults = null
+  state.batchCounts = BATCH_COUNTS()
+})
+
+test('全部移除 confirms with the count, posts /remove-all and reports discarded intents', async () => {
+  fetchCalls.length = 0
+  confirms.length = 0
+  reloaded = false
+  confirmAnswer = true
+  state.discardedIntents = 1
+  state.batchCounts = {
+    enable: { count: 1, needsInstall: 1, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+    disable: { count: 0, needsInstall: 0, skippedLegacy: 0, skippedInactive: 1, skippedInvalid: 1 },
+    remove: { count: 2, needsInstall: 0, skippedLegacy: 1, skippedInactive: 0, skippedInvalid: 1 },
+  }
+  state.batchResults = [
+    { dir: 'dsh-aaa', name: 'dsh-aaa', hasClient: true, outcome: 'applied', reason: null },
+    { dir: 'dsh-bbb', name: 'dsh-bbb', hasClient: false, outcome: 'applied', reason: null },
+    { dir: 'dsh-old', name: 'dsh-old', hasClient: false, outcome: 'skipped', reason: 'legacy-layout' },
+  ]
+  state.plugins = [
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, installed: true, hasRow: true, legacyBundle: false },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: false, state: 'disabled', active: false, installed: true, hasRow: true, legacyBundle: false },
+    { dir: 'dsh-bad', rowId: 'bad', name: 'dsh-bad', description: '', valid: false, state: 'invalid', active: false, legacyBundle: false },
+  ]
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  const btn = byType(section(), 'button').find((b) => /全部移除/.test(textOf(b)))
+  assert.equal(textOf(btn), '全部移除 (2)')
+  btn.props.onClick()
+  await flush()
+  await flush()
+  assert.equal(confirms.length, 1, 'the removal asks for confirmation exactly once')
+  assert.match(confirms[0], /2/, 'the confirmation carries the affected count')
+  assert.match(confirms[0], /源码目录保留/, 'the confirmation spells out the consequence')
+  assert.match(confirms[0], /旧布局/, 'the confirmation warns about skipped legacy rows')
+  const calls = fetchCalls.filter((c) => c.url === '/__dsh-plugin-manager/remove-all')
+  assert.equal(calls.length, 1, 'the removal posts the dedicated endpoint')
+  assert.deepEqual(JSON.parse(calls[0].opts.body || '{}'), {}, 'no enabled flag is sent to a removal')
+  begin()
+  const after = textOf(section())
+  assert.match(after, /已移除 2 个本地插件的激活行与依赖/, 'notice reports how many were removed')
+  assert.match(after, /1 次未落盘的开关操作随行一起作废/, 'discarded intents are surfaced, never silent')
+  assert.match(after, /旧布局/, 'the legacy skip is surfaced in the notice too')
+  assert.match(after, /刷新页面使界面生效/, 'a client plugin was touched → reload hint')
+  assert.equal(reloaded, false, 'never auto-reloads')
+  state.batchResults = null
+  state.discardedIntents = 0
   state.batchCounts = BATCH_COUNTS()
 })
 
@@ -526,6 +604,8 @@ test('the panel locks rows and migrate while a batch is still in flight', async 
   assert.ok(switches.every((s) => s.props.disabled), 'every row switch is locked during the batch')
   const migrateBtn = byType(during, 'button').find((b) => /一键接管/.test(textOf(b)))
   assert.ok(migrateBtn && migrateBtn.props.disabled, 'migrate is locked during the batch too')
+  const removeBtn = byType(during, 'button').find((b) => /全部移除/.test(textOf(b)))
+  assert.ok(removeBtn && removeBtn.props.disabled, 'remove-all is locked during any batch')
   state.releaseBatch()
   await flush()
   await flush()
