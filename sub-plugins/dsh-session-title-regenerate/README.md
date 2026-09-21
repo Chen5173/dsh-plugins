@@ -6,6 +6,7 @@
 
 - **会话头部操作区按钮**（`conversation.session.header.actions` 槽位）
 - **侧边栏会话行 `⋯` 菜单项**「重新生成标题」——核心 `ui-workspace` 把该菜单（重命名/分叉/归档）写死、没有插件扩展点，因此本项与 `@huanlin/dsh-plugin-session-delete` 同款，采用 **DOM 注入**（MutationObserver 监听 `[role=menu]`）。核心把原生项渲染在 `[role=menu] > role=presentation(viewport)` 内容区里，而 session-delete 等插件项是直接挂到 `[role=menu]` 上的兄弟节点；所以本插件把菜单项**追加进内容区 viewport**，使它紧跟在官方"重命名/分叉/归档"之下、位于所有插件注入项之上，且不带自己的分隔线——读起来像官方操作而非插件附加项。
+  - **注入项与官方行同构**：自带包裹层 `div`，按钮里**图标槽 + 文案槽各占一个 `span`**（与 `div.itemWrap > button > span.itemIcon + span.itemLabel` 同形，但不依赖核心的 hash 类名）。这不是审美要求——第三方插件按**结构**解析这张菜单：`dsh-flowglass` 0.7.0 的「加入当前并发分支」取「最后一个 `[role=menuitem]` 的 `parentElement`」当作"这一行"再 `cloneNode(true)`，裸 `button` 的 `parentElement` 是整个 viewport ⇒ 会把整张菜单复制一份、只改其中第一行，`分叉/归档/…` 成排重复。2026-09-21 修复，根因与验证见 [`docs/knowledge/2026-09-06-dsh-session-title-regenerate.md`](../../docs/knowledge/2026-09-06-dsh-session-title-regenerate.md) 末节。
 
 宿主注册 `/regenerate-title` 命令；客户端通过核心 Remote `remote.commands.execute(sessionId, '/regenerate-title', [])` 触发——该 Remote 的 `agent` 查找会**自动恢复未打开的会话**，所以菜单项对任意历史会话都有效，且**不会切换当前对话**。
 

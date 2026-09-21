@@ -394,30 +394,22 @@ function makeElement(tag) {
     style: {},
     children: [],
     handlers: {},
+    parentElement: null,
     className: '',
     innerText: '',
     textContent: '',
     innerHTML: '',
     setAttribute(k, v) { el.attrs[k] = String(v) },
-    appendChild(child) { el.children.push(child); return child },
+    appendChild(child) { el.children.push(child); child.parentElement = el; return child },
     insertBefore(child, ref) {
       const i = el.children.indexOf(ref)
       if (i >= 0) el.children.splice(i, 0, child)
       else el.children.push(child)
+      child.parentElement = el
       return child
     },
     addEventListener(type, fn) { el.handlers[type] = fn },
-    querySelector(sel) {
-      const found = findIn(el, sel, false, null)
-      if (found) return found
-      // Convenience: the injected button sets label via querySelector('span').
-      if (sel === 'span' && el.tagName === 'BUTTON') {
-        const span = makeElement('SPAN')
-        el.appendChild(span)
-        return span
-      }
-      return null
-    },
+    querySelector(sel) { return findIn(el, sel, false, null) },
     querySelectorAll(sel) {
       const out = []
       findIn(el, sel, true, out)
@@ -581,6 +573,41 @@ function bootClient({ remoteCommands, sessions, locale }) {
   return { ctx, hooks: globalThis.window.__sessionTitleRegenTest }
 }
 
+/**
+ * Faithful core Menu session-row menu: every native row is a
+ * `div.itemWrap > button[role=menuitem] > span.itemIcon + span.itemLabel`, all
+ * inside the role=presentation viewport under [role=menu]. A third-party item
+ * (session-delete etc.) is a DIRECT child of [role=menu] AFTER that viewport.
+ */
+function buildCoreSessionMenu({ withSiblingPluginItem = false } = {}) {
+  const menu = globalThis.document.menuEl
+  menu.children.length = 0
+  const viewport = globalThis.document.createElement('div')
+  viewport.setAttribute('role', 'presentation')
+  menu.appendChild(viewport)
+  globalThis.document.viewport = viewport
+  const rows = ['重命名', '分叉会话', '归档会话'].map((text) => {
+    const wrap = globalThis.document.createElement('div')
+    const button = globalThis.document.createElement('button')
+    button.setAttribute('role', 'menuitem')
+    const icon = globalThis.document.createElement('span')
+    const label = globalThis.document.createElement('span')
+    label.textContent = text
+    button.appendChild(icon)
+    button.appendChild(label)
+    wrap.appendChild(button)
+    viewport.appendChild(wrap)
+    return wrap
+  })
+  if (withSiblingPluginItem) {
+    const sibling = globalThis.document.createElement('button')
+    sibling.setAttribute('role', 'menuitem')
+    sibling.setAttribute('data-chameleon-delete', '1')
+    menu.appendChild(sibling)
+  }
+  return { menu, viewport, rows }
+}
+
 // =============================================================================
 // Client: slot registration
 // =============================================================================
@@ -700,8 +727,17 @@ test('client: injects the regenerate item into the open session-row menu and fir
   assert.ok(item, 'menu item should be injected')
   assert.equal(item.attrs['data-session-title-regen'], '1')
   assert.equal(item.attrs.role, 'menuitem')
-  const label = item.querySelector('span')
+  const label = item.querySelector('[data-session-title-regen-label]')
   assert.equal(label.textContent, '重新生成标题')
+  // Row shape: own wrapper > button (icon slot + label slot), never a bare child of
+  // the viewport — third-party plugins clone `lastItem.parentElement` as "one row".
+  const row = item.parentElement
+  assert.equal(row.tagName, 'DIV')
+  assert.equal(row.children.length, 1)
+  assert.equal(item.children.length, 2, 'icon slot + label slot')
+  // This fixture's viewport is empty (no native item yet), so menuContentRoot falls
+  // back to the [role=menu] itself — the row wrapper is what protects the clone rule.
+  assert.equal(row.parentElement, globalThis.document.menuEl)
 
   // Clicking it resolves the row title 'Foo' -> session 'a' and fires the flow.
   await item.handlers.click()
@@ -719,46 +755,52 @@ test('client: menu item lands inside the viewport, after the official items and 
   const sessions = { list: { getSnapshot: () => ({ byId: { a: { title: 'Foo' } } }) } }
   const { hooks } = bootClient({ remoteCommands, sessions, locale: undefined })
 
-  // Rebuild a faithful core-shaped menu from scratch: native items
-  // (rename/fork/archive) live in the role=presentation viewport; session-delete's
-  // item is a DIRECT child of [role=menu] AFTER the viewport (its observer ran
-  // first). Reset the module flag so ensureMenuItem re-injects cleanly.
-  const menu = globalThis.document.menuEl
-  menu.children.length = 0
-  const viewport = globalThis.document.createElement('div')
-  viewport.setAttribute('role', 'presentation')
-  menu.appendChild(viewport)
-  globalThis.document.viewport = viewport
-  const mkItem = () => {
-    const b = globalThis.document.createElement('button')
-    b.setAttribute('role', 'menuitem')
-    return b
-  }
-  const rename = mkItem()
-  const fork = mkItem()
-  const archive = mkItem()
-  viewport.appendChild(rename)
-  viewport.appendChild(fork)
-  viewport.appendChild(archive)
-  const deleteItem = mkItem()
-  deleteItem.setAttribute('data-chameleon-delete', '1')
-  menu.appendChild(deleteItem)
+  // Rebuild a faithful core-shaped menu: the native trio are `div > button` rows inside
+  // the role=presentation viewport; session-delete's item is a DIRECT child of
+  // [role=menu] AFTER the viewport (its observer ran first).
+  const { menu, viewport, rows } = buildCoreSessionMenu({ withSiblingPluginItem: true })
+  const deleteItem = menu.children[menu.children.length - 1]
+  assert.equal(deleteItem.attrs['data-chameleon-delete'], '1')
 
   hooks.reset()
   hooks.ensureMenuItem()
 
-  // Ours is appended INSIDE the viewport, right after the native trio.
-  const ourItem = viewport.children.find((c) => c.attrs && c.attrs['data-session-title-regen'])
-  assert.ok(ourItem, 'regenerate item must be injected into the viewport')
-  assert.equal(viewport.children.indexOf(ourItem), 3)
-  assert.equal(viewport.children[0], rename)
-  assert.equal(viewport.children[1], fork)
-  assert.equal(viewport.children[2], archive)
+  // Ours is a WHOLE ROW appended INSIDE the viewport, right after the native trio.
   assert.equal(viewport.children.length, 4, 'viewport grows by exactly one — no separator')
+  assert.equal(viewport.children.indexOf(rows[0]), 0)
+  assert.equal(viewport.children.indexOf(rows[1]), 1)
+  assert.equal(viewport.children.indexOf(rows[2]), 2)
+  const ourRow = viewport.children[3]
+  assert.equal(ourRow.children.length, 1, 'injected row is one wrapper + one button')
+  assert.equal(ourRow.children[0].attrs['data-session-title-regen'], '1')
 
   // The delete plugin item stays a sibling AFTER the viewport => visually below ours.
   const menuChildren = menu.children
   assert.ok(menuChildren.indexOf(deleteItem) > menuChildren.indexOf(viewport))
+})
+
+test('client: injected row is self-contained, so a third-party "last item" clone copies ONE row', () => {
+  const remoteCommands = { execute: async () => ({ ok: true, value: { commandId: 'c5', result: { kind: 'success', text: 'x' } } }) }
+  const sessions = { list: { getSnapshot: () => ({ byId: { a: { title: 'Foo' } } }) } }
+  const { hooks } = bootClient({ remoteCommands, sessions, locale: undefined })
+  const { menu, viewport } = buildCoreSessionMenu()
+
+  hooks.reset()
+  hooks.ensureMenuItem()
+
+  // dsh-flowglass 0.7.0（「加入当前并发分支」）取最后一个 [role=menuitem]、把它的
+  // parentElement 当作「这一行」的容器 cloneNode(true)。裸 button 的 parentElement 是
+  // 整个 viewport ⇒ 克隆会复制整张菜单、而只改其中第一行（分叉/归档/… 成排重复）。
+  // 这里把那条规则原样跑一遍，断言我们不会踩中它。
+  const items = menu.querySelectorAll('[role=menuitem]')
+  const template = items[items.length - 1]
+  assert.equal(template.attrs['data-session-title-regen'], '1', '注入项就是最后一个菜单项')
+  const rowContainer = template.parentElement
+  assert.notEqual(rowContainer, viewport, '最后一项的 parentElement 必须是这一行自己')
+  assert.equal(rowContainer.parentElement, viewport)
+  assert.equal(rowContainer.children.length, 1, '克隆这一行只得到一行')
+  // 图标槽 + 文案槽各占一个 span：第三方按 spans[0]/spans[1] 改写文案时结构不塌。
+  assert.equal(template.querySelectorAll('span').length, 2)
 })
 
 // =============================================================================

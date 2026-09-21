@@ -5,7 +5,9 @@
 //   2. sidebar session-row "..." menu item (DOM injection, title-matched) —
 //      core ui-workspace hard-codes that menu (rename/fork/archive) with no
 //      extension slot, so the item is injected at the DOM level exactly like
-//      @huanlin/dsh-plugin-session-delete does.
+//      @huanlin/dsh-plugin-session-delete does — but as a row ISOMORPHIC to the
+//      native ones (own wrapper + icon slot + label slot), because third-party
+//      plugins clone the last item's parentElement as "one row".
 //
 // Both trigger the host's `/regenerate-title` command through
 // `remote.commands.execute(sessionId, '/regenerate-title', [])` — a core
@@ -335,6 +337,16 @@ window.__ModuleLoader__.load({
     // official action rather than a plugin afterthought, we append our own item
     // INTO that viewport: it lands directly under 重命名/分叉/归档 and above
     // every plugin group, with no separator of ours.
+    //
+    // The injected row is ISOMORPHIC to a native one: our own wrapper div holds
+    // the role=menuitem button, which holds an icon-slot span and a label-slot span
+    // (a native row is `div.itemWrap > button[role=menuitem] > span.itemIcon +
+    // span.itemLabel`). Third-party plugins parse that shape STRUCTURALLY —
+    // dsh-flowglass 0.7.0's "join current parallel branch" enhancement takes
+    // `items[items.length - 1].parentElement` as "the row container" and deep-clones
+    // it. With a bare button that parent is the whole viewport, so the clone copies
+    // EVERY row (rename/fork/archive included) and only relabels its first — the menu
+    // then shows 分叉/归档/… twice. One wrapper per row keeps such a clone to one row.
 
     /**
      * 定位原生菜单项所在的内容区：第一个同时带 role=presentation 且内含
@@ -357,16 +369,17 @@ window.__ModuleLoader__.load({
     /**
      * 把"重新生成标题"注入原生内容区（viewport），使其紧跟官方三项、位于所有
      * 直接 append 到 [role=menu] 的插件项之前。不创建自己的分隔线。
-     * - 参数类型：menu -- Element：打开的 [role=menu]；item -- Element：待插入项。
+     * entry 是自带包裹层的一整行（见上方同构说明），不是裸按钮。
+     * - 参数类型：menu -- Element：打开的 [role=menu]；entry -- Element：待插入的行容器。
      * - 返回值：无。
-     * - 调用样例：insertMenuEntry(menu, item)
+     * - 调用样例：insertMenuEntry(menu, wrap)
      */
-    function insertMenuEntry(menu, item) {
+    function insertMenuEntry(menu, entry) {
       const root = menuContentRoot(menu)
       try {
-        root.appendChild(item)
+        root.appendChild(entry)
       } catch {
-        menu.appendChild(item)
+        menu.appendChild(entry)
       }
     }
 
@@ -418,6 +431,9 @@ window.__ModuleLoader__.load({
       if (menu.querySelector('[data-session-title-regen]')) return
       const row = findOpenSessionRow()
       if (!row) return // 不是会话行菜单
+      // 行容器：官方每行都是 `div > button[role=menuitem]`，注入项必须自带这一层，
+      // 否则会破坏第三方按「最后一个 menuitem 的 parentElement」做的整行克隆（见上方注释）。
+      const wrap = document.createElement('div')
       const item = document.createElement('button')
       item.type = 'button'
       item.setAttribute('role', 'menuitem')
@@ -431,8 +447,16 @@ window.__ModuleLoader__.load({
       ].join(';')
       // DeepSeek circular refresh icon (matches the ui-workspace regenerate
       // affordance glyph the user asked to mirror), 16x16 currentColor.
-      item.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex:none"><path d="M7.92136 0.349152C10.3744 0.349234 12.5564 1.5052 13.9557 3.29894L15.1281 2.12759C15.3303 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8854 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98908 1.74106 7.92136 1.74097C4.46436 1.74097 1.66233 4.543 1.66233 8C1.66233 11.457 4.46436 14.259 7.92136 14.259C11.3782 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92136 15.6508C3.69614 15.6508 0.270508 12.2252 0.270508 8C0.270508 3.77478 3.69614 0.349152 7.92136 0.349152Z" fill="currentColor"/></svg><span></span>'
-      item.querySelector('span').textContent = __t('menu.regenerate')
+      // 图标槽：只占一个 span，与核心 .itemIcon 同形（inline-flex / flex:none），
+      // 不依赖核心的 hash 类名。
+      const icon = document.createElement('span')
+      icon.style.cssText = 'display:inline-flex;align-items:center;flex:none'
+      icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex:none"><path d="M7.92136 0.349152C10.3744 0.349234 12.5564 1.5052 13.9557 3.29894L15.1281 2.12759C15.3303 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8854 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98908 1.74106 7.92136 1.74097C4.46436 1.74097 1.66233 4.543 1.66233 8C1.66233 11.457 4.46436 14.259 7.92136 14.259C11.3782 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92136 15.6508C3.69614 15.6508 0.270508 12.2252 0.270508 8C0.270508 3.77478 3.69614 0.349152 7.92136 0.349152Z" fill="currentColor"/></svg>'
+      const label = document.createElement('span')
+      label.setAttribute('data-session-title-regen-label', '1')
+      label.textContent = __t('menu.regenerate')
+      item.appendChild(icon)
+      item.appendChild(label)
       bindMenuItemHover(item)
       item.addEventListener('click', () => {
         const title = readRowTitle(row)
@@ -447,15 +471,15 @@ window.__ModuleLoader__.load({
           else notify(false, result.message || __t('toast.failed'))
         })
       })
-      insertMenuEntry(menu, item)
+      wrap.appendChild(item)
+      insertMenuEntry(menu, wrap)
     }
 
     /** 语言切换时刷新已注入菜单项的文案。 */
     function refreshMenuLabel() {
-      const items = document.querySelectorAll('[data-session-title-regen]')
-      for (let i = 0; i < items.length; i++) {
-        const span = items[i].querySelector('span')
-        if (span) span.textContent = __t('menu.regenerate')
+      const labels = document.querySelectorAll('[data-session-title-regen-label]')
+      for (let i = 0; i < labels.length; i++) {
+        labels[i].textContent = __t('menu.regenerate')
       }
     }
 

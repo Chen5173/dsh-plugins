@@ -1,7 +1,7 @@
 # DSH 插件：会话「重新生成标题」（dsh-session-title-regenerate）— 2026-09-06
 
 ## 目标（What & Why）
-给 DSH 会话加「重新生成标题」动作：用**当前模型、最低推理档**总结该会话**全部用户提问**，生成 ≤60 字单行标题并覆盖旧标题。入口：会话头部操作按钮 + 侧边栏会话行 `⋯` 菜单项。GUI 无法自动化，交付物 = 插件源码 + 23 条可跑逻辑测试 + README/ACCEPTANCE 验收清单。
+给 DSH 会话加「重新生成标题」动作：用**当前模型、最低推理档**总结该会话**全部用户提问**，生成 ≤60 字单行标题并覆盖旧标题。入口：会话头部操作按钮 + 侧边栏会话行 `⋯` 菜单项。GUI 无法自动化，交付物 = 插件源码 + 25 条可跑逻辑测试 + README/ACCEPTANCE 验收清单。
 
 ## 改动摘要（What changed）
 - 新插件目录 `dsh-session-title-regenerate/`：`package.json`（cordis client 声明）、`cordis.patch.yml`、`src/index.js`(host)、`src/client.js`(client)、`test/bundle.test.mjs`、`README.md`、`ACCEPTANCE.md`，以及测试专用本地 `dsh-llm` 桩（`node_modules/@deepseek-ai/dsh-llm`，不发布、运行时不用）。
@@ -34,8 +34,16 @@
 
 ## 复现 / 验证（Verify）
 ```bash
-node dsh-session-title-regenerate/test/bundle.test.mjs        # 23/23 逻辑测试
+node dsh-session-title-regenerate/test/bundle.test.mjs        # 25/25 逻辑测试
 node --check dsh-session-title-regenerate/src/index.js
 node --check dsh-session-title-regenerate/src/client.js
 ```
 GUI：硬刷新（Ctrl+Shift+R）→ 打开会话行 `⋯` 菜单：应为 `重命名 / 分叉会话 / 归档会话 / 重新生成标题`（无分隔线），`删除会话` 在其下；点击后不切换会话、Toast 显示新标题、列表标题即时更新。
+
+## 2026-09-21：注入项必须与官方行同构（修「整张菜单被复制」）
+- **现象**：开着 `dsh-flowglass` 时打开侧栏会话行 `⋯` 菜单，`分叉 / 归档 / 重新生成标题` 各出现两次（官方项也被复制）。
+- **根因（责任在本插件的 DOM 形态）**：`dsh-flowglass` 0.7.0 的「加入当前并发分支」增强按**结构**解析这张菜单——取 `items[items.length - 1]`（最后一个 `[role=menuitem]`）的 `parentElement` 当作"这一行"，`cloneNode(true)` 后只改克隆体里**第一个** `menuitem` 的文案，再 `viewport.appendChild(clone)`。核心每个原生行是 `div.itemWrap > button[role=menuitem] > span.itemIcon + span.itemLabel`，其 `parentElement` 就是"这一行自己"；而本插件当初把**裸 button** 直接 append 进 viewport ⇒ 最后一项的 `parentElement` 是**整个 viewport** ⇒ 克隆复制整张菜单，只把其中第一行（重命名）换成 flowglass 的「＋加入当前并发分支」，其余三行原样重复。它的 enhance 走 `Promise.resolve().then(enhance)`，比我们的同步注入晚一个微任务 ⇒ 必然看到裸 button，稳定复现、不是竞态。
+- **修法（本插件侧）**：注入项改成与官方行同构的一整行——自带包裹层 `div`，按钮内**图标槽 + 文案槽各一个 `span`**（几何仍用内联样式，不依赖核心 hash 类名）；文案刷新改按 `[data-session-title-regen-label]` 定位（否则 `querySelector('span')` 命中的会是图标槽）。修后最后一项的 `parentElement` 又是"这一行自己"，克隆只影响一行，且 flowglass 那行仍能取到 `spans[0]`（＋号）与 `spans[1]`（文案）。
+- **验证**：`test/bundle.test.mjs` 新增 1 条把 flowglass 的选择规则原样跑一遍的回归用例（同时给假 DOM 补 `parentElement`、删掉已无用的 `querySelector('span')` 便利钩子），25/25 绿；另用 jsdom 跑**真实 `src/client.js`**：修前菜单 8 行含 `分叉会话/归档会话/重新生成标题` 3 行重复、修后 0 行重复。
+- **可复用结论**：往核心写死的 DOM 里注入内容，必须与官方节点**同构**，而不是"能挂上就行"——第三方插件（不止 flowglass；`session-delete` 等直接 append 到 `[role=menu]`）会按 `role`、父子层级、`spans[i]` 这类结构假设解析，裸节点/错层会以"别人的菜单被复制"这种远端形态爆出来。诊断套路：先 `grep` 活跃插件里对 `[role=menu]`/`menuitem`/`parentElement` 的用法，再用 jsdom 把可疑插件那段逻辑**原文**跑一遍做 A/B。
+- 遗留（可接受、不加特判）：第三方克隆体也会带上我们的标记属性，理论上"菜单开着的同时切语言"会让克隆体文案被改回我们的——该组合实际不可达（切语言要开设置面板，届时菜单已关）。
