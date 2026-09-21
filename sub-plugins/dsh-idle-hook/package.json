@@ -1,0 +1,46 @@
+{
+  "name": "dsh-idle-hook",
+  "version": "0.1.0",
+  "description": "Idle/awaiting-human hook for DeepSeek Harness: run a user-configured local script (python/bat/ps1/sh/executable) whenever the model is not running — turn finished, tool approval pending, or a question awaiting an answer — and push the notification wherever you want (macOS/Windows desktop, Bark/ntfy, chat webhooks, NetEase POPO).",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "notification",
+    "idle",
+    "hook",
+    "script",
+    "approval"
+  ],
+  "files": [
+    "src/",
+    "examples/",
+    "README.md",
+    "ACCEPTANCE.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-runtime": "^0.1.2-rc.1"
+  },
+  "scripts": {
+    "test": "node test/host-core.test.mjs && node test/bundle.test.mjs"
+  }
+}

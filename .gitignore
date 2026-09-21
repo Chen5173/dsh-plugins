@@ -14,3 +14,8 @@ node_modules/
 
 # 临时稿 / 跨工作区交接稿（自包含文档，不随本仓库入库）
 tmp/
+
+# 插件示例里的「私有脚本」目录：放个人/内网接口的脚本，刻意不入库
+# （例：sub-plugins/dsh-idle-hook/examples/private/ 下的内网 notify 脚本）
+# 注意：带斜杠的规则锚定仓库根，所以这里用 **/ 前缀匹配任意深度
+**/examples/private/

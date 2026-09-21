@@ -27,6 +27,7 @@ dsh plugin --profile web add <本机仓库根>                                  
 | [`dsh-session-time-bucket`](../sub-plugins/dsh-session-time-bucket/README.md) | 侧栏会话列表按**今天/昨天/前7天/前30天/更早**分组 | 自动：核心处于「单列表 + 最近更新」时接管观感 | 纯客户端 | 无需操作；切到按工作区/手动排序或搜索时自动退出 |
 | ~~[`dsh-open-session-workdir`](../sub-plugins/dsh-open-session-workdir/README.md)~~ **已退役** | ~~一键用**系统文件管理器**打开当前会话的工作目录~~ —— 核心已自带「Open In…」分体按钮（探测已装应用 + 记住上次选择） | 不再出现在管理器面板；源码保留在仓库 | — | 退役中：管理器扫描跳过它（`RETIRED_PLUGIN_DIRS`），无法再激活 |
 | [`dsh-hindsight-model`](../sub-plugins/dsh-hindsight-model/README.md) | 看清 **Hindsight 守护进程**当前跑的是哪个模型、改掉它，**启停它**，并按需自动拉起 —— 四层对照（落盘 / 进程实际生效 / 外层冲突源 / 生效判据） | 设置 → **Hindsight 模型** | 宿主 + 客户端 | 需 `webServer` 与 `~/.hindsight/coding-agent.json`；缺失时只禁用对应区块，其余照常 |
+| [`dsh-idle-hook`](../sub-plugins/dsh-idle-hook/README.md) | 模型不在运行时（一轮结束 / 等待批准 / 等待回答）按规则执行**本机脚本**（py/bat/ps1/sh/可执行），把通知送到页面关掉也能到的地方 | 设置 → **空闲通知** | 宿主 + 客户端 | 需 `settings` 服务读规则与 `webServer` 提供设置页/心跳；二者缺席时降级为「无规则不触发」，宿主半照常加载 |
 
 ## 逐个怎么说"怎么用"
 
@@ -112,6 +113,19 @@ dsh plugin --profile web add <本机仓库根>                                  
 - **启动前自愈 `pythonw.exe`**：启动前读 `<embed>\.venv\Scripts\pythonw.exe` 的可执行文件头；若是「会分配控制台」的形态，先备份原件到 `.venv` 之外、再换成同一发行版的无控制台版本，然后才启动（换没换都如实报告；取不到替代品或替换失败则**拒绝启动**）。
 - **启动来源与窗口风险**：面板标注守护进程是 **自动 / 手动 / 外部 / 未知** 拉起的（判定只用监听进程与镜像路径，不写标记文件），镜像是控制台程序时同时标「有控制台窗口风险」。
 
+### dsh-idle-hook — 空闲通知
+
+- **入口**：设置页左侧一级导航「空闲通知」（`settings.section`，`order: 19`）。
+- **触发点**（宿主半，页面关着也生效）：`session/event` 里的 `turn/end`（`completed`/`blocked`/`error`/`max-tokens`，以及除 `aborted:user`/`aborted:disposed` 外的 aborted；触发前延时复查 agent 空闲且 `inbox` 无排队输入）、`approval/request` 瀑布、`user-questions/request` 瀑布（后两者**只观察**：`{ prepend: true }` + 立即 `return next()` + 不 await 脚本）。**子代理会话静默**（按 `ctx.agents.roots()` 判定顶层会话）。
+- **它做什么**：按你配置的规则执行本机脚本（`.py`→python3/python、`.bat`/`.cmd`→cmd /c、`.ps1`→powershell、`.sh`→bash、其它直接执行；参数数组直传默认不过 shell，可用占位符 `{sessionId}`/`{cwd}`/`{title}`/`{reason}`）；上下文走 stdin JSON（含会话标题）＋ ASCII 安全环境变量（`IDLE_HOOK_*`），**不含对话正文**。
+- **节奏与失败**：边沿触发；同规则+同会话去抖 3s（可配）；同规则并发时跳过；超时 30s（可配）杀进程；连续失败 3 次自动停用并在面板标红，重新启用清零。
+- **页面在场**：客户端每 5s 上报可见性/聚焦到 `/__idle-hook/presence`；30s 无心跳即判「页面关着」。规则的「触发前提」三档（任意 / 仅页面关着 / 仅不可见或失焦）就是靠它实现——**这是与 `dsh-notification`（浏览器原生通知、只在页面开着时响）分工互斥的开关**。
+- **配置存放**：规则在 `<DSH_HOME 或 ~/.dsh>/settings.yaml` 的 `idle-hook:` 命名空间（`enabled` / `seeded` / `rules[]`，客户端经 `remote.settings` 整份写）；执行历史与运行状态落 `<DSH_HOME 或 ~/.dsh>/idle-hook-history.json`（滚动 200 条）。
+- **环境变量（两层）**：设置页顶部「全局环境变量」框（所有规则共用）+ 每条规则表单里的「环境变量」框（同名覆盖全局）；表格形式（变量名 / 值两列，可增可删），值支持 `{cwd}` 等占位符，`IDLE_HOOK_*` 由插件注入、不可覆盖（仅提示）。文本格式：值明文落在 `<DSH_HOME 或 ~/.dsh>/settings.yaml`，执行历史只记变量名不记值。
+- **示例脚本**：通用渠道在 `examples/`（本机通知、Bark/ntfy、Webhook、路由器）；**内网接口**的三个（POPO / 邮件 / 二合一）放在 `examples/private/` —— 该目录被 `.gitignore` 忽略（`**/examples/private/`），刻意不入库，你自己不想提交的脚本也放这儿。
+- **端点**：`/__idle-hook/{status,presence,history,clear-history,test-run,reset-rule}`。
+- **副作用**：以 DSH 进程身份执行你配置的本地进程（**不经** DSH 的 sandbox 策略）；不注册任何面向模型的工具。
+
 ## UI 触点分布（核对过的槽位与 order）
 
 同一槽位内按 `order` 升序排列；不同插件的 order **互不相同**，所以启用任意组合都不会互相遮蔽。
@@ -121,11 +135,11 @@ dsh plugin --profile web add <本机仓库根>                                  
 | composer 覆盖层 `conversation.input.overlay` | `dsh-composer-history-recall`（50）· `dsh-esc-rewind`（60） |
 | composer 右侧组 `conversation.input.right` | `dsh-composer-provider-label`（10，紧邻核心模型选择器左侧） |
 | 会话头操作区 `conversation.session.header.actions` | `dsh-session-title-regenerate`（27）· `dsh-esc-rewind` 处置开关（28）；核心自身另有 日程(10)/任务(20)/删除(30)。~~`dsh-open-session-workdir`（25）~~ 已于 2026-09-18 退役 |
-| 设置页 `settings.section` | `dsh-plugin-manager`「本地插件」（16）· `dsh-hindsight-model`「Hindsight 模型」（17） |
+| 设置页 `settings.section` | `dsh-plugin-manager`「本地插件」（16）· `dsh-hindsight-model`「Hindsight 模型」（17）· `dsh-idle-hook`「空闲通知」（19） |
 | 斜杠命令 | `/rewind`（客户端 `commandUi` 贡献）· `/regenerate-title`（宿主命令） |
 | 侧栏会话行 `⋯` 菜单 | `dsh-session-title-regenerate`（DOM 注入，核心无插件槽） |
 | 侧栏会话列表 | `dsh-session-time-bucket`（就地注入组头 + `[工作区]` 前缀，非槽位） |
-| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__hindsight-model/{state,save,dsh-model,verify,clean-env,daemon,auto}` |
+| 宿主 HTTP | `/__dsh-plugin-manager/{status,list,set-enabled,set-all-enabled,remove,migrate}` · `/__esc-rewind/{status,session/delete}` · `/__hindsight-model/{state,save,dsh-model,verify,clean-env,daemon,auto}` · `/__idle-hook/{status,presence,history,clear-history,test-run,reset-rule}` |
 
 > ⚠️ 会话头图标排现在只剩**两个**插件行（27/28，`dsh-open-session-workdir` 的 25 已随插件退役）：`dsh-session-title-regenerate` 与 `dsh-esc-rewind`。核心自身另有 日程(10)/任务(20)/删除(30)，以及**另一枚分体按钮**「Open In…」——它不在 `actions` 槽，而在 `conversation.session.header.utilities`。
 
