@@ -821,18 +821,21 @@ test('a real turn/end runs an enabled rule end-to-end (the wiring both bugs hid 
   const host = await import('../src/index.js')
   const marker = path.join(hostHome, 'fired.txt')
   fs.rmSync(marker, { force: true })
+  // A real script both rules point at: `/usr/bin/touch` does not exist on Windows, and
+  // the `.mjs` fixture is picked up by the automatic node interpreter on every platform.
+  const scriptFixture = path.join(here, 'fixtures', 'probe.mjs')
   const config = {
     enabled: true,
     seeded: true,
     env: {},
     rules: [
       {
-        id: 'r-fire', name: '应触发', enabled: true, command: '/usr/bin/touch', args: [marker],
+        id: 'r-fire', name: '应触发', enabled: true, command: scriptFixture, args: [marker],
         interpreter: '', cwd: '', triggers: { turnEnd: true, approval: false, question: false },
         precondition: 'any', debounceMs: 0, timeoutMs: 5000, shell: false, env: {},
       },
       {
-        id: 'r-off', name: '已停用', enabled: false, command: '/usr/bin/touch', args: [marker + '.off'],
+        id: 'r-off', name: '已停用', enabled: false, command: scriptFixture, args: [marker + '.off'],
         interpreter: '', cwd: '', triggers: { turnEnd: true, approval: true, question: true },
         precondition: 'any', debounceMs: 0, timeoutMs: 5000, shell: false, env: {},
       },

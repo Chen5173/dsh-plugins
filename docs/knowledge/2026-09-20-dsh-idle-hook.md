@@ -56,8 +56,14 @@
 - **定位手段**（值得保留的做法）：给宿主半加**廉价计数**（`sessionEvents / turnEndEligible / turnEndConfirmed / dispatched + lastDispatch{rules}`）并在 `/status` 暴露快照。一次读表就能把「没收到事件 / 不够格 / 没确认空闲 / 分发了但 0 条规则」分开，不用猜。
 - **最大的教训**：我最初的 harness 用 `{ type: 'turn/end', reason: {...} }` 这种**自己臆造的形状**喂监听器，于是测试和实现一起错、还全绿。修法是：**测试必须用线上真实形状**（从会话日志里抄一行下来），并且断言**计数**而不是只断言「不抛错」。改完做了反向验证：把修复退回去，测试立刻红（`0 !== 1`）。
 
+### 11. Windows 上这两条用例是红的 —— `~` 展开按宿主平台拼、真子进程硬写 `/usr/bin/touch`（2026-09-21 补）
+- **症状**：插件入库后在本机（Windows）跑，两条用例红：`buildCommand: ~ expansion and placeholders` 期望 `/Users/me/bin/notify.sh` 却实得 `\Users\me\bin\notify.sh`；端到端那条 `command: '/usr/bin/touch'` 在这台机器上根本不存在 ⇒ 标记文件没产生、`the enabled rule really ran` 断言失败。AGENTS.md 的离线全量 sweep（`for f in sub-plugins/*/test/*.test.mjs`）因此整体为红。
+- **`~` 那条是实现的 bug，不是用例写错**：`expandTilde` 用**宿主**的 `path.join` 拼接，而 `buildCommand` 一路都在用注入的 `platform`（`interpreterFor` / `quoteIfNeeded` / `sampleRule` 全按目标平台分支）⇒ 在 Windows 上跑 `platform: 'darwin'` 会把 `/Users/me` 拼成 `\Users\me`。修法：`expandTilde(value, home, platform = process.platform)` 内按目标平台选 `path.win32` / `path.posix`，`buildCommand` 把 `platform` 传下去；宿主侧展开 `rule.cwd` 的那处不传 platform（仍按本机平台，行为不变）。
+- **`/usr/bin/touch` 那条是用例的平台假设**：改用仓库既有的 `test/fixtures/probe.mjs`（`.mjs` 由自动解释器认成 node，跨平台；它本来就把 stdin JSON 写进 `argv[2]` 指定的文件），两条规则都指向它——「启用的规则真的跑了 / 停用的规则没跑」两个断言的含意不变。
+- **可复用结论**：本仓库的测试是在 **Windows** 上跑全量 sweep 的，任何「真子进程 / 真路径」用例必须用 `process.execPath` + fixture 或 `path.join` 构造，**不能硬写 POSIX 绝对路径**；反过来，凡是**接受注入 `platform` 的函数**，拼接路径也必须用目标平台的规则，否则那个 `platform` 在测试里只是装饰。
+
 ## 验证方式
 ```sh
-node sub-plugins/dsh-idle-hook/test/host-core.test.mjs   # 36 项：矩阵/解释器/上下文/presence/失败计数 + 真子进程执行、超时杀、非零退出
-node sub-plugins/dsh-idle-hook/test/bundle.test.mjs      # 11 项：注册/渲染/写入/试跑/心跳 + 宿主半零 core import、瀑布 prepend+return next
+node sub-plugins/dsh-idle-hook/test/host-core.test.mjs   # 50 项：矩阵/解释器/上下文/presence/失败计数 + 真子进程执行、超时杀、非零退出（2026-09-21 实测计数）
+node sub-plugins/dsh-idle-hook/test/bundle.test.mjs      # 22 项：注册/渲染/写入/试跑/心跳 + 宿主半零 core import、瀑布 prepend+return next（2026-09-21 实测计数）
 ```

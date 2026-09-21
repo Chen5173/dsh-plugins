@@ -66,11 +66,19 @@ export function historyPathOf(home) {
   return path.join(home || dshHome(), HISTORY_FILE_NAME)
 }
 
-/** Expand a leading ~ (the only shell-ism a script path needs). */
-export function expandTilde(value, home = os.homedir()) {
+/**
+ * Expand a leading ~ (the only shell-ism a script path needs).
+ * The join follows the TARGET platform, not the host: buildCommand takes an
+ * injected `platform` (tests; settings written for another OS), and a host
+ * `path.join` on Windows turns a darwin target's `~/bin/x.sh` into
+ * `\\Users\\me\\bin\\x.sh`.
+ */
+export function expandTilde(value, home = os.homedir(), platform = process.platform) {
   if (typeof value !== 'string' || !value) return value
   if (value === '~') return home
-  if (value.startsWith('~/') || value.startsWith('~\\')) return path.join(home, value.slice(2))
+  if (value.startsWith('~/') || value.startsWith('~\\')) {
+    return (platform === 'win32' ? path.win32 : path.posix).join(home, value.slice(2))
+  }
   return value
 }
 
@@ -152,7 +160,7 @@ export function buildCommand(rule, values = {}, options = {}) {
   if (!rawText) return { ok: false, error: '命令为空' }
   const split = splitInterpreterCommand(applyPlaceholders(rawText, values))
   const raw = split.command
-  const file = expandTilde(raw, home)
+  const file = expandTilde(raw, home, platform)
   const args = (Array.isArray(rule && rule.args) ? rule.args : []).map((a) => applyPlaceholders(String(a == null ? '' : a), values))
   if (rule && rule.shell === true) {
     const line = [quoteIfNeeded(file, platform)].concat(args.map((a) => quoteIfNeeded(a, platform))).join(' ')
