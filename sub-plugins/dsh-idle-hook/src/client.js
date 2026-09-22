@@ -1121,10 +1121,11 @@ window.__ModuleLoader__.load({
     // --- registration --------------------------------------------------------
     function apply(ctx) {
       componentCtx = ctx
-      ctx.slots.inject('settings.section', () => ctx.slots.register({
-        name: 'settings.section',
+      // One tab inside the core "Plugins" settings page (no Settings nav row).
+      ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+        name: 'settings.plugins.tab',
         id: 'idle-hook',
-        order: 19,
+        order: 40,
         label: () => t('nav'),
       }, IdleHookSection))
       if (typeof ctx.effect === 'function') ctx.effect(() => startHeartbeat())

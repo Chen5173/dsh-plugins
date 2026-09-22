@@ -1,12 +1,12 @@
 # dsh-idle-hook — ACCEPTANCE
 
-验收对象：`dsh-idle-hook`（设置页「空闲通知」+ 宿主半触发器与执行器）。
+验收对象：`dsh-idle-hook`（设置 → 插件 → 「空闲通知」tab + 宿主半触发器与执行器）。
 证据约定：`[A]` = 自动化断言（`node sub-plugins/dsh-idle-hook/test/*.test.mjs`），`[B]` = 需要在浏览器/真机上用眼睛和手验。
 
 ## 0. 前置
 
 - [ ] 0.1 [A] `node sub-plugins/dsh-idle-hook/test/host-core.test.mjs` 全绿（36 项）——触发矩阵、解释器映射、参数/占位符/工作目录、上下文与隐私边界、presence 三档、去抖、失败计数、历史滚动，以及**真子进程**执行/超时杀/非零退出/解释器缺失
-- [ ] 0.2 [A] `node sub-plugins/dsh-idle-hook/test/bundle.test.mjs` 全绿（11 项）——bundle id、settings.section 注册（id/order/label）、规则渲染、总开关写入、规则保存、试跑、心跳、历史面板、宿主半零 core import 护栏、两个瀑布 prepend + `return next()`
+- [ ] 0.2 [A] `node sub-plugins/dsh-idle-hook/test/bundle.test.mjs` 全绿（22 项）——bundle id、`settings.plugins.tab` 注册（id/order/label）、规则渲染、总开关写入、规则保存、试跑、心跳、历史面板、宿主半零 core import 护栏、两个瀑布 prepend + `return next()`
 - [ ] 0.3 [A] `node --check sub-plugins/dsh-idle-hook/src/{index,client,host-core}.js` 无语法错误
 - [ ] 0.4 [A] `grep -c "from '@deepseek-ai/" sub-plugins/dsh-idle-hook/src/index.js` 为 0（宿主半零 core import 铁律）
 - [ ] 0.5 [A] `openspec validate add-dsh-idle-hook --strict` 通过
@@ -15,7 +15,7 @@
 ## 1. 安装与界面出现
 
 - [ ] 1.1 [B] 设置 → 本地插件 里启用 `dsh-idle-hook`；面板提示需要刷新页面
-- [ ] 1.2 [B] 刷新页面后，设置里出现一级入口**空闲通知**，与已有的 Notifications 页并列
+- [ ] 1.2 [B] 刷新页面后，设置 → 插件 里出现「空闲通知」tab（与核心自带 tab 并列；设置左侧导航不再单独占一行）
 - [ ] 1.3 [B] 首次打开时已预置**一条禁用**的示例规则（macOS 提示音 / Windows 通知），且此时没有任何进程被拉起
 - [ ] 1.4 [B] 顶部「页面状态」显示「页面在线（已聚焦）」；切走标签页后刷新设置为「（页面不可见）」
 

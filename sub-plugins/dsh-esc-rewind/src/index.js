@@ -6,6 +6,15 @@
 // rewind. That is exactly what this half adds, but ONLY when the user turns the
 // global switch on:
 //
+//   GET  /__esc-rewind/orphans          (read-only orphan scan)
+//     lists every unreachable subagent session (whose durable parent is gone)
+//     with the facts the client needs to stop or rescue it. Never mutates.
+//
+//   POST /__esc-rewind/orphans/stop     (cancel one batch of orphan runs)
+//     cancels the listed orphans' agents and waits (bounded) for quiescence;
+//     missing agents are idempotent no-ops, an unobserved idle is reported as
+//     unconfirmed. Never deletes or rewrites session content.
+//
 //   settings namespace `esc-rewind.deleteOldOnRewind`  (default false)
 //     registered here so the settings page / settings.yaml can show it and the
 //     client half can read it through `remote.settings.describe()`.
@@ -50,6 +59,10 @@ export const DEFAULT_DELETE_OLD = false
 export const DELETE_PATH = '/__esc-rewind/session/delete'
 /** Read-only status probe path (diagnostics / ACCEPTANCE 5.10). */
 export const STATUS_PATH = '/__esc-rewind/status'
+/** Read-only orphan scan: unreachable subagent sessions of this workbench. */
+export const ORPHANS_PATH = '/__esc-rewind/orphans'
+/** Stop one batch of orphan runs (cancel + bounded quiescence). */
+export const ORPHANS_STOP_PATH = '/__esc-rewind/orphans/stop'
 
 /** No hard host dependencies: every service is reached lazily. */
 const inject = []
@@ -282,6 +295,182 @@ export async function subagentGuardOf(ctx, sessionId) {
   }
 }
 
+// --- orphan subagents (read-only scan + stop) --------------------------------
+
+/** Session event types the orphan scan reads (descriptor label + boundary). */
+const ORPHAN_DESCRIPTOR_TYPE = 'subagent/descriptor'
+const ORPHAN_TURN_END_TYPE = 'turn/end'
+/** Concurrent cold observations per scan (local persistence: keep it modest). */
+const ORPHAN_READ_CONCURRENCY = 4
+/** Default quiescence wait after cancelling one orphan run. */
+const ORPHAN_STOP_WAIT_MS = 15000
+
+/**
+ * Unreachable subagent sessions inside one session corpus. A subagent is
+ * reachable only through its own header's `parentSession` chain up to a normal
+ * Session (the sidebar renders no subagent rows, so the parent's catalog is its
+ * only entry): an entry is an orphan when its parent is absent from the corpus
+ * or is itself an orphan. Pure: reads no service and mutates nothing.
+ * @returns `[{ id, parentId }]` sorted by id.
+ */
+export function orphanSetOf(corpus) {
+  const byId = new Map()
+  for (const record of Array.isArray(corpus) ? corpus : []) {
+    const header = record && typeof record === 'object' ? (record.header || record) : null
+    if (!header || typeof header.id !== 'string' || header.id === '') continue
+    byId.set(header.id, header)
+  }
+  const cache = new Map()
+  const reachable = (header, seen) => {
+    const known = cache.get(header.id)
+    if (known !== undefined) return known
+    if (seen.has(header.id)) return true
+    seen.add(header.id)
+    let result = true
+    if (header.origin === 'subagent') {
+      const parentId = header.parentSession
+      result = typeof parentId === 'string' && parentId !== '' && byId.has(parentId)
+        ? reachable(byId.get(parentId), seen)
+        : false
+    }
+    seen.delete(header.id)
+    cache.set(header.id, result)
+    return result
+  }
+  const orphans = []
+  for (const header of byId.values()) {
+    if (header.origin !== 'subagent') continue
+    if (!reachable(header, new Set())) {
+      orphans.push({ id: header.id, parentId: typeof header.parentSession === 'string' ? header.parentSession : null })
+    }
+  }
+  orphans.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+  return orphans
+}
+
+/**
+ * Read one orphan's facts: descriptor label, last completed turn boundary (the
+ * fork anchor a rescue needs), whether its agent is running, and its last
+ * activity time. A failing read degrades that row only.
+ */
+async function describeOrphan(ctx, entry, signal) {
+  const query = typeof ctx.get === 'function' ? ctx.get('sessionQuery') : null
+  const agents = typeof ctx.get === 'function' ? ctx.get('agents') : null
+  const agent = agents && typeof agents.get === 'function' ? agents.get(entry.id) : undefined
+  const row = {
+    id: entry.id,
+    label: entry.id,
+    parentId: entry.parentId,
+    running: agent !== undefined && agent.status === 'running',
+    canRescue: false,
+    atSeq: null,
+    lastActivity: null,
+    error: null,
+  }
+  if (!query || typeof query.observeSession !== 'function') {
+    row.error = 'session-query-unavailable'
+    return row
+  }
+  let observation = null
+  try {
+    observation = await query.observeSession(entry.id, {
+      ...(signal === undefined ? {} : { signal }),
+      projectionMode: 'none',
+    })
+    const events = observation && Array.isArray(observation.events) ? observation.events : []
+    for (const event of events) {
+      if (!event || typeof event !== 'object') continue
+      if (event.type === ORPHAN_DESCRIPTOR_TYPE && row.label === entry.id) {
+        const data = event.data
+        if (data && typeof data.label === 'string' && data.label !== '') row.label = data.label
+      }
+      if (event.type === ORPHAN_TURN_END_TYPE && typeof event.seq === 'number') row.atSeq = event.seq
+      if (typeof event.time === 'number') {
+        row.lastActivity = row.lastActivity === null ? event.time : Math.max(row.lastActivity, event.time)
+      }
+    }
+    row.canRescue = row.atSeq !== null
+  } catch (error) {
+    row.error = (error && error.message) ? error.message : String(error)
+  } finally {
+    if (observation && typeof observation[Symbol.dispose] === 'function') {
+      try { observation[Symbol.dispose]() } catch { /* lease already released */ }
+    }
+  }
+  return row
+}
+
+/**
+ * Scan every unreachable subagent of this workbench (read-only). Children are
+ * discovered through their own headers, so a missing parent is the only signal
+ * available; each row carries what the client needs to stop or rescue it.
+ * Returns `{ ok, count, orphans }` and records `HOST_DIAG.lastOrphanScan`.
+ */
+export async function scanOrphans(ctx, options) {
+  const signal = options && options.signal
+  const query = typeof ctx.get === 'function' ? ctx.get('sessionQuery') : null
+  if (!query || typeof query.listSessions !== 'function') {
+    HOST_DIAG.lastOrphanScan = { count: 0, error: 'session-query-unavailable', at: Date.now() }
+    return { ok: false, code: 'session-query-unavailable', count: 0, orphans: [] }
+  }
+  let corpus
+  try {
+    corpus = await query.listSessions(signal)
+  } catch (error) {
+    const message = (error && error.message) ? error.message : String(error)
+    HOST_DIAG.lastOrphanScan = { count: 0, error: message, at: Date.now() }
+    return { ok: false, code: 'scan-failed', error: message, count: 0, orphans: [] }
+  }
+  const unreachable = orphanSetOf(corpus)
+  const rows = new Array(unreachable.length)
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < unreachable.length) {
+      const index = cursor
+      cursor += 1
+      rows[index] = await describeOrphan(ctx, unreachable[index], signal)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(ORPHAN_READ_CONCURRENCY, unreachable.length) }, () => worker()))
+  const orphans = rows.filter((row) => row !== undefined)
+  HOST_DIAG.lastOrphanScan = { count: orphans.length, error: null, at: Date.now() }
+  return { ok: true, count: orphans.length, orphans }
+}
+
+/**
+ * Stop one orphan run: cancel its agent and wait (bounded) for quiescence. A
+ * missing agent is an idempotent no-op; a wait that never observes idle is
+ * reported as unconfirmed instead of a success. Cancels only the run — no
+ * session content is deleted or rewritten.
+ */
+export async function stopOrphanRun(ctx, sessionId, options) {
+  const waitMs = options && Number.isFinite(options.waitMs) ? options.waitMs : ORPHAN_STOP_WAIT_MS
+  const agents = typeof ctx.get === 'function' ? ctx.get('agents') : null
+  if (!agents || typeof agents.get !== 'function') {
+    return { id: sessionId, stopped: false, confirmed: false, reason: 'agents-unavailable' }
+  }
+  const agent = agents.get(sessionId)
+  if (agent === undefined) return { id: sessionId, stopped: false, confirmed: false, reason: 'not-running' }
+  try {
+    if (typeof agent.cancel === 'function') agent.cancel({ kind: 'user' })
+  } catch (error) {
+    return { id: sessionId, stopped: false, confirmed: false, reason: (error && error.message) ? error.message : String(error) }
+  }
+  if (typeof agent.whenIdle !== 'function') {
+    return { id: sessionId, stopped: true, confirmed: false, reason: 'no-idle-signal' }
+  }
+  const outcome = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve('timeout'), waitMs)
+    Promise.resolve(agent.whenIdle()).then(
+      () => { clearTimeout(timer); resolve('idle') },
+      () => { clearTimeout(timer); resolve('idle-signal-failed') },
+    )
+  })
+  return outcome === 'idle'
+    ? { id: sessionId, stopped: true, confirmed: true, reason: null }
+    : { id: sessionId, stopped: true, confirmed: false, reason: outcome }
+}
+
 // --- core delete -------------------------------------------------------------
 
 /**
@@ -340,6 +529,8 @@ export const HOST_DIAG = {
   settingsValue: DEFAULT_DELETE_OLD,
   /** Last subagent guard outcome (diagnostics / status probe). */
   lastGuard: null,
+  /** Last orphan scan outcome (diagnostics / status probe). */
+  lastOrphanScan: null,
 }
 
 /**
@@ -471,6 +662,7 @@ export function registerHttp(ctx, host) {
         settingsSectionError: HOST_DIAG.settingsSectionError,
         deleteOldOnRewind: HOST_DIAG.settingsValue === true,
         lastGuard: HOST_DIAG.lastGuard,
+        orphans: HOST_DIAG.lastOrphanScan,
       })
     },
   }))
@@ -503,6 +695,51 @@ export function registerHttp(ctx, host) {
         const details = e instanceof DeleteError && e.details ? e.details : null
         sendJson(res, status, details ? { error: e.message, ...details } : { error: e.message })
       }
+    },
+  }))
+  // Read-only orphan scan (no mutation; safe to poll).
+  ctx.effect(() => host.register({
+    kind: 'exact',
+    path: ORPHANS_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'method not allowed' })
+        return
+      }
+      const result = await scanOrphans(ctx)
+      sendJson(res, result.ok ? 200 : 500, result)
+    },
+  }))
+  // Stop orphan runs: cancel + bounded quiescence, per id, with honest results.
+  ctx.effect(() => host.register({
+    kind: 'exact',
+    path: ORPHANS_STOP_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'method not allowed' })
+        return
+      }
+      let args = {}
+      try {
+        const body = await readBody(req)
+        if (body) args = JSON.parse(body)
+      } catch {
+        sendJson(res, 400, { error: 'bad json body' })
+        return
+      }
+      const ids = Array.isArray(args.ids) ? args.ids.map((id) => String(id || '').trim()).filter(Boolean) : []
+      if (ids.length === 0) {
+        sendJson(res, 400, { error: 'ids required' })
+        return
+      }
+      const invalid = ids.find((id) => !SESSION_ID_RE.test(id))
+      if (invalid !== undefined) {
+        sendJson(res, 400, { error: `invalid session id: ${invalid}` })
+        return
+      }
+      const results = []
+      for (const id of ids) results.push(await stopOrphanRun(ctx, id))
+      sendJson(res, 200, { ok: true, results, stopped: results.filter((row) => row.confirmed).length })
     },
   }))
 }
@@ -540,6 +777,49 @@ function registerDeleteTool(ctx, tools) {
   }).catch(() => { /* tools unavailable: the HTTP endpoint still serves web */ })
 }
 
+/**
+ * Register the best-effort orphan tool: `list` scans (read-only), `stop` cancels
+ * the given runs. Bounded to stop-only: deleting an orphan is deliberately out
+ * of scope for this plugin (the user keeps the session log).
+ */
+function registerOrphanTool(ctx, tools) {
+  if (!tools || typeof tools.register !== 'function') return
+  Promise.resolve().then(() => import('@deepseek-ai/dsh-tools')).then((mod) => {
+    const defineTool = mod && mod.defineTool
+    if (typeof defineTool !== 'function') return
+    tools.register(defineTool({
+      name: 'esc_rewind_orphans',
+      description: 'List (action "list") or stop (action "stop" + ids) the unreachable subagent sessions of this workbench: subagent sessions whose durable parent session is gone, so nothing lists or delivers to them any more. Listing is read-only; stopping cancels the run only (its result can no longer be delivered) and never deletes or rewrites session content.',
+      parameters: {
+        action: { type: 'string', required: true, description: '"list" to scan, "stop" to cancel the runs of the given ids.' },
+        ids: { type: 'array', items: { type: 'string' }, description: 'Orphan session ids to stop (required for action "stop").' },
+      },
+      output: { schema: { type: 'string' } },
+      render(_args, value) { return [{ type: 'text', text: value }] },
+      async execute(args) {
+        const action = String(args.action || '').trim()
+        if (action === 'list') {
+          const result = await scanOrphans(ctx)
+          if (!result.ok) return `scan failed: ${result.code}${result.error ? ' — ' + result.error : ''}`
+          if (result.count === 0) return 'no orphan subagent sessions'
+          const lines = result.orphans.map((row) => `- ${row.id}${row.running ? ' [running]' : ''}${row.canRescue ? '' : ' [no completed turn]'} parent=${row.parentId === null ? 'none' : row.parentId} label=${row.label}`)
+          return `orphan subagent sessions: ${result.count}\n` + lines.join('\n')
+        }
+        if (action === 'stop') {
+          const ids = Array.isArray(args.ids) ? args.ids.map((id) => String(id || '').trim()).filter(Boolean) : []
+          if (ids.length === 0) return 'stop requires a non-empty ids array'
+          const invalid = ids.find((id) => !SESSION_ID_RE.test(id))
+          if (invalid !== undefined) return `invalid session id: ${invalid}`
+          const results = []
+          for (const id of ids) results.push(await stopOrphanRun(ctx, id))
+          return results.map((row) => `- ${row.id}: ${row.confirmed ? 'stopped' : row.stopped ? `cancel requested, not confirmed (${row.reason})` : `no-op (${row.reason})`}`).join('\n')
+        }
+        return `unknown action: ${action} (expected "list" or "stop")`
+      },
+    }))
+  }).catch(() => { /* tools unavailable: the HTTP endpoint still serves web */ })
+}
+
 // --- plugin ------------------------------------------------------------------
 
 function apply(ctx) {
@@ -567,14 +847,18 @@ function apply(ctx) {
     } catch { /* terminal-only: no endpoint, client falls back to archive */ }
   }
 
-  // Model tool (best-effort).
+  // Model tools (best-effort).
   const tools = typeof ctx.get === 'function' ? ctx.get('tools') : null
+  const toolsOf = (sub) => (sub && sub.tools ? sub.tools : sub)
   if (tools !== undefined) {
     registerDeleteTool(ctx, tools)
+    registerOrphanTool(ctx, tools)
   } else {
     try {
       ctx.inject(['tools'], (sub) => {
-        registerDeleteTool(ctx, sub && sub.tools ? sub.tools : sub)
+        const bound = toolsOf(sub)
+        registerDeleteTool(ctx, bound)
+        registerOrphanTool(ctx, bound)
       })
     } catch { /* tools absent: skip */ }
   }

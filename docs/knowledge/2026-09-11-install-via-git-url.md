@@ -1,5 +1,11 @@
 # 2026-09-11 · DSH 插件：用 git 地址安装整个 monorepo（根安装外壳落地）
 
+> **补记（2026-09-22）：删管理器为什么必须用自带脚本**
+> 1) 核心 `dsh plugin --profile web remove dsh-plugin-manager` 是 **pnpm 薄转发 + 只对账 `dsh.profile.bundles`**（`apps/cli/src/plugin.ts`）——它**不认识** profile `cordis.patch.yml` 里由管理器写下的子插件激活行，也**不动**子插件的 `link:` 键，核心**没有任何卸载钩子**；只删管理器会留下悬空行 + 死链，下次启动 `failed to import loader entry …: Cannot find package …`。
+> 2) git 快照装法下更糟：子插件代码就在管理器克隆里（`node_modules/dsh-plugin-manager/sub-plugins/<name>`）⇒ 删管理器等于把它们一起带走，但行与键还在。
+> 3) 因此本仓自带 `dsh-plugin-manager/tools/uninstall-manager.mjs`（**不依赖 DSH 宿主与 dsh CLI**，只用 node + pnpm + profile 的 js-yaml）：清受管行 + 指向本仓库的 `link:` 键 + 管理器依赖键 + bundles 条目 → 一次 `pnpm install`；写前两份 `*.bak-<ts>`、**不删任何源码目录**、默认干跑（`--yes` 才执行）、重复跑 noop。面板只提供「复制卸载命令」（含 `--profile <name> --yes`），**不提供点一下就执行**。
+> 4) 测试不变量（`test/uninstall.test.mjs`）：恰好一次 patch 写 / 一次 manifest 写 / 一次 install、其它插件的行键逐字节不变、源码目录仍在、安装失败时给 `pnpm install --dir` 收尾命令（此时行键已清，不留半态）。
+
 日期：2026-09-11 · 涉及：仓库根 `package.json`（新增）、`dsh-plugin-manager/test/root-install-shell.test.mjs`（新增）、根 `README.md`、`dsh-plugin-manager/{README,ACCEPTANCE}.md`、OpenSpec `plugin-manager` spec。
 
 ## 一句话

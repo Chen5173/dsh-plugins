@@ -921,10 +921,11 @@ window.__ModuleLoader__.load({
     // --- registration --------------------------------------------------------
 
     function apply(ctx) {
-      ctx.slots.inject('settings.section', () => ctx.slots.register({
-        name: 'settings.section',
+      // One tab inside the core "Plugins" settings page (no Settings nav row).
+      ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+        name: 'settings.plugins.tab',
         id: SECTION_ID,
-        order: 17,
+        order: 30,
         label: () => T.title,
       }, Section))
     }

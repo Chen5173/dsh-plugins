@@ -4,7 +4,8 @@
 // window.__ModuleLoader__.load({ id, factory }) then factory(require) — with a
 // minimal deps-aware React shim and a stateful fetch stub, then asserts:
 //   1. the bundle registers id 'dsh-plugin-manager';
-//   2. apply() registers the settings.section 'local-plugins' (order 16);
+//   2. apply() registers the 'local-plugins' tab (order 20) on the core
+//      "Plugins" settings page (settings.plugins.tab);
 //   3. rendering the section fetches /list and shows one row per plugin with
 //      the right state text + controls;
 //   4. toggling posts set-enabled and shows a reload hint for client plugins
@@ -57,6 +58,13 @@ const state = {
   pendingWrites: 0,
   batchCounts: BATCH_COUNTS(),
   batchResults: null,
+  linkPlan: { count: 0, manualCount: 0, auto: [], manual: [] },
+  uninstall: {
+    command: 'node "D:/repo/dsh-plugin-manager/tools/uninstall-manager.mjs" --profile web --yes',
+    willRemove: { rows: 2, deps: 2, managerEntry: true, installs: true },
+  },
+  autoRelinkEnabled: true,
+  relinkResult: { noop: false, relinked: ['dsh-aaa'], failed: [], ranPnpm: true },
   discardedIntents: 0,
   holdBatch: false,
   releaseBatch: null,
@@ -67,7 +75,7 @@ const state = {
   ],
 }
 function payload() {
-  return { ok: true, data: { repoRoot: 'D:/repo', pluginsRoot: 'D:/repo/sub-plugins', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins, batchCounts: state.batchCounts } }
+  return { ok: true, data: { repoRoot: 'D:/repo', pluginsRoot: 'D:/repo/sub-plugins', profileName: 'web', legacyDetected: state.legacyDetected, plugins: state.plugins, batchCounts: state.batchCounts, linkPlan: state.linkPlan, autoRelinkEnabled: state.autoRelinkEnabled, uninstall: state.uninstall } }
 }
 async function fetchStub(url, opts) {
   fetchCalls.push({ url, opts })
@@ -83,6 +91,15 @@ async function fetchStub(url, opts) {
       p.state = p.active ? 'active' : 'disabled'
     }
     return { ok: true, json: async () => payload() }
+  }
+  if (url === '/__dsh-plugin-manager/relink') {
+    const res = payload()
+    res.relink = state.relinkResult
+    // A real relink repairs what it can: the panel re-renders from the next payload.
+    if (state.relinkResult && state.relinkResult.noop !== true) {
+      state.linkPlan = { count: 0, manualCount: state.linkPlan.manualCount, auto: [], manual: state.linkPlan.manual }
+    }
+    return { ok: true, json: async () => res }
   }
   if (url === '/__dsh-plugin-manager/set-all-enabled') {
     const body = JSON.parse((opts && opts.body) || '{}')
@@ -255,6 +272,9 @@ const textOf = (node) => {
   const parts = []
   const collect = (n) => {
     if (typeof n === 'string' || typeof n === 'number') { parts.push(String(n)); return }
+    // Nested children arrays (a .map() inside a children list) must be walked
+    // too — otherwise their text silently disappears from the assertion input.
+    if (Array.isArray(n)) { n.forEach(collect); return }
     if (n && n.__element) {
       const ch = n.props && n.props.children
       if (Array.isArray(ch)) ch.forEach(collect)
@@ -268,7 +288,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve))
 
 // --- tests -------------------------------------------------------------------
 
-test('bundle registers the settings.section (local-plugins, order 16)', () => {
+test('bundle registers the Plugins-page tab (local-plugins, order 20)', () => {
   const api = factoryApi()
   assert.deepEqual(api.inject, ['slots'])
   let registered = null
@@ -281,9 +301,9 @@ test('bundle registers the settings.section (local-plugins, order 16)', () => {
   assert.equal(typeof registered, 'function', 'slots.inject callback captured')
   registered(slots)
   assert.equal(entry.length, 1)
-  assert.equal(entry[0].opts.name, 'settings.section')
+  assert.equal(entry[0].opts.name, 'settings.plugins.tab')
   assert.equal(entry[0].opts.id, 'local-plugins')
-  assert.equal(entry[0].opts.order, 16)
+  assert.equal(entry[0].opts.order, 20)
   assert.equal(entry[0].opts.label(), '本地插件')
   assert.equal(typeof entry[0].comp, 'function')
 })
@@ -679,6 +699,104 @@ test('pure helper exports map every state', () => {
 })
 
 // --- run ---------------------------------------------------------------------
+
+// --- stale links (自检横幅 + 重定位) ----------------------------------------
+
+test('stale links: banner splits repairable vs manual and relink posts once', async () => {
+  fetchCalls.length = 0
+  const baselinePlugins = state.plugins
+  state.linkPlan = {
+    count: 1,
+    manualCount: 1,
+    auto: [{ dir: 'dsh-aaa', name: 'dsh-aaa', declared: 'link:D:/old/dsh-aaa', expected: 'link:D:/repo/sub-plugins/dsh-aaa' }],
+    manual: [{ dir: 'dsh-bbb', name: 'dsh-bbb', reason: '实际目录不存在' }],
+  }
+  state.autoRelinkEnabled = false
+  state.plugins = [
+    { dir: 'dsh-aaa', rowId: 'aaa', name: 'dsh-aaa', description: 'AAA plugin', valid: true, hasClient: true, state: 'active', active: true, legacyBundle: false, linkState: 'stale-mismatch', linkDeclared: 'link:D:/old/dsh-aaa' },
+    { dir: 'dsh-bbb', rowId: 'bbb', name: 'dsh-bbb', description: 'BBB plugin', valid: true, hasClient: true, state: 'inactive', active: false, legacyBundle: false, linkState: 'stale-unresolved', linkDeclared: 'link:D:/nope/dsh-bbb' },
+  ]
+  const section = mountSection()
+  fresh()
+  section()
+  await flush()
+  begin()
+  const tree = section()
+  const texts = textOf(tree)
+  assert.match(texts, /检测到 2 条陈旧链接：1 条可自动修复、1 条需人工处理/, 'banner counts both buckets')
+  assert.match(texts, /link:D:\/old\/dsh-aaa → link:D:\/repo\/sub-plugins\/dsh-aaa/, 'declared vs expected shown')
+  assert.match(texts, /自动重定位已关闭/, 'switch state is visible')
+  assert.match(texts, /链接陈旧/, 'row badge for a stale link')
+
+  const relinkBtn = byType(tree, 'button').find((b) => /^重定位$/.test(textOf(b)))
+  assert.ok(relinkBtn, 'relink button rendered when something is repairable')
+  relinkBtn.props.onClick()
+  await flush()
+  assert.ok(fetchCalls.some((c) => c.url === '/__dsh-plugin-manager/relink'), 'relink endpoint called')
+
+  // No stale links → no banner, no button.
+  state.linkPlan = { count: 0, manualCount: 0, auto: [], manual: [] }
+  state.autoRelinkEnabled = true
+  state.plugins = baselinePlugins
+  begin()
+  const stale = section()
+  const refreshBtn = byType(stale, 'button').find((b) => /^刷新$/.test(textOf(b)))
+  assert.ok(refreshBtn, 'refresh button present')
+  refreshBtn.props.onClick()
+  await flush()
+  begin()
+  const clean = section()
+  assert.doesNotMatch(textOf(clean), /陈旧链接/, 'banner hidden when nothing is stale')
+  assert.equal(byType(clean, 'button').filter((b) => /^重定位$/.test(textOf(b))).length, 0, 'no relink button when clean')
+})
+
+test('uninstall: the panel shows what will be removed and copies the command', async () => {
+  fetchCalls.length = 0
+  const copied = []
+  // The bundle is evaluated with `navigator` bound as a parameter, so the clipboard
+  // stub has to land ON the harness's navigator object (not on a replaced global).
+  const setClipboard = (value) => Object.defineProperty(globalThis.navigator, 'clipboard', { value, configurable: true, writable: true })
+  const clearClipboard = () => { try { delete globalThis.navigator.clipboard } catch { /* already gone */ } }
+  setClipboard({ writeText: async (text) => { copied.push(text) } })
+  try {
+    const section = mountSection()
+    fresh()
+    section()
+    await flush()
+    begin()
+    const tree = section()
+    const texts = textOf(tree)
+    assert.match(texts, /卸载管理器（含全部子插件）/, 'uninstall block renders')
+    assert.match(texts, /将删除 2 条激活行、2 个 link 依赖键/, 'preview counts come from the payload')
+    assert.match(texts, /uninstall-manager\.mjs/, 'the command is visible in the panel')
+    const copyBtn = byType(tree, 'button').find((b) => /复制卸载命令/.test(textOf(b)))
+    assert.ok(copyBtn, 'copy button rendered')
+    copyBtn.props.onClick()
+    await flush()
+    assert.deepEqual(copied, [state.uninstall.command], 'clipboard got exactly the host-provided command')
+    begin()
+    assert.match(textOf(section()), /已复制卸载命令/, 'copy is acknowledged without executing anything')
+    assert.equal(fetchCalls.some((c) => /uninstall/.test(c.url)), false, 'the panel never calls an uninstall endpoint')
+  } finally {
+    clearClipboard()
+  }
+  // Clipboard unavailable → the panel still tells the user to copy manually.
+  try {
+    const section = mountSection()
+    fresh()
+    section()
+    await flush()
+    begin()
+    const tree = section()
+    const copyBtn = byType(tree, 'button').find((b) => /复制卸载命令/.test(textOf(b)))
+    copyBtn.props.onClick()
+    await flush()
+    begin()
+    assert.match(textOf(section()), /剪贴板不可用/, 'no clipboard → manual-copy hint')
+  } finally {
+    clearClipboard()
+  }
+})
 
 let failed = 0
 for (const [name, fn] of tests) {

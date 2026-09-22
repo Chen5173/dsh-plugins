@@ -1044,17 +1044,17 @@ function stubFetch(state, { dshModel } = {}) {
   return calls
 }
 
-test('panel: registers one settings.section at order 17 between 16 and 18', () => {
+test('panel: registers one Plugins-page tab at order 30 (no Settings nav row)', () => {
   let registration = null
   const ctx = {
     slots: {
-      inject: (name, fn) => { assert.equal(name, 'settings.section'); fn() },
+      inject: (name, fn) => { assert.equal(name, 'settings.plugins.tab'); fn() },
       register: (meta, Component) => { registration = { meta, Component } },
     },
   }
   clientModule.apply(ctx)
   assert.equal(registration.meta.id, SECTION_ID)
-  assert.equal(registration.meta.order, 17)
+  assert.equal(registration.meta.order, 30)
   assert.equal(typeof registration.meta.label, 'function')
   assert.equal(typeof registration.Component, 'function')
   assert.deepEqual(clientModule.inject, ['slots'])

@@ -9,8 +9,8 @@
 ## 0. 面板出现与安装
 
 - [ ] 0.0 `[B]` 管理器面板启用后：profile 的 `devDependencies` 出现本插件的 `link:`、`dsh.profile.bundles` 里本地条目**仍只有** `dsh-plugin-manager`、`cordis.patch.yml` 里 `hindsight-model` 行**只有一行**
-- [ ] 0.1 `[B]` 重启 `dsh web` → 设置页出现「Hindsight 模型」节，位置在「本地插件」与「MCP」之间；Console 无报错
-- [ ] 0.2 `[B]` 宿主半被停用（管理器里关掉）后刷新页面 → 该节消失，且**不出现空白面板**、无未捕获异常
+- [ ] 0.1 `[B]` 重启 `dsh web` → 设置 → 插件 出现「Hindsight 模型」tab（order 30，在「本地插件」之后）；设置左侧导航**不再**有独立行；Console 无报错
+- [ ] 0.2 `[B]` 宿主半被停用（管理器里关掉）后刷新页面 → 该 tab 消失，且**不出现空白面板**、无未捕获异常
 
 ## 1. 四层呈现
 

@@ -40,6 +40,11 @@ import {
   BATCH_REASONS,
   removePlan,
   REMOVE_REASONS,
+  LINK_STATES,
+  linkStateOf,
+  sameLinkTarget,
+  relinkPlan,
+  RELINK_REASONS,
 } from '../src/host-core.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -561,6 +566,135 @@ function samplePlugins(root) {
   } catch {
     // js-yaml not installed here — covered by live-profile acceptance instead.
   }
+}
+
+// --- stale-link detection & relink planning ----------------------------------
+
+/** Fake link IO for the state matrix: only listed paths exist; realpath is identity. */
+function fakeLinkIo({ exists = [], platform = 'win32' } = {}) {
+  return {
+    platform,
+    exists: (p) => exists.some((candidate) => sameLinkTarget(candidate, p, platform)),
+    realpath: (p) => String(p),
+  }
+}
+
+{
+  const here2 = 'D:/repo/sub-plugins/dsh-aaa'
+  const meta = { dir: 'dsh-aaa', name: 'dsh-aaa', dirPath: here2 }
+
+  // 无键 → absent
+  assert.equal(linkStateOf({}, meta, fakeLinkIo({ exists: [here2] })), LINK_STATES.absent)
+
+  // 正确键 → fresh
+  assert.equal(
+    linkStateOf({ devDependencies: { 'dsh-aaa': linkSpecOf(here2) } }, meta, fakeLinkIo({ exists: [here2] })),
+    LINK_STATES.fresh,
+  )
+
+  // 仅大小写 / 分隔符差异 → fresh（Windows 上必须容忍）
+  assert.equal(
+    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:\\Repo\\Sub-Plugins\\DSH-AAA' } }, meta, fakeLinkIo({ exists: [here2] })),
+    LINK_STATES.fresh,
+  )
+  assert.equal(sameLinkTarget('D:/Repo/X/', 'D:\\Repo\\X', 'win32'), true)
+  assert.equal(sameLinkTarget('/repo/x', '/repo/X', 'linux'), false)
+
+  // 指向别处（两处都存在）→ stale-mismatch
+  assert.equal(
+    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:/old/dsh-aaa' } }, meta, fakeLinkIo({ exists: [here2, 'D:/old/dsh-aaa'] })),
+    LINK_STATES.mismatch,
+  )
+
+  // 目标不存在（但本仓库里有实际目录）→ stale-target-missing
+  assert.equal(
+    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:/gone/dsh-aaa' } }, meta, fakeLinkIo({ exists: [here2] })),
+    LINK_STATES.missing,
+  )
+
+  // 连实际目录都不存在 → stale-unresolved（只能提示）
+  assert.equal(
+    linkStateOf({ devDependencies: { 'dsh-aaa': 'link:D:/gone/dsh-aaa' } }, meta, fakeLinkIo({ exists: [] })),
+    LINK_STATES.unresolved,
+  )
+
+  // 非 link: spec → 需要改写
+  assert.equal(
+    linkStateOf({ devDependencies: { 'dsh-aaa': '^1.0.0' } }, meta, fakeLinkIo({ exists: [here2] })),
+    LINK_STATES.mismatch,
+  )
+
+  // IO 抛错 → unknown（只提示，绝不猜）
+  const throwing = { platform: 'win32', exists: () => true, realpath: () => { throw new Error('boom') } }
+  assert.equal(linkStateOf({ devDependencies: { 'dsh-aaa': linkSpecOf(here2) } }, meta, throwing), LINK_STATES.unknown)
+}
+
+{
+  // relinkPlan：可自动修 / 只能提示 两类分开，且管理器自身不参与
+  const derived = [
+    { dir: 'dsh-fresh', name: 'dsh-fresh', dirPath: '/r/dsh-fresh', linkState: LINK_STATES.fresh, linkDeclared: 'link:/r/dsh-fresh', linkExpected: 'link:/r/dsh-fresh' },
+    { dir: 'dsh-absent', name: 'dsh-absent', dirPath: '/r/dsh-absent', linkState: LINK_STATES.absent },
+    { dir: 'dsh-moved', name: 'dsh-moved', dirPath: '/r/sub-plugins/dsh-moved', linkState: LINK_STATES.mismatch, linkDeclared: 'link:/old/dsh-moved' },
+    { dir: 'dsh-gone', name: 'dsh-gone', dirPath: '/r/sub-plugins/dsh-gone', linkState: LINK_STATES.missing, linkDeclared: 'link:/nope/dsh-gone' },
+    { dir: 'dsh-lost', name: 'dsh-lost', dirPath: '/r/sub-plugins/dsh-lost', linkState: LINK_STATES.unresolved, linkDeclared: 'link:/nope/dsh-lost' },
+    { dir: 'dsh-weird', name: 'dsh-weird', dirPath: '/r/dsh-weird', linkState: LINK_STATES.unknown },
+    { dir: MANAGER_DIR, name: MANAGER_DIR, dirPath: '/r/dsh-plugin-manager', linkState: LINK_STATES.mismatch },
+  ]
+  const plan = relinkPlan(derived)
+  assert.deepEqual(plan.auto.map((p) => p.dir), ['dsh-moved', 'dsh-gone'])
+  assert.deepEqual(plan.manual.map((p) => p.dir), ['dsh-lost', 'dsh-weird'])
+  assert.equal(plan.count, 2)
+  assert.equal(plan.manualCount, 2)
+  assert.equal(plan.manual[0].reason, RELINK_REASONS[LINK_STATES.unresolved])
+  assert.equal(plan.auto[0].expected, null, '期望值由 host 侧补齐，规划不改形状')
+  assert.equal(relinkPlan(undefined).count, 0)
+  assert.equal(relinkPlan([{ dir: 'x', linkState: LINK_STATES.fresh }]).count, 0)
+}
+
+{
+  // deriveStates 带上链接态三件套；batchPlan 把「有行且链接陈旧」也纳入开启目标
+  const repoRoot = path.join(tmpRoot, 'linkstate')
+  fs.mkdirSync(path.join(repoRoot, 'sub-plugins', 'dsh-aaa'), { recursive: true })
+  fs.writeFileSync(path.join(repoRoot, 'sub-plugins', 'dsh-aaa', 'package.json'), JSON.stringify({ name: 'dsh-aaa', main: 'index.js' }))
+  fs.mkdirSync(path.join(repoRoot, 'sub-plugins', 'dsh-bbb'), { recursive: true })
+  fs.writeFileSync(path.join(repoRoot, 'sub-plugins', 'dsh-bbb', 'package.json'), JSON.stringify({ name: 'dsh-bbb', main: 'index.js' }))
+  const repoPlugins = ['dsh-aaa', 'dsh-bbb'].map((dir) => readPluginMeta(repoRoot, dir))
+  const manifest = {
+    devDependencies: {
+      'dsh-aaa': 'link:D:/old/dsh-aaa',            // 陈旧：指向别处
+      'dsh-bbb': linkSpecOf(repoPlugins[1].dirPath), // 正常
+    },
+  }
+  const rows = [
+    { id: 'aaa', disabled: false },
+    { id: 'bbb', disabled: true },
+  ]
+  const io = fakeLinkIo({ exists: [repoPlugins[0].dirPath, repoPlugins[1].dirPath, 'D:/old/dsh-aaa'] })
+  const derived = deriveStates({ repoPlugins, manifest, rows, io })
+  assert.equal(derived[0].linkState, LINK_STATES.mismatch)
+  assert.equal(derived[0].linkDeclared, 'link:D:/old/dsh-aaa')
+  assert.equal(derived[0].linkExpected, linkSpecOf(repoPlugins[0].dirPath))
+  assert.equal(derived[1].linkState, LINK_STATES.fresh)
+  assert.equal(derived[1].linkDeclared, linkSpecOf(repoPlugins[1].dirPath))
+
+  const plan = batchPlan(derived, true)
+  const aaa = plan.targets.find((t) => t.dir === 'dsh-aaa')
+  assert.ok(aaa, '有行且链接陈旧的项也要进「全部开启」目标')
+  assert.equal(aaa.needsInstall, true)
+  const bbb = plan.targets.find((t) => t.dir === 'dsh-bbb')
+  assert.equal(bbb.needsInstall, false, '已停用但链接正确 → 只需写行')
+
+  // 「未激活(仅依赖)」的陈旧项不凭空补行（保持既有语义；修复走单行开启/重定位）
+  const noRow = deriveStates({
+    repoPlugins: [repoPlugins[0]],
+    manifest: { devDependencies: { 'dsh-aaa': 'link:D:/old/dsh-aaa' } },
+    rows: [],
+    io,
+  })
+  assert.equal(noRow[0].state, 'inactive')
+  const plan2 = batchPlan(noRow, true)
+  assert.equal(plan2.targets.length, 0)
+  assert.equal(plan2.skipped[0].reason, BATCH_REASONS.inactiveDepOnly)
 }
 
 fs.rmSync(tmpRoot, { recursive: true, force: true })

@@ -75,6 +75,13 @@ window.__ModuleLoader__.load({
     /** Host refusal reasons (mirror of the node half constants). */
     const REASON_SUBAGENTS = 'subagents'
     const REASON_SUBAGENTS_UNKNOWN = 'subagents-unknown'
+    /** Read-only orphan scan / stop endpoints (host half mirrors the paths). */
+    const ORPHANS_ENDPOINT = '/__esc-rewind/orphans'
+    const ORPHANS_STOP_ENDPOINT = '/__esc-rewind/orphans/stop'
+    /** Core "Plugins" settings page: one tab per feature plugin (ui-settings-plugins). */
+    const TAB_SLOT = 'settings.plugins.tab'
+    const TAB_ID = 'subagents'
+    const TAB_ORDER = 50
     const COMPOSER_ATTR = 'data-composer-input'
     const REWIND_COMMAND = 'rewind'
     /** How many draft images a rewind may try to restore. */
@@ -212,6 +219,11 @@ window.__ModuleLoader__.load({
       disposeToggles: 0,
       lastDelete: null,
       lastRewind: null,
+      orphanTabRegistered: false,
+      orphanTabError: null,
+      orphans: null,
+      orphanActions: [],
+      orphanRenameFail: null,
     }
     try { if (typeof window !== 'undefined') window.__dsew = __diag } catch { /* no window */ }
 
@@ -239,6 +251,27 @@ window.__ModuleLoader__.load({
       'rewind.delete.fail': '删除失败，已改为归档',
       'rewind.subagents': '该会话还有 {n} 个子代理（运行中 {r}），已改为归档（不删除）',
       'rewind.subagents.unknown': '读不到该会话的子代理状态，已改为归档（不删除）：{msg}',
+      'orphans.tab': '子代理',
+      'orphans.title': '孤儿子代理',
+      'orphans.intro': '这些子代理的父会话已不存在：界面里没有入口，完成通知也无处投递。可以「停止」它（放弃其结果），或「找回」成普通会话继续使用。全部动作手动执行。',
+      'orphans.refresh': '刷新统计',
+      'orphans.loading': '正在统计…',
+      'orphans.empty': '没有孤儿子代理',
+      'orphans.error': '读取失败：{msg}',
+      'orphans.count': '共 {n} 个',
+      'orphans.running': '运行中',
+      'orphans.parent': '父会话',
+      'orphans.stop': '停止',
+      'orphans.rescue': '找回',
+      'orphans.stopSelected': '停止选中',
+      'orphans.rescueSelected': '找回选中',
+      'orphans.noBoundary': '没有完整回合，无法找回',
+      'orphans.stopped': '已停止',
+      'orphans.stopUnconfirmed': '已请求取消，未确认静默（{reason}）',
+      'orphans.stopNoop': '无需停止（{reason}）',
+      'orphans.stopFailed': '停止失败：{msg}',
+      'orphans.rescued': '已找回为普通会话',
+      'orphans.rescueFailed': '找回失败：{msg}',
     }
     const enDict = {
       'esc.hint': 'Stopped · press Esc again to rewind this turn',
@@ -262,6 +295,27 @@ window.__ModuleLoader__.load({
       'rewind.delete.fail': 'Delete failed — archived instead',
       'rewind.subagents': 'Old session still owns {n} subagent(s) ({r} running) — archived instead of deleted',
       'rewind.subagents.unknown': 'Subagent state unreadable — archived instead of deleted: {msg}',
+      'orphans.tab': 'Subagents',
+      'orphans.title': 'Orphan subagents',
+      'orphans.intro': 'These subagents lost their parent session, so nothing lists them and nothing delivers their result. Stop one (its result is dropped) or rescue it into an ordinary session you can keep using. Everything is manual.',
+      'orphans.refresh': 'Refresh',
+      'orphans.loading': 'Scanning…',
+      'orphans.empty': 'No orphan subagents',
+      'orphans.error': 'Scan failed: {msg}',
+      'orphans.count': '{n} total',
+      'orphans.running': 'running',
+      'orphans.parent': 'parent',
+      'orphans.stop': 'Stop',
+      'orphans.rescue': 'Rescue',
+      'orphans.stopSelected': 'Stop selected',
+      'orphans.rescueSelected': 'Rescue selected',
+      'orphans.noBoundary': 'No completed turn — cannot rescue',
+      'orphans.stopped': 'Stopped',
+      'orphans.stopUnconfirmed': 'Cancel requested, quiescence unconfirmed ({reason})',
+      'orphans.stopNoop': 'Nothing to stop ({reason})',
+      'orphans.stopFailed': 'Stop failed: {msg}',
+      'orphans.rescued': 'Rescued as an ordinary session',
+      'orphans.rescueFailed': 'Rescue failed: {msg}',
     }
 
     function localeFallbackLang() {
@@ -1921,6 +1975,181 @@ window.__ModuleLoader__.load({
      * normal (non-subagent, non-blank) sessions only; clicking flips the switch
      * through remote.settings and toasts the outcome.
      */
+    // --- orphan reclaim (settings → 插件 → 子代理) --------------------------------
+
+    /** Fetch the host half's read-only orphan scan. */
+    async function fetchOrphans() {
+      if (typeof fetch !== 'function') throw new Error('fetch-unavailable')
+      const response = await fetch(ORPHANS_ENDPOINT, { method: 'GET' })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || body.ok !== true) {
+        throw new Error(body.error || body.code || ('scan-failed-' + response.status))
+      }
+      return { count: Number(body.count) || 0, orphans: Array.isArray(body.orphans) ? body.orphans : [] }
+    }
+
+    /** Stop one batch of orphan runs through the host half (cancel + quiescence). */
+    async function stopOrphans(ids) {
+      const list = Array.isArray(ids) ? ids.filter(Boolean) : []
+      if (list.length === 0) return []
+      if (typeof fetch !== 'function') throw new Error('fetch-unavailable')
+      const response = await fetch(ORPHANS_STOP_ENDPOINT, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: list }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || body.ok !== true) {
+        throw new Error(body.error || ('stop-failed-' + response.status))
+      }
+      return Array.isArray(body.results) ? body.results : []
+    }
+
+    /** Human text for one stop result (confirmed / unconfirmed / no-op). */
+    function stopResultText(t, row) {
+      if (row && row.confirmed === true) return t('orphans.stopped')
+      if (row && row.stopped === true) return t('orphans.stopUnconfirmed', { reason: (row.reason || 'unknown') })
+      return t('orphans.stopNoop', { reason: (row && row.reason) || 'unknown' })
+    }
+
+    /** Short display form of a session id (settings rows stay readable). */
+    function shortId(id) {
+      const text = String(id || '')
+      return text.length > 20 ? text.slice(0, 8) + '…' + text.slice(-4) : text
+    }
+
+    /**
+     * Rescue one orphan as an ordinary session: stop it first when it is still
+     * running (in-flight content can never enter the fork seed), fork it at its
+     * last completed turn boundary, keep its label, then open the branch. The
+     * orphan itself is never deleted.
+     */
+    async function rescueOrphan(row) {
+      const sessions = __svc.sessions
+      if (!sessions || typeof sessions.fork !== 'function') throw new Error('sessions-unavailable')
+      const atSeq = row && typeof row.atSeq === 'number' ? row.atSeq : null
+      if (atSeq === null) throw new Error('no-completed-turn')
+      let stopped = null
+      if (row && row.running === true) {
+        const results = await stopOrphans([row.id])
+        stopped = results[0] || null
+      }
+      const childId = await sessions.fork({ sessionId: row.id, atSeq, increaseTitle: false })
+      try {
+        const label = row && typeof row.label === 'string' ? row.label : null
+        const binding = typeof sessions.binding === 'function' ? sessions.binding(childId) : null
+        if (label && label !== row.id && binding && binding.session && typeof binding.session.rename === 'function') {
+          await binding.session.rename(label)
+        }
+      } catch (error) {
+        __diag.orphanRenameFail = (error && error.message) ? error.message : String(error)
+      }
+      if (typeof sessions.open === 'function') sessions.open(childId)
+      __diag.orphanActions = __diag.orphanActions.concat([{ kind: 'rescue', id: row.id, childId, at: Date.now() }]).slice(-10)
+      return { childId, stopped }
+    }
+
+    /** Settings → 插件 → 「子代理」: orphan reclaim, manual only (open = read-only). */
+    function OrphansPanel(props) {
+      const seatT = props && typeof props.t === 'function' ? props.t : null
+      const t = seatT || __t
+      const [phase, setPhase] = React.useState('loading')
+      const [rows, setRows] = React.useState([])
+      const [error, setError] = React.useState(null)
+      const [selected, setSelected] = React.useState({})
+      const [results, setResults] = React.useState({})
+      const [busy, setBusy] = React.useState(false)
+
+      const load = React.useCallback(async () => {
+        setPhase('loading')
+        try {
+          const scanned = await fetchOrphans()
+          setRows(scanned.orphans)
+          setError(null)
+          setPhase('ready')
+          __diag.orphans = { count: scanned.count, phase: 'ready', error: null, at: Date.now() }
+        } catch (err) {
+          const message = (err && err.message) ? err.message : String(err)
+          setError(message)
+          setPhase('error')
+          __diag.orphans = { count: null, phase: 'error', error: message, at: Date.now() }
+        }
+      }, [])
+
+      React.useEffect(() => { load() }, [load])
+
+      const note = React.useCallback((id, text) => {
+        setResults((previous) => { const next = { ...previous }; next[id] = text; return next })
+      }, [])
+
+      const act = React.useCallback(async (ids, kind) => {
+        const list = (Array.isArray(ids) ? ids : []).filter(Boolean)
+        if (list.length === 0) return
+        setBusy(true)
+        try {
+          if (kind === 'stop') {
+            const stopped = await stopOrphans(list)
+            for (const row of stopped) note(row.id, stopResultText(t, row))
+            __diag.orphanActions = __diag.orphanActions.concat([{ kind: 'stop', ids: list, at: Date.now() }]).slice(-10)
+          } else {
+            for (const id of list) {
+              const row = rows.find((candidate) => candidate.id === id)
+              if (!row) continue
+              try {
+                const outcome = await rescueOrphan(row)
+                note(id, t('orphans.rescued') + ' → ' + shortId(outcome.childId))
+              } catch (err) {
+                note(id, t('orphans.rescueFailed', { msg: (err && err.message) ? err.message : String(err) }))
+              }
+            }
+          }
+          await load()
+        } catch (err) {
+          const message = (err && err.message) ? err.message : String(err)
+          for (const id of list) note(id, t(kind === 'stop' ? 'orphans.stopFailed' : 'orphans.rescueFailed', { msg: message }))
+        } finally {
+          setBusy(false)
+        }
+      }, [rows, load, note])
+
+      const selectedIds = rows.filter((row) => selected[row.id] === true).map((row) => row.id)
+      const head = [
+        React.createElement('h2', { key: 'title' }, t('orphans.title')),
+        React.createElement('p', { key: 'intro' }, t('orphans.intro')),
+        React.createElement('div', { key: 'tools' },
+          React.createElement('button', { type: 'button', disabled: busy, onClick: () => { load() } }, t('orphans.refresh')),
+          React.createElement('button', { type: 'button', disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'stop') } }, t('orphans.stopSelected')),
+          React.createElement('button', { type: 'button', disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'rescue') } }, t('orphans.rescueSelected')),
+          React.createElement('span', { key: 'count' }, t('orphans.count', { n: rows.length })),
+        ),
+      ]
+      let body
+      if (phase === 'loading') body = React.createElement('p', { key: 'loading' }, t('orphans.loading'))
+      else if (phase === 'error') body = React.createElement('p', { key: 'error' }, t('orphans.error', { msg: error }))
+      else if (rows.length === 0) body = React.createElement('p', { key: 'empty' }, t('orphans.empty'))
+      else body = React.createElement('ul', { key: 'rows' }, rows.map((row) => React.createElement('li', { key: row.id },
+        React.createElement('label', null,
+          React.createElement('input', {
+            type: 'checkbox',
+            checked: selected[row.id] === true,
+            onChange: () => { setSelected((previous) => { const next = { ...previous }; next[row.id] = !(previous[row.id] === true); return next }) },
+          }),
+          ' ' + (row.label || row.id),
+        ),
+        React.createElement('span', null, row.running === true ? ' · ' + t('orphans.running') : ''),
+        React.createElement('span', null, ' · ' + t('orphans.parent') + ': ' + shortId(row.parentId)),
+        React.createElement('button', { type: 'button', disabled: busy, onClick: () => { act([row.id], 'stop') } }, t('orphans.stop')),
+        React.createElement('button', {
+          type: 'button',
+          disabled: busy || row.canRescue !== true,
+          title: row.canRescue === true ? '' : t('orphans.noBoundary'),
+          onClick: () => { act([row.id], 'rescue') },
+        }, t('orphans.rescue')),
+        results[row.id] ? React.createElement('span', null, ' · ' + results[row.id]) : null,
+      )))
+      return React.createElement('div', { className: 'dsew-orphans' }, head.concat([body]))
+    }
+
     function DisposeToggle(props) {
       const t = (props && props.t) || __t
       const sessionId = props && props.sessionId
@@ -2034,6 +2263,33 @@ window.__ModuleLoader__.load({
         ...(__locale ? { locale: NS } : {}),
       }, DisposeToggle))
 
+      // Register the orphan-reclaim tab inside the core "Plugins" settings page:
+      // ui-settings-plugins owns the single Plugins nav entry and the tab chrome,
+      // feature plugins contribute pages (no extra Settings nav rows).
+      try {
+        ctx.slots.inject(TAB_SLOT, () => {
+          let disposer = null
+          try {
+            disposer = ctx.slots.register({
+              name: TAB_SLOT,
+              id: TAB_ID,
+              order: TAB_ORDER,
+              label: () => __t('orphans.tab'),
+              ...(__locale ? { locale: NS } : {}),
+            }, OrphansPanel)
+            __diag.orphanTabRegistered = true
+          } catch (error) {
+            __diag.orphanTabError = (error && error.message) ? error.message : String(error)
+          }
+          return () => {
+            __diag.orphanTabRegistered = false
+            if (typeof disposer === 'function') { try { disposer() } catch { /* already gone */ } }
+          }
+        })
+      } catch (error) {
+        __diag.orphanTabError = (error && error.message) ? error.message : String(error)
+      }
+
       // Delete-mode switch: resolve the client remote.settings controller
       // through the SAFE reader (each candidate guarded on its own, because a
       // bare property read throws on a real guarded ctx), bind it once, load
@@ -2119,6 +2375,7 @@ window.__ModuleLoader__.load({
             exchangesOfSession, isSubagentSession, sessionFacts,
             refreshHistory, knownExchangesOf, resetHistoryCache,
             loadDeleteMode, setDeleteMode, deleteOldSession, deleteModeOn,
+            fetchOrphans, stopOrphans, rescueOrphan, stopResultText, orphansPanel: OrphansPanel,
             disposeVisible, notifyDisposeListeners, readRemoteSettings, unwrapResult,
             getSettings: () => __settings,
           },

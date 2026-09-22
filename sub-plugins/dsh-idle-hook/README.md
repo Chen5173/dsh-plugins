@@ -17,7 +17,7 @@
 本插件是 `sub-plugins/` 下的子插件：**不声明 `dsh.bundle`、不带自己的 `cordis.patch.yml`**，激活行完全由管理器维护——因此不要用 `dsh plugin add <子插件目录>` 装卸它（见仓库根 README 的「⚠️ 子插件不要用 `dsh plugin` 装卸」）。
 
 - 宿主半（监听 + 执行）随 profile patch 热重载**立即生效**；
-- 设置页入口「空闲通知」需要**刷新一次页面**才会出现（客户端界面只在页面加载时进出 `__DSH_BOOT__`）。
+- 设置页入口「设置 → 插件 → 空闲通知」（核心「插件」页里的一个 tab）需要**刷新一次页面**才会出现（客户端界面只在页面加载时进出 `__DSH_BOOT__`）。
 
 启用后打开 **设置 → 空闲通知**：首次会预置一条**处于禁用状态**的示例规则（macOS 提示音 / Windows 通知），改好字段再启用。在你自己启用任何规则之前，插件不会执行任何东西。
 
@@ -98,7 +98,7 @@
 
 脚本执行**永远不会阻塞 DSH**：不等待、不参与、不影响对话 / 批准 / 回答链路。
 
-## 设置页：空闲通知
+## 设置页：插件 → 空闲通知
 
 | 控件 | 说明 |
 |---|---|
@@ -148,7 +148,7 @@
 | 文件 | 用途 | 需要的环境变量 |
 |---|---|---|
 | `notify-macos.sh` | macOS 系统通知 + 提示音 | — |
-| `notify-windows.ps1` | Windows 原生 toast | — |
+| `notify-windows.ps1` | Windows 原生 toast（⚠️ 文件是 **UTF-8 带 BOM**：系统自带 Windows PowerShell **5.1** 会把无 BOM 的 `.ps1` 按 ANSI/GBK 解码，中文注释即 `ParserError … UnexpectedToken`；另存脚本时别丢 BOM） | — |
 | `notify-bark.py` | Bark 手机推送（Python 3） | `BARK_KEY`（`BARK_BASE` 可选） |
 | `notify-ntfy.sh` | ntfy 推送 | `NTFY_TOPIC`（`NTFY_BASE` 可选） |
 | `notify-webhook.sh` | 飞书 / 企业微信 / 钉钉 / Telegram / Slack | `WEBHOOK_KIND` + 对应 URL/token |

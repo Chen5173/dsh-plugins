@@ -57,6 +57,20 @@ window.__ModuleLoader__.load({
       enableAllHint: '把本仓库全部受管本地插件打开（未安装的会自动装依赖，只跑一次安装）',
       disableAllHint: '把本仓库全部受管本地插件停用（保留激活行与依赖，可随时再开启）',
       removeAll: '全部移除',
+      linkBanner: '检测到 {n} 条陈旧链接：{m} 条可自动修复、{k} 条需人工处理',
+      linkStaleBadge: '链接陈旧',
+      linkManual: '需人工处理',
+      relink: '重定位',
+      relinkBusy: '重定位中…',
+      relinkDone: '已重定位 {n} 条链接',
+      relinkNoop: '没有需要重定位的链接',
+      relinkFailed: '重定位失败',
+      autoRelinkOff: '自动重定位已关闭（可在设置页重新打开）',
+      uninstallTitle: '卸载管理器（含全部子插件）',
+      uninstallBody: '将删除 {rows} 条激活行、{deps} 个 link 依赖键 + 管理器自身，并执行一次 pnpm install；源码目录保留。命令不会自动执行，请复制后到终端运行：',
+      uninstallCopy: '复制卸载命令',
+      uninstallCopied: '已复制卸载命令——请到终端运行（本面板不会自动执行）',
+      uninstallManual: '剪贴板不可用，请手动复制上面那条命令',
       removeAllConfirm: '将删除全部 {n} 个本地插件的激活行与 devDependencies 依赖链接（源码目录保留，可随时重新开启）。插件会立刻停止运行。继续？',
       removeAllHint: '清空本仓库全部受管本地插件的激活行与依赖链接——迁移/换机器后残留的旧绝对路径也会一并清掉，重新开启时会按当前目录重新定位',
       removeAllDone: '已移除 {n} 个本地插件的激活行与依赖',
@@ -101,6 +115,20 @@ window.__ModuleLoader__.load({
       enableAllHint: 'Enable every managed local plugin of this repo (missing ones install their dependency first, in a single install pass)',
       disableAllHint: 'Disable every managed local plugin of this repo (rows and dependencies are kept, re-enable anytime)',
       removeAll: 'Remove all',
+      linkBanner: '{n} stale link(s) detected: {m} repairable automatically, {k} need manual attention',
+      linkStaleBadge: 'stale link',
+      linkManual: 'needs manual attention',
+      relink: 'Relink',
+      relinkBusy: 'Relinking…',
+      relinkDone: 'Relinked {n} link(s)',
+      relinkNoop: 'Nothing to relink',
+      relinkFailed: 'Relink failed',
+      autoRelinkOff: 'Automatic relinking is off (enable it in Settings)',
+      uninstallTitle: 'Uninstall the manager (with every sub-plugin)',
+      uninstallBody: 'Removes {rows} activation row(s), {deps} link dependency key(s) plus the manager itself, then runs one pnpm install; source directories are kept. The command never runs automatically — copy it and run it in a terminal:',
+      uninstallCopy: 'Copy uninstall command',
+      uninstallCopied: 'Uninstall command copied — run it in a terminal (this panel never executes it)',
+      uninstallManual: 'Clipboard unavailable — copy the command above manually',
       removeAllConfirm: 'This deletes the activation rows and devDependency links of all {n} local plugins (sources are kept and can be re-enabled anytime). They stop running immediately. Continue?',
       removeAllHint: 'Clear every managed local plugin of this repo — including stale absolute paths left behind by a move/machine change; re-enabling relocates them from the current directory',
       removeAllDone: 'Removed the rows and dependencies of {n} local plugin(s)',
@@ -335,6 +363,41 @@ window.__ModuleLoader__.load({
       const plugins = (data && data.plugins) || []
       const legacyDetected = data ? data.legacyDetected : false
       const batchCounts = (data && data.batchCounts) || localBatchCounts(plugins)
+      // Stale-link self-heal face: the host detects (read-only) and repairs the
+      // determinable ones; this panel shows what it found and offers the same
+      // action for the user to trigger.
+      const linkPlan = (data && data.linkPlan) || { count: 0, manualCount: 0, auto: [], manual: [] }
+      const staleTotal = (linkPlan.count || 0) + (linkPlan.manualCount || 0)
+      const autoRelinkOn = data ? data.autoRelinkEnabled !== false : true
+      const relink = () => {
+        run(`${API}/relink`, {}, 'relink').then((json) => {
+          if (!json) return
+          const info = json.relink || {}
+          const failed = info.failed || []
+          if (failed.length > 0) {
+            setNotice({ type: 'err', text: `${t('relinkFailed')}: ${failed.map((f) => f.name || f.dir).join(', ')}` })
+            return
+          }
+          if (info.noop) { setNotice({ type: 'ok', text: t('relinkNoop') }); return }
+          setNotice({ type: 'ok', text: t('relinkDone').replace('{n}', String((info.relinked || []).length)) })
+        })
+      }
+      const isStale = (p) => p.linkState === 'stale-mismatch' || p.linkState === 'stale-target-missing'
+      // The uninstall command is copied, never executed here: removing the manager
+      // is destructive and needs pnpm, so it stays a terminal action.
+      const uninstall = (data && data.uninstall) || null
+      const copyUninstall = () => {
+        const command = (uninstall && uninstall.command) || ''
+        const clipboard = typeof navigator !== 'undefined' && navigator.clipboard ? navigator.clipboard : null
+        if (clipboard && typeof clipboard.writeText === 'function') {
+          clipboard.writeText(command).then(
+            () => setNotice({ type: 'ok', text: t('uninstallCopied') }),
+            () => setNotice({ type: 'ok', text: t('uninstallManual') }),
+          )
+          return
+        }
+        setNotice({ type: 'ok', text: t('uninstallManual') })
+      }
 
       // 批量动作：宿主一次安装 + 一次写入；这里只负责确认、发起与逐项结果呈现。
       // mode: 'on' 全部开启 | 'off' 全部关闭 | 'remove' 全部移除（破坏性）。
@@ -419,9 +482,39 @@ window.__ModuleLoader__.load({
             onClick: migrate,
           }, busy === 'migrate' ? t('migrateBusy') : t('migrate')),
         ),
+        staleTotal > 0 && React.createElement('div', { style: { ...S.banner, ...S.bannerWarn } },
+          React.createElement('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 4 } },
+            React.createElement('span', { style: { fontSize: 13 } },
+              t('linkBanner')
+                .replace('{n}', String(staleTotal))
+                .replace('{m}', String(linkPlan.count || 0))
+                .replace('{k}', String(linkPlan.manualCount || 0))),
+            !autoRelinkOn && React.createElement('span', { style: { fontSize: 12 } }, t('autoRelinkOff')),
+            (linkPlan.auto || []).slice(0, 3).map((p) => React.createElement('span', { key: 'auto-' + p.dir, style: { fontSize: 12 } },
+              `${p.name}: ${p.declared || '—'} → ${p.expected || ''}`)),
+            (linkPlan.manual || []).slice(0, 3).map((p) => React.createElement('span', { key: 'manual-' + p.dir, style: { fontSize: 12 } },
+              `${p.name}: ${p.reason || ''}`)),
+          ),
+          (linkPlan.count || 0) > 0 && React.createElement('button', {
+            style: { ...S.button, ...S.buttonPrimary },
+            disabled: Boolean(busy) || staleTotal === 0,
+            onClick: relink,
+          }, busy === 'relink' ? t('relinkBusy') : t('relink')),
+        ),
         React.createElement('div', { style: S.toolbar },
           React.createElement('div', { style: S.toolbarGroup }, batchButton('on'), batchButton('off'), batchButton('remove')),
           React.createElement('button', { style: S.button, onClick: load, disabled: Boolean(busy) }, t('refresh')),
+        ),
+        uninstall && React.createElement('div', { style: S.banner },
+          React.createElement('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', gap: 4 } },
+            React.createElement('span', { style: { fontSize: 13 } }, t('uninstallTitle')),
+            React.createElement('span', { style: { fontSize: 12 } },
+              t('uninstallBody')
+                .replace('{rows}', String((uninstall.willRemove && uninstall.willRemove.rows) || 0))
+                .replace('{deps}', String((uninstall.willRemove && uninstall.willRemove.deps) || 0))),
+            React.createElement('code', { style: { fontSize: 12, wordBreak: 'break-all' } }, uninstall.command),
+          ),
+          React.createElement('button', { style: S.button, onClick: copyUninstall }, t('uninstallCopy')),
         ),
         plugins.length === 0
           ? React.createElement('p', { style: S.empty }, t('noPlugins'))
@@ -442,6 +535,7 @@ window.__ModuleLoader__.load({
                   p.description ? React.createElement('p', { style: S.desc }, p.description) : null,
                 ),
                 React.createElement('span', { style: { ...S.state, color: legacy ? S.stateColor('legacy') : S.stateColor(p.state) } }, stateLabel),
+                isStale(p) && React.createElement('span', { style: S.badge, title: p.linkDeclared || '' }, t('linkStaleBadge')),
                 React.createElement('div', { style: S.actions },
                   p.state === 'invalid'
                     ? null
@@ -471,10 +565,12 @@ window.__ModuleLoader__.load({
 
     // --- registration --------------------------------------------------------
     function apply(ctx) {
-      ctx.slots.inject('settings.section', () => ctx.slots.register({
-        name: 'settings.section',
+      // One tab inside the core "Plugins" settings page (ui-settings-plugins owns
+      // the single Plugins nav entry + tab chrome); no Settings nav row of our own.
+      ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+        name: 'settings.plugins.tab',
         id: 'local-plugins',
-        order: 16,
+        order: 20,
         label: () => t('nav'),
       }, LocalPluginsSection))
     }

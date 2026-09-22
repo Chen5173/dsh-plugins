@@ -540,7 +540,7 @@ test('bundle registers under the package id and declares only slots', () => {
 test('apply registers one overlay entry and the /rewind contribution', () => {
   const services = makeServices()
   applyWith(services)
-  assert.equal(services.registered.length, 2, 'overlay bridge + header dispose toggle')
+  assert.equal(services.registered.length, 3, 'overlay bridge + header dispose toggle + orphan tab')
   const overlay = services.registered.find((r) => r.options.name === 'conversation.input.overlay')
   assert.ok(overlay, 'overlay bridge registered')
   assert.equal(overlay.options.id, 'esc-rewind')
@@ -1791,6 +1791,204 @@ test('delete mode: ESC stop hint carries the irreversible warning', async () => 
   assert.ok(!toasts.includes('esc.hint'), 'plain hint not used')
 })
 
+// --- orphan reclaim（宿主扫描 + 核心「插件」页 tab） ---------------------------
+
+/** All rendered nodes of a shim element tree (depth-first). */
+function collectNodes(node, out = []) {
+  if (node === null || node === undefined) return out
+  if (Array.isArray(node)) { for (const kid of node) collectNodes(kid, out); return out }
+  if (typeof node !== 'object') return out
+  out.push(node)
+  collectNodes(node.props && node.props.children, out)
+  return out
+}
+
+/** Concatenated text of a shim element tree. */
+function treeText(node) {
+  if (node === null || node === undefined) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(treeText).join(' ')
+  if (typeof node !== 'object') return ''
+  return treeText(node.props && node.props.children)
+}
+
+/** The orphan tab entry as registered by the bundle. */
+function orphanTabEntry(services) {
+  return services.registered.find((entry) => entry.options.name === 'settings.plugins.tab')
+}
+
+/**
+ * Render the orphan tab (effects run per render in the shim). Pass the same
+ * \`state\` object to keep component state across calls; omit it for a fresh mount.
+ */
+async function renderOrphans(services, state = {}, rounds = 8) {
+  const entry = orphanTabEntry(services)
+  assert.ok(entry, 'orphan tab registered')
+  if (state.entry === undefined) { freshInstance(); state.entry = entry }
+  let tree = null
+  for (let i = 0; i < rounds; i += 1) {
+    beginRender()
+    tree = entry.component({})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  return tree
+}
+
+/** One rendered button whose visible text is exactly \`label\`. */
+function buttonByText(tree, label) {
+  return collectNodes(tree).find((node) => node.type === 'button' && treeText(node) === label)
+}
+
+test('orphan tab: 注册到核心「插件」页（id/order/惰性 label），旧核心无该槽时静默降级', async () => {
+  const services = makeServices()
+  applyWith(services)
+  const entry = orphanTabEntry(services)
+  assert.ok(entry, '注册了 settings.plugins.tab')
+  assert.equal(entry.options.id, 'subagents')
+  assert.equal(entry.options.order, 50)
+  assert.equal(typeof entry.options.label, 'function', 'label 惰性求值（核心按语言重取）')
+  assert.equal(window.__dsew.orphanTabRegistered, true)
+  const legacy = makeServices({ slotsAvailable: ['conversation.input.overlay', 'conversation.session.header.actions'] })
+  applyWith(legacy)
+  assert.equal(orphanTabEntry(legacy), undefined, '旧核心没有该槽 ⇒ 不注册')
+  assert.equal(window.__dsew.orphanTabError, null, '槽不存在不算错误')
+  assert.equal(window.__dsew.orphanTabRegistered, false)
+})
+
+test('orphan tab: 打开面板只读扫描（GET）并按行渲染事实', async () => {
+  const rows = [
+    { id: 'ffffffff-1111-2222-3333-444444444444', label: 'Mac 侧重建与回归流水线', parentId: 'eeeeeeee-1111-2222-3333-444444444444', running: true, canRescue: true, atSeq: 42, lastActivity: 1790064186000, error: null },
+    { id: 'aaaaaaaa-1111-2222-3333-444444444444', label: 'aaaaaaaa-1111-2222-3333-444444444444', parentId: null, running: false, canRescue: false, atSeq: null, lastActivity: null, error: null },
+  ]
+  const services = makeServices()
+  applyWith(services)
+  const seen = []
+  await withFetch(async (url, opts) => {
+    seen.push([String(url), (opts || {}).method || 'GET'])
+    return { ok: true, status: 200, json: async () => ({ ok: true, count: 2, orphans: rows }) }
+  }, async () => {
+    const tree = await renderOrphans(services)
+    const text = treeText(tree)
+    assert.ok(text.indexOf('Mac 侧重建与回归流水线') !== -1, 'label 渲染')
+    assert.ok(text.indexOf('运行中') !== -1, '在跑标记渲染')
+    assert.ok(text.indexOf('共 2 个') !== -1, '计数渲染')
+    assert.equal(buttonByText(tree, '找回').props.disabled, false)
+    assert.equal(buttonByText(tree, '停止').props.disabled, false)
+  })
+  assert.deepEqual(seen, [['/__esc-rewind/orphans', 'GET']], '打开只发一次 GET')
+  assert.deepEqual(services.calls.cancels, [], '打开不取消任何运行')
+  assert.deepEqual(services.calls.forks, [], '打开不 fork')
+  assert.equal(window.__dsew.orphans.count, 2)
+  assert.equal(window.__dsew.orphans.phase, 'ready')
+})
+
+test('orphan tab: 空态与失败态如实呈现（失败不得冒充 0 个孤儿）', async () => {
+  const empty = makeServices()
+  applyWith(empty)
+  await withFetch(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, count: 0, orphans: [] }) }), async () => {
+    const tree = await renderOrphans(empty)
+    assert.ok(treeText(tree).indexOf('没有孤儿子代理') !== -1, '空态')
+  })
+  const failing = makeServices()
+  applyWith(failing)
+  await withFetch(async () => ({ ok: false, status: 500, json: async () => ({ error: 'scan exploded' }) }), async () => {
+    const tree = await renderOrphans(failing)
+    assert.ok(treeText(tree).indexOf('读取失败') !== -1, '失败态')
+    assert.ok(treeText(tree).indexOf('scan exploded') !== -1, '失败原因可见')
+  })
+  assert.equal(window.__dsew.orphans.phase, 'error')
+  assert.equal(window.__dsew.orphans.count, null, '失败时不得报 0')
+})
+
+test('orphan tab: 逐行「停止」走宿主端点，未确认静默如实渲染', async () => {
+  const sid = 'ffffffff-1111-2222-3333-444444444444'
+  const services = makeServices()
+  applyWith(services)
+  const posts = []
+  await withFetch(async (url, opts) => {
+    if (String(url).indexOf('/stop') !== -1) {
+      posts.push(JSON.parse(opts.body))
+      return { ok: true, status: 200, json: async () => ({ ok: true, results: [{ id: sid, stopped: true, confirmed: false, reason: 'timeout' }], stopped: 0 }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, count: 1, orphans: [{ id: sid, label: '孤儿', parentId: 'gone', running: true, canRescue: true, atSeq: 7, lastActivity: 1, error: null }] }) }
+  }, async () => {
+    const state = {}
+    const tree = await renderOrphans(services, state)
+    buttonByText(tree, '停止').props.onClick()
+    const after = await renderOrphans(services, state)
+    assert.deepEqual(posts, [{ ids: [sid] }], 'POST 体是 {ids:[...]}')
+    assert.ok(treeText(after).indexOf('已请求取消，未确认静默（timeout）') !== -1, '未确认静默不谎报成功')
+  })
+})
+
+test('orphan tab: 「找回」= 运行中先停 → fork(atSeq) → 沿用标签 → open；不删原孤儿', async () => {
+  const sid = 'ffffffff-1111-2222-3333-444444444444'
+  const services = makeServices()
+  applyWith(services)
+  const order = []
+  await withFetch(async (url, opts) => {
+    if (String(url).indexOf('/stop') !== -1) {
+      order.push('stop')
+      return { ok: true, status: 200, json: async () => ({ ok: true, results: [{ id: sid, stopped: true, confirmed: true, reason: null }], stopped: 1 }) }
+    }
+    order.push('scan')
+    return { ok: true, status: 200, json: async () => ({ ok: true, count: 1, orphans: [{ id: sid, label: 'Mac 流水线', parentId: 'gone', running: true, canRescue: true, atSeq: 42, lastActivity: 1, error: null }] }) }
+  }, async () => {
+    const state = {}
+    const tree = await renderOrphans(services, state)
+    buttonByText(tree, '找回').props.onClick()
+    const after = await renderOrphans(services, state)
+    assert.ok(treeText(after).indexOf('已找回为普通会话') !== -1, '成功提示')
+  })
+  assert.deepEqual(order.slice(0, 2), ['scan', 'stop'], '运行中的孤儿先停再 fork')
+  assert.deepEqual(services.calls.forks[0], { sessionId: sid, atSeq: 42, increaseTitle: false }, 'fork 用孤儿的完整回合边界')
+  assert.deepEqual(services.calls.renames, [['child-1', 'Mac 流水线']], '标题沿用孤儿标签')
+  assert.ok(services.calls.opens.includes('child-1'), '分支被打开')
+  assert.deepEqual(services.calls.archived, [], '不归档、不删除任何会话')
+})
+
+test('orphan tab: 无完整回合的孤儿禁用「找回」并给出原因；批量按钮需先勾选', async () => {
+  const services = makeServices()
+  applyWith(services)
+  await withFetch(async () => ({
+    ok: true, status: 200,
+    json: async () => ({ ok: true, count: 1, orphans: [{ id: 'aaaaaaaa-1111-2222-3333-444444444444', label: '半截孤儿', parentId: 'gone', running: false, canRescue: false, atSeq: null, lastActivity: null, error: null }] }),
+  }), async () => {
+    const state = {}
+    const tree = await renderOrphans(services, state)
+    const rescue = buttonByText(tree, '找回')
+    assert.equal(rescue.props.disabled, true, '没有完整回合 ⇒ 不可点')
+    assert.equal(rescue.props.title, '没有完整回合，无法找回', '原因可见')
+    assert.equal(buttonByText(tree, '停止选中').props.disabled, true)
+    assert.equal(buttonByText(tree, '找回选中').props.disabled, true)
+    const box = collectNodes(tree).find((node) => node.type === 'input')
+    box.props.onChange()
+    const after = await renderOrphans(services, state)
+    assert.equal(buttonByText(after, '停止选中').props.disabled, false, '勾选后批量可用')
+  })
+  assert.deepEqual(services.calls.forks, [], '禁用状态下没有 fork')
+})
+
+test('orphan tab: 全手动不变量（无定时器；刷新只发 GET）', async () => {
+  const source = fs.readFileSync(bundlePath, 'utf8')
+  assert.ok(!/setInterval/.test(source), '面板不得有定时器')
+  const services = makeServices()
+  applyWith(services)
+  const seen = []
+  await withFetch(async (url, opts) => {
+    seen.push((opts || {}).method || 'GET')
+    return { ok: true, status: 200, json: async () => ({ ok: true, count: 0, orphans: [] }) }
+  }, async () => {
+    const state = {}
+    const tree = await renderOrphans(services, state)
+    buttonByText(tree, '刷新统计').props.onClick()
+    await renderOrphans(services, state)
+  })
+  assert.deepEqual(seen, ['GET', 'GET'], '打开与刷新都只有 GET')
+  assert.deepEqual(services.calls.cancels, [])
+  assert.deepEqual(services.calls.forks, [])
+})
+
 test('capability audit: delete goes through the self-hosted channel only', () => {
   const clientSource = fs.readFileSync(path.join(here, '..', 'src', 'client.js'), 'utf8')
   // The client must not reach any third-party endpoint or host surface: the
@@ -1806,6 +2004,7 @@ test('capability audit: delete goes through the self-hosted channel only', () =>
   assert.ok(hostSource.includes("BLOCK_REASON_UNKNOWN = 'subagents-unknown'"), 'host declares the unknown refusal reason')
   assert.ok(clientSource.includes("REASON_SUBAGENTS = 'subagents'"), 'client mirrors the children refusal reason')
   assert.ok(clientSource.includes("REASON_SUBAGENTS_UNKNOWN = 'subagents-unknown'"), 'client mirrors the unknown refusal reason')
+  assert.ok(clientSource.includes("'settings.plugins.tab'"), 'orphan panel lives on the core Plugins page tab slot')
 })
 
 // --- host half (src/index.js, real ESM — delete core + endpoint) -------------
@@ -1962,6 +2161,176 @@ test('host half: 没有子代理（空列表或缺 subagents 服务）时照常�
   }
 })
 
+/** Fake host ctx for the orphan scan/stop tests (only the services they read). */
+function makeOrphanCtx({ headers = [], agents = {}, events = {}, observeError = null, services = true } = {}) {
+  const calls = { listed: 0, observed: [], disposed: 0 }
+  const ctx = {
+    get: (name) => {
+      if (name === 'sessionQuery' && services) {
+        return {
+          listSessions: async () => { calls.listed += 1; return headers.map((h) => ({ header: h })) },
+          observeSession: async (id) => {
+            calls.observed.push(id)
+            if (observeError !== null) throw new Error(observeError)
+            const list = events[id] || []
+            return { events: list, [Symbol.dispose]: () => { calls.disposed += 1 } }
+          },
+        }
+      }
+      if (name === 'agents' && services) return { get: (id) => agents[id] }
+      return undefined
+    },
+  }
+  return { ctx, calls }
+}
+
+/** One running orphan agent stub whose cancel/whenIdle behavior is scripted. */
+function makeOrphanAgent({ idle = true, waitMs = 0 } = {}) {
+  const record = { cancels: 0 }
+  return {
+    status: 'running',
+    cancel(cause) { record.cancels += 1; record.cause = cause },
+    whenIdle: () => (idle ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, waitMs))),
+    record,
+  }
+}
+
+test('host half: orphanSetOf 按可达性判定（父缺失 / 父在 / 父本身是孤儿 / 非子代理）', () => {
+  const wrap = (list) => list.map((header) => ({ header }))
+  assert.deepEqual(hostMod.orphanSetOf(wrap([
+    { id: 'p' },
+    { id: 'c1', origin: 'subagent', parentSession: 'p' },
+  ])), [], '父在 ⇒ 不算孤儿')
+  assert.deepEqual(hostMod.orphanSetOf(wrap([
+    { id: 'c1', origin: 'subagent', parentSession: 'gone' },
+  ])), [{ id: 'c1', parentId: 'gone' }], '父缺失 ⇒ 孤儿')
+  assert.deepEqual(hostMod.orphanSetOf(wrap([
+    { id: 'mid', origin: 'subagent', parentSession: 'gone' },
+    { id: 'leaf', origin: 'subagent', parentSession: 'mid' },
+  ])), [{ id: 'leaf', parentId: 'mid' }, { id: 'mid', parentId: 'gone' }], '父本身是孤儿 ⇒ 后代也算（传递）')
+  assert.deepEqual(hostMod.orphanSetOf(wrap([
+    { id: 'plain' },
+    { id: 'noparent', origin: 'subagent' },
+  ])), [{ id: 'noparent', parentId: null }], '普通会话不算；无父记录的子代理算孤儿')
+  assert.deepEqual(hostMod.orphanSetOf(undefined), [], '空语料不抛错')
+})
+
+test('host half: scanOrphans 只读扫描（label/canRescue/running/释放租约）', async () => {
+  const headers = [
+    { id: 'plain' },
+    { id: 'orphan-a', origin: 'subagent', parentSession: 'gone' },
+    { id: 'orphan-b', origin: 'subagent', parentSession: 'gone' },
+  ]
+  const events = {
+    'orphan-a': [
+      { type: 'session', seq: 0, time: 1000 },
+      { type: 'subagent/descriptor', seq: 0, time: 1001, data: { mode: 'continuable', label: 'Mac 侧重建与回归流水线' } },
+      { type: 'turn/end', seq: 42, time: 2000 },
+    ],
+    'orphan-b': [{ type: 'session', seq: 0, time: 500 }],
+  }
+  const agentA = makeOrphanAgent({ idle: true })
+  const { ctx, calls } = makeOrphanCtx({ headers, events, agents: { 'orphan-a': agentA } })
+  const result = await hostMod.scanOrphans(ctx)
+  assert.equal(result.ok, true)
+  assert.equal(result.count, 2)
+  assert.deepEqual(result.orphans.map((row) => row.id), ['orphan-a', 'orphan-b'])
+  const rowA = result.orphans[0]
+  assert.equal(rowA.label, 'Mac 侧重建与回归流水线', 'label 取自 descriptor')
+  assert.equal(rowA.running, true)
+  assert.equal(rowA.canRescue, true)
+  assert.equal(rowA.atSeq, 42, 'atSeq = 最后一个 turn/end')
+  assert.equal(rowA.lastActivity, 2000)
+  assert.equal(rowA.error, null, '普通会话不参与、未在跑的行也要如实')
+  const rowB = result.orphans[1]
+  assert.equal(rowB.label, 'orphan-b', '没有 descriptor 时回退 id')
+  assert.equal(rowB.running, false)
+  assert.equal(rowB.canRescue, false, '没有完整回合 ⇒ 不可找回')
+  assert.equal(calls.disposed, 2, '每个观察租约都被释放')
+  assert.equal(calls.listed, 1, '只列一次语料')
+  assert.equal(agentA.record.cancels, 0, '扫描不停止任何 agent')
+  assert.equal(hostMod.HOST_DIAG.lastOrphanScan.count, 2, '诊断留存')
+})
+
+test('host half: scanOrphans 单条读失败只降级该行；缺服务时返回空并记诊断', async () => {
+  const headers = [{ id: 'orphan-a', origin: 'subagent', parentSession: 'gone' }]
+  const failing = makeOrphanCtx({ headers, observeError: 'listing exploded' })
+  const result = await hostMod.scanOrphans(failing.ctx)
+  assert.equal(result.ok, true)
+  assert.equal(result.count, 1)
+  assert.match(result.orphans[0].error, /listing exploded/)
+  assert.equal(result.orphans[0].canRescue, false)
+  assert.equal(result.orphans[0].label, 'orphan-a')
+  const missing = makeOrphanCtx({ headers, services: false })
+  const empty = await hostMod.scanOrphans(missing.ctx)
+  assert.equal(empty.ok, false)
+  assert.equal(empty.code, 'session-query-unavailable')
+  assert.equal(empty.count, 0)
+  assert.equal(hostMod.HOST_DIAG.lastOrphanScan.error, 'session-query-unavailable')
+})
+
+test('host half: stopOrphanRun 三态（未在跑 no-op / 已停 / 未确认静默）', async () => {
+  const sid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  const absent = makeOrphanCtx({ services: true })
+  const noop = await hostMod.stopOrphanRun(absent.ctx, sid)
+  assert.deepEqual(noop, { id: sid, stopped: false, confirmed: false, reason: 'not-running' })
+  const agent = makeOrphanAgent({ idle: true })
+  const running = makeOrphanCtx({ agents: { [sid]: agent } })
+  const stopped = await hostMod.stopOrphanRun(running.ctx, sid)
+  assert.equal(stopped.stopped, true)
+  assert.equal(stopped.confirmed, true)
+  assert.equal(agent.record.cancels, 1, 'cancel 恰好一次')
+  assert.deepEqual(agent.record.cause, { kind: 'user' }, '取消原因与既有停止一致')
+  const stuck = makeOrphanAgent({ idle: false, waitMs: 5000 })
+  const stalled = makeOrphanCtx({ agents: { [sid]: stuck } })
+  const unconfirmed = await hostMod.stopOrphanRun(stalled.ctx, sid, { waitMs: 20 })
+  assert.equal(unconfirmed.stopped, true)
+  assert.equal(unconfirmed.confirmed, false, '未观察到静默不得谎报成功')
+  assert.equal(unconfirmed.reason, 'timeout')
+})
+
+test('host half: 孤儿端点（GET 扫描 / POST 停止 / 方法与非法的拒绝）', async () => {
+  const registered = []
+  const host = { register: (entry) => { registered.push(entry); return () => {} } }
+  const sid = 'ffffffff-1111-2222-3333-444444444444'
+  const headers = [{ id: sid, origin: 'subagent', parentSession: 'gone' }]
+  const events = { [sid]: [{ type: 'turn/end', seq: 7, time: 900 }] }
+  const agent = makeOrphanAgent({ idle: true })
+  const { ctx } = makeOrphanCtx({ headers, events, agents: { [sid]: agent } })
+  ctx.effect = (fn) => { const dispose = fn(); return dispose || (() => {}) }
+  hostMod.registerHttp(ctx, host)
+  const list = registered.find((entry) => entry.path === hostMod.ORPHANS_PATH)
+  const stop = registered.find((entry) => entry.path === hostMod.ORPHANS_STOP_PATH)
+  assert.ok(list && stop, '两个孤儿端点都注册了')
+  const resList = { writeHead: (status) => { resList.status = status }, end: (body) => { resList.body = body } }
+  await list.handler({ method: 'GET' }, resList)
+  assert.equal(resList.status, 200)
+  const body = JSON.parse(resList.body)
+  assert.equal(body.count, 1)
+  assert.equal(body.orphans[0].id, sid)
+  const res405 = { writeHead: (status) => { res405.status = status }, end: (body) => { res405.body = body } }
+  await list.handler({ method: 'POST' }, res405)
+  assert.equal(res405.status, 405)
+  const postReq = (payload) => ({
+    method: 'POST',
+    on: (event, cb) => { if (event === 'data') cb(JSON.stringify(payload)); if (event === 'end') cb() },
+    destroy: () => {},
+  })
+  const resEmpty = { writeHead: (status) => { resEmpty.status = status }, end: (body) => { resEmpty.body = body } }
+  await stop.handler(postReq({ ids: [] }), resEmpty)
+  assert.equal(resEmpty.status, 400)
+  const resBad = { writeHead: (status) => { resBad.status = status }, end: (body) => { resBad.body = body } }
+  await stop.handler(postReq({ ids: ['nope'] }), resBad)
+  assert.equal(resBad.status, 400)
+  const resStop = { writeHead: (status) => { resStop.status = status }, end: (body) => { resStop.body = body } }
+  await stop.handler(postReq({ ids: [sid] }), resStop)
+  assert.equal(resStop.status, 200)
+  const stopBody = JSON.parse(resStop.body)
+  assert.equal(stopBody.ok, true)
+  assert.equal(stopBody.stopped, 1)
+  assert.equal(stopBody.results[0].id, sid)
+})
+
 test('host half: settings field and endpoint constants are stable', () => {
   assert.equal(hostMod.NS, 'esc-rewind')
   assert.equal(hostMod.SETTINGS_FIELD, 'deleteOldOnRewind')
@@ -1972,6 +2341,8 @@ test('host half: settings field and endpoint constants are stable', () => {
     ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'])
   assert.equal(hostMod.BLOCK_REASON_CHILDREN, 'subagents')
   assert.equal(hostMod.BLOCK_REASON_UNKNOWN, 'subagents-unknown')
+  assert.equal(hostMod.ORPHANS_PATH, '/__esc-rewind/orphans')
+  assert.equal(hostMod.ORPHANS_STOP_PATH, '/__esc-rewind/orphans/stop')
 })
 
 test('host half: fallback schema registers the namespace without schemastery', async () => {
@@ -2015,7 +2386,9 @@ test('host half: registerHttp serves status + delete, rejecting wrong method/mis
   // cordis ctx.effect runs the registration callback immediately.
   const ctx = { get: () => undefined, effect: (fn) => { const dispose = fn(); return dispose || (() => {}) } }
   hostMod.registerHttp(ctx, host)
-  assert.equal(registered.length, 2, 'status + delete endpoints registered')
+  assert.equal(registered.length, 4, 'status + delete + orphans + orphans/stop registered')
+  assert.ok(registered.find((e) => e.path === hostMod.ORPHANS_PATH), 'orphan scan endpoint registered')
+  assert.ok(registered.find((e) => e.path === hostMod.ORPHANS_STOP_PATH), 'orphan stop endpoint registered')
   const status = registered.find((e) => e.path === hostMod.STATUS_PATH)
   const del = registered.find((e) => e.path === hostMod.DELETE_PATH)
   assert.ok(status && del, 'both endpoints present')
@@ -2134,7 +2507,7 @@ test('regression: applying with a guard-shaped ctx binds settings and toggles', 
     },
   })
   factory(requireStub).apply(ctx)
-  assert.equal(registered.length, 2, 'both slot entries registered on a guard ctx')
+  assert.equal(registered.length, 3, 'overlay + header + orphan tab registered on a guard ctx')
   assert.equal(internals()._module.getSettings(), settingsService, 'settings controller bound through the guard shape')
   const env = mount({ services, sessionId: 's1', chat: chatOf([]) })
   toasts.length = 0

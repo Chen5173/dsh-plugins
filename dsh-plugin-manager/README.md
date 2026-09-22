@@ -1,6 +1,6 @@
 # dsh-plugin-manager
 
-**本地插件管理器**：装上这一个插件，就能在 DSH Web 设置页的「本地插件」面板里管理本仓库全部 `dsh-*` 子插件 —— 查看状态、逐个或批量开关（激活 / 停用）、移除、把旧布局一键迁移到管理器模型。
+**本地插件管理器**：装上这一个插件，就能在 DSH Web **设置 → 插件 → 本地插件**（核心「插件」页里的一个 tab）里管理本仓库全部 `dsh-*` 子插件 —— 查看状态、逐个或批量开关（激活 / 停用）、移除、把旧布局一键迁移到管理器模型。
 
 ## 安装
 
@@ -20,6 +20,8 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 - **启用**：自动补依赖并写入激活行，宿主侧即时生效。
 - **停用**：保留激活行与依赖，只是关掉，随时可再开。
 - **移除**：删激活行 + 摘依赖；仓库里的源码目录保留，之后可再启用。
+- **链接自愈（默认开）**：子插件的依赖是**绝对路径** `link:<目录>`，换机器 / 换 `DSH_HOME` / 改安装入口后就会指错。宿主加载时与面板每次拉取数据时都会**只读检测**链接态（`fresh` / `陈旧：指向别处` / `陈旧：目标不存在` / `无法确定`，比较按真实路径且容忍大小写与分隔符差异）；对**能确定**的项自动改写为当前目录并只跑**一次** `pnpm install`（**每次宿主启动最多一次**，写前留 `*.bak-<ts>` 备份），确定不了的只在面板横幅里列为「需人工处理」——**绝不猜路径**。面板顶部横幅给出计数、逐条「声明指向 → 当前实际目录」与「重定位」按钮；开关在设置页的 `dsh-plugin-manager` 段（字段 `autoRelink`，默认开，关掉后只检测与提示）。
+- **启用即自愈**：单行「开启」与「全部开启」在 `link:` 陈旧时同样会改写（不再是"键在就信任"）。
 - **带界面的子插件**其客户端 UI 只在**一次页面刷新**后进/出。面板开关后会提示并给出刷新按钮，**不会自动刷新**。
 - **批量按钮**上的数字 = 这一步真能改动的插件数（为 0 时置灰）。「全部开启」处理 `已停用` 与 `未激活`；「全部关闭」处理 `已激活`；「全部移除」处理**在 profile 里留下痕迹的**那些（`已激活`、`已停用`、`未激活(仅依赖)`）。`未安装`（对移除而言）、`旧布局`、`非插件目录` 一律跳过（旧布局请先迁移，确认框与结果里会点明跳过了几个）。批量只作用于面板列出的受管子插件，profile 里其它插件的行（`mcp-*`、`dsh-liquid-glass` …）一行都不碰。
 - **全部移除**：一次删掉全部受管子插件的激活行与 devDependencies 链接，只跑一次 `pnpm install`；源码目录保留，之后可逐个重新启用。它是**破坏性**动作，插件会立刻停止运行——**迁移过 profile / 换过机器**时这正是清掉旧绝对 `link:` 的办法：先「全部移除」，再按需「全部开启」或逐个启用，管理器就会按子插件**当前实际目录**重新写链接。执行时仍在 400 ms 合并窗口里的开关点击会随行作废（结果提示会说明作废了几次）。
@@ -52,19 +54,36 @@ dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git
 
 ## 卸载 / 回滚
 
+**先分清两种装法**（面板顶部的「仓库路径」能告诉你现在是哪种）：
+
+| 装法 | 子插件的 `link:` 指向 | 删管理器之后 |
+|---|---|---|
+| **git 快照**（`dsh plugin add git+https://…`） | 管理器克隆里的 `sub-plugins/<name>` | 那 7 个子插件的**代码随克隆一起消失**，而激活行与 `link:` 键**留在 profile 里** → 下次启动报 `failed to import loader entry …: Cannot find package …` |
+| **本地 `link:`**（`dsh plugin add <仓库根>`） | 你的开发仓库 `sub-plugins/<name>` | 依上面那条命令的说明：源码不动；`package.json` 里会出现指向**已删除目录**的键 |
+
+**核心 CLI 帮不了你**：`dsh plugin --profile web remove dsh-plugin-manager` 只是 pnpm 转发 + 只对账 `dsh.profile.bundles`——它**不认识** `cordis.patch.yml` 里由管理器写下的激活行，也**不会**碰子插件的 `link:` 键（核心也没有卸载钩子）。
+
+**请用这条一键卸载**（脚本随包分发，不依赖 DSH 宿主与 `dsh` CLI）：
+
 ```bash
-dsh plugin --profile web remove dsh-plugin-manager
+node "<面板里「复制卸载命令」复制到的那条命令>"   # 面板已按当前 profile 拼好，含 --profile <name> --yes
+# 或者手写：
+node "~/.dsh/profiles/web/node_modules/dsh-plugin-manager/dsh-plugin-manager/tools/uninstall-manager.mjs" --profile web --yes
 ```
 
-卸载管理器后，已迁移的子插件按现状（`devDependencies` + 激活行）继续工作。要回到迁移前的样子，先还原面板报出的 `*.bak-*` 备份文件，再重装。
+它一次做完：删除全部受管子插件的激活行与指向本仓库的 `link:` 依赖键 → 删除管理器自身的依赖键与 `dsh.profile.bundles` 条目 → 跑**一次** `pnpm install`。两份 profile 文件写前各留一份 `*.bak-<ts>`；**不删任何源码目录**；重复执行是 noop。默认**干跑**（只打印将删除什么），`--yes` 才真删——所以面板只提供「复制命令」，不会替你执行。
 
-> ⚠️ **卸载子插件不要用 CLI**：`remove <子插件包名>` 只摘依赖、不会删管理器写的激活行，下次 `dsh web` 启动会失败。请用面板的「移除」。
+失败降级：若最后一步 `pnpm install` 失败（Windows 上删脚本自身所在目录偶发 EBUSY），行与键**已经清干净**，按它打印的 `pnpm install --dir "<profile>"` 重跑一次即可收尾。
+
+要回到迁移前的样子：先还原 `*.bak-<ts>`，再按「安装」重装管理器。
+
+> ⚠️ **卸载子插件不要用 CLI**：`remove <子插件包名>` 只摘依赖、不会删管理器写的激活行，下次 `dsh web` 启动会失败。请用面板的「移除」（或上面的一键卸载）。
 
 ## 版本要求
 
 - Node ≥ 20（`package.json` 的 `engines`）。
 - 宿主：profile 顶层能解析 `js-yaml`（web profile 已具备）。
-- 浏览器：需要核心提供 `react` 模块字与 `settings.section` 槽；面板注入 `@deepseek-ai/dsh-client-runtime@^0.1.2-rc.1`。
+- 浏览器：需要核心提供 `react` 模块字与 `settings.plugins.tab` 槽（核心「插件」设置页声明的列表槽；旧核心没有该槽时面板不出现，但管理器宿主机能照常工作）；面板注入 `@deepseek-ai/dsh-client-runtime@^0.1.2-rc.1`。
 
 ---
 

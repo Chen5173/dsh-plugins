@@ -9,7 +9,7 @@
 - [x] 自动化：管理器自身不列入管理集（`listRepoPluginDirs` 排除 `dsh-plugin-manager`）。
 - [x] 自动化：双根并集扫描与嵌套优先（host-core「sub-plugins/ nested layout」用例：仅有嵌套 / 半迁移并集 / 同名目录去重）。
 - [x] 自动化：头部显示子插件目录（bundle.test「header shows the repo root and the scanned plugins root」）。
-- [x] 需真机：设置页左侧出现「本地插件」，列出的状态与 profile 实际一致；顶部显示仓库路径与子插件目录（2026-09-10 实测：面板截图 + `GET /list` → 200，6 个子插件全「已激活」，头部两行路径正确）。
+- [x] 需真机：设置 → 插件 → 「本地插件」tab 里列出的状态与 profile 实际一致；顶部显示仓库路径与子插件目录（2026-09-10 实测：面板截图 + `GET /list` → 200，6 个子插件全「已激活」，头部两行路径正确；2026-09-22 起入口从独立设置导航行改为核心「插件」页的 tab）。
 
 ## A2 主开关激活/停用并持久化
 
@@ -37,8 +37,8 @@
 
 ## A6 设置入口与生效模型
 
-- [x] 自动化：注册 `settings.section` id `local-plugins`、order 16、标签「本地插件」；动作成功且目标带 client → 显示刷新提示且**不自动刷新**（bundle.test 两处断言）。
-- [x] 需真机：左侧出现「本地插件」一级入口（面板实测打开）；非 legacy 布局下不出现迁移横幅（`legacyDetected=false`）。
+- [x] 自动化：注册 `settings.plugins.tab` id `local-plugins`、order 20、标签「本地插件」（**不再**注册独立 `settings.section` 导航行）；动作成功且目标带 client → 显示刷新提示且**不自动刷新**（bundle.test 两处断言）。
+- [x] 需真机：设置 → 插件 里出现「本地插件」tab（面板实测打开；设置左侧导航不再有独立行）；非 legacy 布局下不出现迁移横幅（`legacyDetected=false`）。
 - [ ] 未验证：仓库目录不可达时给出可读错误而非静默空列表。
 
 ## A7 子插件目录布局（sub-plugins/）
@@ -146,7 +146,7 @@
 - [x] **真实 `git+https://` 传输实测**（2026-09-11，推到 `135ce6b` + tag `v0.1.0` 之后，隔离 `DSH_HOME`）：`dsh plugin --profile web add git+https://github.com/Chen5173/dsh-plugins.git` → exit 0，依赖键恰为 **`dsh-plugin-manager`**（pnpm 把 spec 归一化成 `github:Chen5173/dsh-plugins`），`bundles` = `[dsh-base, dsh-web-app, dsh-plugin-manager]`，**无** `declares no dsh.bundle` 警告；`--dump-default-config` 组合出 `- id: dsh-plugin-manager` 且只 **1** 次，exit 0；`node_modules/dsh-plugin-manager/` 是整棵工作树（`sub-plugins/` 6 个目录 + `dsh-plugin-manager/` + `docs/` + `openspec/`）。
 - [x] 真实 tag 锁版本实测：`… git+https://…/dsh-plugins.git#v0.1.0` → 依赖键仍是 `dsh-plugin-manager`、spec 为 `github:Chen5173/dsh-plugins#v0.1.0`、`bundles` 恰一条。
 - [x] 安装自测：在**从 GitHub 装出来的 clone**里直接跑 `root-install-shell.test.mjs` → PASS。
-- [ ] 需真机（浏览器侧，无法在无 GUI 环境判定）：重启 `dsh web` → 设置页出现「本地插件」入口、`GET /list` 列出 6 个子插件、启动日志无 `duplicate loader entry id` / `Cannot find package`。
+- [ ] 需真机（浏览器侧，无法在无 GUI 环境判定）：重启 `dsh web` → 设置 → 插件 出现「本地插件」tab、`GET /list` 列出 6 个子插件、启动日志无 `duplicate loader entry id` / `Cannot find package`。
 - [ ] 需真机（私有仓库）：本仓库是 public，凭据面未覆盖。若日后转私有，pnpm 直接调用系统 git，需保证 git 侧有可用凭据（SSH key / credential helper）；失败形态预计是 git 侧鉴权报错而非 dsh 报错。
 - [ ] 需真机：从 git 装的 clone 里在面板点「启用」某个子插件 → 面板显示「已激活」且其宿主行为生效（本项的链接与解析部分已由上面的自动化实测覆盖）。
 
@@ -169,3 +169,27 @@
 - [ ] 需真机：在真实 web profile 上点「全部移除 (6)」→ 确认框 → 面板 6 行全变「未激活」、只卡顿一次；随后点「全部开启 (6)」→ 6 个重新装上并按**当前** `sub-plugins/` 绝对路径写 `link:`，`dsh --profile web --dump-config` 组合成功、无 `Cannot find package`。
 - [ ] 需真机：把 `DSH_HOME` 整体复制到另一路径后启动 → 面板显示「未激活(仅依赖)」（陈旧绝对路径）→ 点「全部移除」再「全部开启」→ 插件恢复且 `devDependencies` 里的 `link:` 指向**新路径**。这正是本功能要解决的场景，但需要一份可丢弃的真实 profile。
 - [ ] 未复验：`openspec/specs/plugin-manager/spec.md` 中本次并入的 3 条新增 Requirement 与 1 条 MODIFIED Requirement 已由 `openspec validate plugin-manager --strict` 判为有效（2026-09-18），但**归档动作本身尚未执行**——归档需用户明确指示。
+
+## A15 一键卸载（2026-09-22，变更 `2026-09-22-manager-self-uninstall`）
+
+- [x] 自动化：`test/uninstall.test.mjs`（临时 `DSH_HOME` + 假仓库 + pnpm 桩）——受管行与指向本仓库的 `link:` 键被清空、管理器依赖键与 `dsh.profile.bundles` 条目消失、**其它插件的行/键/条目逐字节不变**、两份 `*.bak-<ts>` 存在、`pnpm install` **恰好一次**、源码目录仍在、第二次运行是 `noop`（零写入零安装）、`--dry-run` 两份文件逐字节不变、安装失败时报 `EBUSY` 并给出 `pnpm install --dir` 收尾命令且已完成的行/键清理保留。
+- [x] 自动化：`/list` 暴露 `uninstall.command`（含脚本路径、`--profile <name>`、显式 `--yes`）与 `willRemove` 预览（行数/键数/管理器条目）；`debounce.test` 断言字段与形状。
+- [x] 自动化：面板渲染「卸载管理器（含全部子插件）」块、计数文案与命令文本；点「复制卸载命令」把**宿主给的那条命令**写进剪贴板并提示"不会自动执行"，且**不调用任何卸载端点**；剪贴板不可用时降级为「请手动复制」（`bundle.test`）。
+- [x] 红能力（2026-09-22 实测）：把脚本移开并把 `src/index.js`/`src/client.js` 还原成 `HEAD` → `uninstall.test` 因找不到模块报 3 处错、`debounce.test` `TypeError`、`bundle.test` 3 条红；恢复后 6 支管理器套件全绿、全仓 sweep 无回归。
+- [ ] 需真机：面板点「复制卸载命令」→ 终端先跑一次不带 `--yes`（干跑）核对将删数量 → 带 `--yes` 执行 → 重启 `dsh web`：设置 → 插件 里不再有「本地插件」tab，启动日志无 `failed to import loader entry` / `Cannot find package`。
+- [ ] 需真机：同一条命令再跑一次 → 报 `nothing to remove — already uninstalled (noop)`。
+- [ ] 需真机：仓库源码目录（`E:\GitHubProjects\ChenSir5173\dsh-plugins`）与各子插件目录仍在；按 README 重装管理器可恢复。
+
+## A14 陈旧链接的自动检测与自愈（2026-09-22，变更 `2026-09-22-stale-link-selfheal`）
+
+- [x] 自动化：`linkStateOf` 判定矩阵——无键 / 正确 / 指向别处 / 目标不存在 / 连实际目录都不存在 / 非 `link:` 写法 / IO 抛错，且**仅大小写与分隔符差异算 fresh**（host-core.test 的 stale-link 分组）。
+- [x] 自动化：`relinkPlan` 把「可自动修」与「只能提示」分开并给出计数，管理器自身不参与（同上）。
+- [x] 自动化：**单行启用修复陈旧链接**——`link:` 指向不存在目录时启用 → 恰好 1 次 manifest 写 + 恰好 1 次 `pnpm install`，`link:` 被改写为当前实际目录，响应里该插件 `linkState` 回到 `fresh`；链接已正确时不写 `package.json`、不安装（debounce.test「陈旧链接：单行启用时修复」/「链接已正确」）。
+- [x] 自动化：**面板「重定位」**——两条陈旧一起改写、恰好 1 次 install、响应 `relink.relinked.length === 2`、修完 `linkPlan.count === 0`；再点一次是 `noop` 且不再安装（debounce.test「面板『重定位』」）。
+- [x] 自动化：**自动重定位一次 + 闩锁**——`__autoRelinkOnce` 恰好 1 次 install、`relinked.length === 2`、`lastRelink.source === 'auto'`；同一进程第二次调用被闩锁挡住（install 计数不变）；**关开关时不写不装**且 `autoRelink.skipped === 'disabled'`（debounce.test「自动重定位」）。
+- [x] 自动化：面板横幅分区——计数 `检测到 N 条陈旧链接：M 条可自动修复、K 条需人工处理`、逐条「声明指向 → 当前实际目录」、开关关闭时提示、行内「链接陈旧」徽标、「重定位」按钮只在有可修项时出现；清空后横幅消失且无按钮（bundle.test「stale links…」）。
+- [x] 红能力（2026-09-22 实测）：把三个源文件还原成 `HEAD` 版后跑新用例 → `host-core.test.mjs` 因缺少 `linkStateOf`/`relinkPlan` 直接崩、`debounce.test.mjs` 1 处 `TypeError`、`bundle.test.mjs` 2 条红（本次的横幅用例 + 另一在飞变更的设置入口用例）；恢复实现后 4 支全绿。
+- [ ] 需真机：把某个子插件的 `link:` 手工改成不存在的路径 → 重启 `dsh web` → 启动日志/面板显示「已自动重定位 1 条」、`link:` 回到当前目录、安装恰好一次。
+- [ ] 需真机：把某个子插件目录临时改名（目标缺失且无法确定）→ 只出现横幅「需人工处理」，**不写文件、不安装**。
+- [ ] 需真机：设置页 `dsh-plugin-manager` 段关掉 `autoRelink` → 再制造陈旧 → 只检测与提示；打开并重启后才自动修。
+- [ ] 需真机：`fresh` 现场启动前后对比 profile `package.json` 与 `cordis.patch.yml` 的 mtime —— 应**零写入**。

@@ -361,7 +361,7 @@ test('bundle registers id dsh-idle-hook and injects slots only', () => {
   assert.deepEqual(factoryApi().inject, ['slots'])
 })
 
-test('apply registers settings.section idle-hook, order 19, label 空闲通知', () => {
+test('apply registers Plugins-page tab idle-hook, order 40, label 空闲通知', () => {
   const api = factoryApi()
   let registered = null
   const entry = []
@@ -370,9 +370,9 @@ test('apply registers settings.section idle-hook, order 19, label 空闲通知',
   assert.equal(typeof registered, 'function')
   registered(slots)
   assert.equal(entry.length, 1)
-  assert.equal(entry[0].opts.name, 'settings.section')
+  assert.equal(entry[0].opts.name, 'settings.plugins.tab')
   assert.equal(entry[0].opts.id, NS)
-  assert.equal(entry[0].opts.order, 19)
+  assert.equal(entry[0].opts.order, 40)
   assert.equal(entry[0].opts.label(), '空闲通知')
   assert.equal(typeof entry[0].comp, 'function')
 })

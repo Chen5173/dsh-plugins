@@ -104,6 +104,122 @@ export function staleLinkSpec(manifest, meta) {
   return current === want ? null : { from: current, to: want }
 }
 
+/** Machine-readable link states (host payload and panel copy share this vocabulary). */
+export const LINK_STATES = {
+  absent: 'absent',
+  fresh: 'fresh',
+  mismatch: 'stale-mismatch',
+  missing: 'stale-target-missing',
+  unresolved: 'stale-unresolved',
+  unknown: 'unknown',
+}
+
+/**
+ * Default IO for {@link linkStateOf}: the real filesystem. Tests inject a fake so
+ * the matrix (case-only differences, missing targets, realpath failures) is
+ * asserted without touching disk.
+ */
+export const LINK_IO = {
+  platform: process.platform,
+  exists: (p) => { try { return fs.existsSync(p) } catch { return false } },
+  realpath: (p) => {
+    const impl = typeof fs.realpathSync.native === 'function' ? fs.realpathSync.native : fs.realpathSync
+    return impl(p)
+  },
+}
+
+/**
+ * 功能作用：比较两个路径是否指向同一条链接目标——按目标平台决定是否大小写敏感，
+ *           并把反斜杠/正斜杠与结尾分隔符归一化（Windows 上 D:/Repo/x 与 D:\Repo\X 视为同一处）。
+ * 参数：
+ *   a: string -- 路径，例 'D:/Repo/x/'
+ *   b: string -- 路径，例 'D:\Repo\X'
+ *   platform: string -- 目标平台，例 'win32' | 'darwin' | 'linux'
+ * 返回值：
+ *   boolean -- 同处为 true，例 true
+ * 调用样例：
+ *   if (sameLinkTarget('D:/repo/x/', 'D:\\Repo\\X', 'win32')) { ... }
+ */
+export function sameLinkTarget(a, b, platform = process.platform) {
+  const norm = (v) => String(v).split('\\').join('/').replace(/\/+$/, '')
+  const left = norm(a)
+  const right = norm(b)
+  const caseInsensitive = platform === 'win32' || platform === 'darwin'
+  return caseInsensitive ? left.toLowerCase() === right.toLowerCase() : left === right
+}
+
+/**
+ * 功能作用：判定一个子插件的 profile devDependency 链接态（只读，不写任何文件）——
+ *           absent（无键）/ fresh（指向当前实际目录）/ stale-mismatch（指向别处）/
+ *           stale-target-missing（目标不存在）/ stale-unresolved（连本仓库里的实际目录都没有）/
+ *           unknown（realpath 等 IO 失败）。
+ * 参数：
+ *   manifest: object -- profile package.json，例 { devDependencies: { 'dsh-aaa': 'link:D:/repo/sub-plugins/dsh-aaa' } }
+ *   meta: object -- readPluginMeta() 的结果，例 { name: 'dsh-aaa', dirPath: 'D:/repo/sub-plugins/dsh-aaa' }
+ *   io: object -- { platform, exists, realpath }，默认真实文件系统（测试注入假实现）
+ * 返回值：
+ *   string -- LINK_STATES 之一，例 'stale-target-missing'
+ * 调用样例：
+ *   const state = linkStateOf(manifest, meta); if (state === LINK_STATES.missing) { ... }
+ */
+export function linkStateOf(manifest, meta, io = LINK_IO) {
+  const dev = (manifest && manifest.devDependencies) || {}
+  const spec = dev[meta.name]
+  if (typeof spec !== 'string' || spec.trim() === '') return LINK_STATES.absent
+  const target = spec.startsWith('link:') ? spec.slice('link:'.length) : null
+  if (target === null || target.trim() === '') return LINK_STATES.mismatch
+  try {
+    if (!io.exists(meta.dirPath)) return LINK_STATES.unresolved
+    if (!io.exists(target)) return LINK_STATES.missing
+    return sameLinkTarget(io.realpath(target), io.realpath(meta.dirPath), io.platform)
+      ? LINK_STATES.fresh
+      : LINK_STATES.mismatch
+  } catch {
+    return LINK_STATES.unknown
+  }
+}
+
+/** Human-facing reasons a stale link cannot be repaired automatically. */
+export const RELINK_REASONS = {
+  [LINK_STATES.unresolved]: '实际目录不存在',
+  [LINK_STATES.unknown]: '无法解析路径',
+}
+
+/**
+ * 功能作用：按面板派生状态把陈旧链接分成「可自动修」与「只能提示」两类（纯函数）——
+ *           auto = 链接指向别处/目标缺失但本仓库里能唯一定位到实际目录；
+ *           manual = 连实际目录都找不到（或路径解析失败），绝不猜路径。
+ * 参数：
+ *   derived: Array -- deriveStates() 的结果（每项带 linkState/linkDeclared/linkExpected）
+ * 返回值：
+ *   { auto: Array, manual: Array, count: number, manualCount: number }
+ *   例：relinkPlan(states) → { auto: [2 项], manual: [1 项], count: 2, manualCount: 1 }
+ * 调用样例：
+ *   const plan = relinkPlan(s.derived); if (plan.count > 0) await ensureDevDeps(c, plan.auto)
+ */
+export function relinkPlan(derived) {
+  const list = Array.isArray(derived) ? derived : []
+  const auto = []
+  const manual = []
+  for (const p of list) {
+    if (!p || p.dir === MANAGER_DIR) continue
+    const entry = {
+      dir: p.dir,
+      name: p.name || p.dir,
+      rowId: p.rowId,
+      dirPath: p.dirPath,
+      linkState: p.linkState,
+      declared: typeof p.linkDeclared === 'string' ? p.linkDeclared : null,
+      expected: typeof p.linkExpected === 'string' ? p.linkExpected : null,
+    }
+    if (p.linkState === LINK_STATES.mismatch || p.linkState === LINK_STATES.missing) auto.push(entry)
+    else if (p.linkState === LINK_STATES.unresolved || p.linkState === LINK_STATES.unknown) {
+      manual.push({ ...entry, reason: RELINK_REASONS[p.linkState] || p.linkState })
+    }
+  }
+  return { auto, manual, count: auto.length, manualCount: manual.length }
+}
+
 // --- repo scanning -----------------------------------------------------------
 
 /**
@@ -371,7 +487,13 @@ export function stripOverrideRows(rows, ids) {
  * legacyBundle:boolean, hasRow, disabled, active, state}
  * state ∈ active | disabled | legacy | uninstalled | invalid
  */
-export function deriveStates({ repoPlugins, manifest, rows }) {
+/** Raw devDependency spec of one package name (declared form), or undefined. */
+function devSpecOf(manifest, name) {
+  const dev = (manifest && manifest.devDependencies) || {}
+  return dev[name]
+}
+
+export function deriveStates({ repoPlugins, manifest, rows, io = LINK_IO }) {
   const deps = new Set(Object.keys(manifest.dependencies || {}))
   const devDeps = new Set(Object.keys(manifest.devDependencies || {}))
   const bundles = Array.isArray(manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles)
@@ -410,6 +532,12 @@ export function deriveStates({ repoPlugins, manifest, rows }) {
       disabled,
       active: state === 'active' || (state === 'legacy' && !disabled),
       state,
+      // Link state is what makes "key exists" vs "points at the right place"
+      // distinguishable: 'inactive' alone cannot tell "not installed" from
+      // "installed but stale".
+      linkState: linkStateOf(manifest, p, io),
+      linkDeclared: typeof devSpecOf(manifest, p.name) === 'string' ? devSpecOf(manifest, p.name) : null,
+      linkExpected: p.valid ? linkSpecOf(p.dirPath) : null,
     }
   })
 }
@@ -459,9 +587,11 @@ export function batchPlan(derived, enabled) {
     const state = p.state
     if (!p.valid || state === 'invalid') { skip(p, BATCH_REASONS.invalidDir); continue }
     if (state === 'legacy' || p.legacyBundle === true) { skip(p, BATCH_REASONS.legacyLayout); continue }
+    const staleLink = p.linkState === LINK_STATES.mismatch || p.linkState === LINK_STATES.missing
     if (open) {
-      // 开启方向：只动「已有行但停用」与「从未安装」两类；已激活无事可做，
-      // 「未激活(仅依赖)」按约定不凭空补行。
+      // 开启方向：动「已有行但停用」「从未安装」，外加「有激活行但链接陈旧」的项
+      // （后者只修链接、把行写成 enabled，属于幂等写）；「未激活(仅依赖)」按约定
+      // 不凭空补行——它的修复走单行开启或「重定位」。
       if (state === 'disabled' || state === 'uninstalled') {
         targets.push({
           dir: p.dir,
@@ -470,7 +600,19 @@ export function batchPlan(derived, enabled) {
           hasClient: Boolean(p.hasClient),
           dirPath: p.dirPath,
           state,
-          needsInstall: state === 'uninstalled',
+          needsInstall: state === 'uninstalled' || staleLink,
+        })
+        continue
+      }
+      if (staleLink && p.hasRow === true) {
+        targets.push({
+          dir: p.dir,
+          rowId: p.rowId,
+          name: p.name || p.dir,
+          hasClient: Boolean(p.hasClient),
+          dirPath: p.dirPath,
+          state,
+          needsInstall: true,
         })
         continue
       }

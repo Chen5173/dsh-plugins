@@ -74,7 +74,15 @@ try {
 }
 
 process.env.DSH_HOME = tmpRoot
-const { registerHttp } = await import(pathToFileURL(indexPath).href)
+const {
+  registerHttp,
+  __setPnpmRunner,
+  __setAutoRelink,
+  __resetAutoRelinkLatch,
+  __autoRelinkOnce,
+  HOST_DIAG,
+} = await import(pathToFileURL(indexPath).href)
+const { linkSpecOf } = await import(pathToFileURL(path.join(here, '..', 'src', 'host-core.js')).href)
 
 // --- fake web server + req/res ----------------------------------------------
 
@@ -94,8 +102,19 @@ const host = {
   },
 }
 
+// The load-time automatic pass is inert unless a test turns it on: it would
+// otherwise rewrite this fixture's intentionally-stale links and spawn pnpm.
+__setAutoRelink(false)
 registerHttp(ctx, host, {})
 assert.equal(typeof handler, 'function', 'registerHttp installed a prefix handler')
+
+const repoRoot = path.join(here, '..', '..')
+const manifestPath = path.join(profileDir, 'package.json')
+const manifest = () => JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const writeManifest = (m) => fs.writeFileSync(manifestPath, `${JSON.stringify(m, null, 2)}\n`, 'utf8')
+const URL_ = (suffix) => `/__dsh-plugin-manager/${suffix}`
+let installs = 0
+__setPnpmRunner(async () => { installs += 1; return { ok: true, code: 0, error: null, stdout: '', stderr: '' } })
 
 function call(method, url, body) {
   return new Promise((resolve, reject) => {
@@ -176,6 +195,98 @@ try {
   await call('POST', '/__dsh-plugin-manager/set-enabled', { dir: ROWS[1], enabled: false })
   dispose()
   assert.match(fs.readFileSync(patchFile, 'utf8'), /disabled: true/, 'queued intent survives a host shutdown')
+  // The dispose above nulled the handler; re-register for the stale-link cases.
+  __resetAutoRelinkLatch()
+  __setAutoRelink(false)
+  registerHttp(ctx, host, {})
+
+  // --- /list 暴露「一键卸载」命令与将删预览（只读） --------------------------
+  {
+    const listed = await call('GET', URL_('list'))
+    assert.equal(listed.status, 200)
+    const uninstall = listed.json.data.uninstall
+    assert.ok(uninstall && typeof uninstall.command === 'string', 'uninstall command exposed on /list')
+    assert.match(uninstall.command, /uninstall-manager\.mjs/, 'command points at the shipped script')
+    assert.match(uninstall.command, /--profile web/, 'command targets the resolved profile')
+    assert.equal(uninstall.command.endsWith('--yes'), true, 'command carries the explicit --yes (script defaults to dry run)')
+    assert.ok(uninstall.willRemove.rows >= 1 && uninstall.willRemove.deps >= 1, 'preview counts managed rows and link keys')
+    assert.equal(typeof uninstall.willRemove.managerEntry, 'boolean', 'preview reports the manager entry state')
+  }
+
+  // --- 陈旧链接：单行启用时修复（恰好一次 install） --------------------------
+  {
+    const dir = ROWS[1]
+    const currentSpec = linkSpecOf(path.join(repoRoot, 'sub-plugins', dir))
+    fs.writeFileSync(patchFile, seedRows(), 'utf8')
+    const m = manifest()
+    m.devDependencies[dir] = `link:D:/gone/${dir}`
+    writeManifest(m)
+    installs = 0
+    const res = await call('POST', URL_('set-enabled'), { dir, enabled: true })
+    assert.equal(res.status, 200)
+    await sleep(150)
+    assert.equal(installs, 1, '陈旧链接被修复时恰好一次 pnpm install')
+    assert.equal(manifest().devDependencies[dir], currentSpec, 'link: 被改写为当前实际目录')
+    const listed = (res.json.data.plugins || []).find((p) => p.dir === dir)
+    assert.equal(listed.linkState, 'fresh', '响应里的链接态已回到 fresh')
+  }
+
+  // --- 链接已正确：不写 package.json、不安装 --------------------------------
+  {
+    installs = 0
+    const res = await call('POST', URL_('set-enabled'), { dir: ROWS[1], enabled: true })
+    assert.equal(res.status, 200)
+    await sleep(150)
+    assert.equal(installs, 0, '链接正确时不写文件也不安装')
+  }
+
+  // --- 面板「重定位」：两条一起修、只一次 install；再点 noop ----------------
+  {
+    fs.writeFileSync(patchFile, seedRows(), 'utf8')
+    const m = manifest()
+    for (const dir of ROWS) m.devDependencies[dir] = `link:D:/gone/${dir}`
+    writeManifest(m)
+    installs = 0
+    const res = await call('POST', URL_('relink'), {})
+    assert.equal(res.status, 200)
+    assert.equal(installs, 1, '重定位两个条目只跑一次 install')
+    assert.equal(res.json.relink.relinked.length, 2)
+    for (const dir of ROWS) {
+      assert.equal(manifest().devDependencies[dir], linkSpecOf(path.join(repoRoot, 'sub-plugins', dir)))
+    }
+    assert.equal(res.json.data.linkPlan.count, 0, '修完后面板不再报陈旧')
+    const again = await call('POST', URL_('relink'), {})
+    assert.equal(again.status, 200)
+    assert.equal(again.json.relink.noop, true, '没有陈旧项时是 noop')
+    assert.equal(installs, 1, 'noop 不再安装')
+  }
+
+  // --- 自动重定位：一次启动最多一次（闩锁），开关关闭时只跳过 ----------------
+  {
+    const m = manifest()
+    for (const dir of ROWS) m.devDependencies[dir] = `link:D:/gone/${dir}`
+    writeManifest(m)
+    installs = 0
+    __setAutoRelink(true)
+    __resetAutoRelinkLatch()
+    await __autoRelinkOnce(ctx, {})
+    assert.equal(installs, 1, '自动重定位恰好一次 install')
+    assert.equal(HOST_DIAG.autoRelink.relinked.length, 2)
+    assert.equal(HOST_DIAG.lastRelink.source, 'auto')
+    await __autoRelinkOnce(ctx, {})
+    assert.equal(installs, 1, '同一进程内第二次调用被闩锁挡住')
+
+    const m2 = manifest()
+    for (const dir of ROWS) m2.devDependencies[dir] = `link:D:/gone/${dir}`
+    writeManifest(m2)
+    installs = 0
+    __setAutoRelink(false)
+    __resetAutoRelinkLatch()
+    await __autoRelinkOnce(ctx, {})
+    assert.equal(installs, 0, '开关关闭时绝不写、绝不安装')
+    assert.equal(HOST_DIAG.autoRelink.skipped, 'disabled')
+    __setAutoRelink(true)
+  }
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true })
 }

@@ -62,6 +62,7 @@ import {
   planMigration,
   linkSpecOf,
   staleLinkSpec,
+  relinkPlan,
   pluginRootsOf,
 } from './host-core.js'
 
@@ -87,6 +88,89 @@ export const HOST_DIAG = {
   lastFlushError: null,
   /** Last 全部开启/全部关闭/全部移除 batch outcome (null until one runs). */
   lastBatch: null,
+  /** Last automatic stale-link relink outcome (null until the host tried once). */
+  autoRelink: null,
+  /** Last relink (auto or panel) outcome. */
+  lastRelink: null,
+  /** Whether the automatic relink switch is on. */
+  autoRelinkEnabled: true,
+}
+
+// --- settings: the automatic relink switch (optional capability) -------------
+
+/** Settings namespace / field (the client half mirrors these exact keys). */
+export const SETTINGS_NS = 'dsh-plugin-manager'
+export const AUTO_RELINK_FIELD = 'autoRelink'
+/** Default: repair determinable stale links once per host start. */
+export const DEFAULT_AUTO_RELINK = true
+
+/** Host-side mirror of the switch, kept in sync by the settings provider. */
+let __autoRelink = DEFAULT_AUTO_RELINK
+
+/** One-shot latch: at most ONE automatic relink per host start (a failure burns it too). */
+const AUTO_RELINK_LATCH = { done: false }
+
+/**
+ * 功能作用：零依赖的设置段 schema——宿主解析 bundle 的裸 specifier 走插件源码目录，
+ *           link: 安装下 @deepseek-ai/schemastery 可能解析不到；此时仍要注册命名空间，
+ *           否则客户端的 settings.update() 会被宿主拒绝（"namespace is not registered"）。
+ * 参数：
+ *   field: string -- 字段名，例 'autoRelink'
+ *   fallback: boolean -- 默认值，例 true
+ * 返回值：
+ *   function -- 既是 schema 又带 toJSON()，例 schema({}) → { autoRelink: true }
+ * 调用样例：
+ *   register(fallbackSectionSchema(AUTO_RELINK_FIELD, DEFAULT_AUTO_RELINK))
+ */
+function fallbackSectionSchema(field, fallback) {
+  const schema = (input) => {
+    const source = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {}
+    const out = { ...source }
+    out[field] = typeof source[field] === 'boolean' ? source[field] : fallback
+    return out
+  }
+  schema.toJSON = () => ({ type: 'object', properties: { [field]: { type: 'boolean', default: fallback } } })
+  return schema
+}
+
+/**
+ * 功能作用：注册设置命名空间并跟踪开关值（可选能力；settings 缺席时静默跳过）。
+ * 参数：
+ *   ctx: object -- cordis 上下文（installSection 的 owner）
+ *   settings: object -- settings 服务，例 { installSection(ctx, ns, Config, entry, hooks) }
+ * 返回值：
+ *   无
+ * 调用样例：
+ *   installSettingsSection(ctx, ctx.get('settings'))
+ */
+function installSettingsSection(ctx, settings) {
+  if (!settings || typeof settings.installSection !== 'function') return
+  const register = (Config) => {
+    if (!Config) return
+    settings.installSection(ctx, SETTINGS_NS, Config, { [AUTO_RELINK_FIELD]: DEFAULT_AUTO_RELINK }, {
+      setSource(source) {
+        try {
+          const current = source()
+          __autoRelink = current && typeof current === 'object'
+            ? current[AUTO_RELINK_FIELD] !== false
+            : DEFAULT_AUTO_RELINK
+        } catch { /* source not ready yet */ }
+        HOST_DIAG.autoRelinkEnabled = __autoRelink
+      },
+      onChange() { HOST_DIAG.autoRelinkEnabled = __autoRelink },
+    })
+  }
+  Promise.resolve()
+    .then(() => import('@deepseek-ai/schemastery'))
+    .then((mod) => {
+      const z = mod && mod.default
+      if (!z || typeof z.object !== 'function' || typeof z.boolean !== 'function') {
+        register(fallbackSectionSchema(AUTO_RELINK_FIELD, DEFAULT_AUTO_RELINK))
+        return
+      }
+      register(z.object({ [AUTO_RELINK_FIELD]: z.boolean().default(DEFAULT_AUTO_RELINK) }))
+    })
+    .catch(() => register(fallbackSectionSchema(AUTO_RELINK_FIELD, DEFAULT_AUTO_RELINK)))
 }
 
 // --- tiny HTTP helpers -------------------------------------------------------
@@ -371,6 +455,40 @@ function batchCountsOf(derived) {
   return { enable: one(true), disable: one(false), remove: removePlanCounts }
 }
 
+/**
+ * 功能作用：拼出面板要展示/复制的"一键卸载"命令——脚本随包分发，路径按当前安装位置拼；
+ *           命令显式带 --profile 与 --yes（脚本默认干跑，避免误执行）。
+ * 参数：
+ *   c: object -- resolveContext() 的结果（用到 profileName）
+ * 返回值：
+ *   string -- 可直接粘贴的命令
+ * 调用样例：
+ *   const cmd = uninstallCommandOf(c)
+ */
+function uninstallCommandOf(c) {
+  const script = path.join(REPO_ROOT, 'dsh-plugin-manager', 'tools', 'uninstall-manager.mjs')
+  return 'node "' + script + '" --profile ' + c.profileName + ' --yes'
+}
+
+/**
+ * 功能作用：把快照里已知的事实翻成"这条命令会删除什么"的只读预览（与脚本 planUninstall 同口径的近似），
+ *           供面板在复制前告知用户；不写文件、不执行安装。
+ * 参数：
+ *   s: object -- 宿主半快照（derived / manifest）
+ * 返回值：
+ *   { rows, deps, managerEntry, installs }
+ * 调用样例：
+ *   const preview = uninstallPreviewOf(s)
+ */
+function uninstallPreviewOf(s) {
+  const derived = Array.isArray(s.derived) ? s.derived : []
+  const rows = derived.filter((p) => p && p.hasRow === true).length
+  const deps = derived.filter((p) => p && p.installed === true).length
+  const bundles = s.manifest && s.manifest.dsh && s.manifest.dsh.profile && s.manifest.dsh.profile.bundles
+  const managerEntry = Array.isArray(bundles) && bundles.includes(MANAGER_ID)
+  return { rows, deps, managerEntry, installs: rows > 0 || deps > 0 || managerEntry }
+}
+
 function listPayload(s) {
   return {
     ok: true,
@@ -385,6 +503,20 @@ function listPayload(s) {
       yamlError: s.yamlError,
       plugins: s.derived,
       batchCounts: batchCountsOf(s.derived),
+      // Stale-link self-heal face: what the panel banner renders and what the
+      //「重定位」按钮 posts back.
+      linkPlan: (() => {
+        const plan = relinkPlan(s.derived)
+        return { count: plan.count, manualCount: plan.manualCount, auto: plan.auto, manual: plan.manual }
+      })(),
+      autoRelink: HOST_DIAG.autoRelink,
+      autoRelinkEnabled: __autoRelink === true,
+      // Self-uninstall face: the command the panel offers to copy (never executed
+      // here) plus a read-only preview of what it would remove.
+      uninstall: {
+        command: uninstallCommandOf(s.c),
+        willRemove: uninstallPreviewOf(s),
+      },
     },
   }
 }
@@ -546,6 +678,9 @@ function registerHttp(ctx, host, config) {
           pendingWrites: pendingIntents.length,
           lastFlushError: HOST_DIAG.lastFlushError,
           lastBatch: HOST_DIAG.lastBatch,
+          autoRelinkEnabled: __autoRelink === true,
+          autoRelink: HOST_DIAG.autoRelink,
+          lastRelink: HOST_DIAG.lastRelink,
         })
         return
       }
@@ -555,7 +690,7 @@ function registerHttp(ctx, host, config) {
         return
       }
 
-      if ((url === `${HTTP_PREFIX}/set-enabled` || url === `${HTTP_PREFIX}/remove` || url === `${HTTP_PREFIX}/migrate` || url === `${HTTP_PREFIX}/set-all-enabled` || url === `${HTTP_PREFIX}/remove-all`) && method === 'POST') {
+      if ((url === `${HTTP_PREFIX}/set-enabled` || url === `${HTTP_PREFIX}/remove` || url === `${HTTP_PREFIX}/migrate` || url === `${HTTP_PREFIX}/set-all-enabled` || url === `${HTTP_PREFIX}/remove-all` || url === `${HTTP_PREFIX}/relink`) && method === 'POST') {
         let args = {}
         const body = await readBody(req)
         if (body) {
@@ -811,9 +946,12 @@ function registerHttp(ctx, host, config) {
             }
             if (enabled) {
               const check = readManifest(c.manifestFile)
-              const present = Object.prototype.hasOwnProperty.call(check.devDependencies || {}, meta.name)
-                || Object.prototype.hasOwnProperty.call(check.dependencies || {}, meta.name)
-              if (!present) {
+              const inDeps = Object.prototype.hasOwnProperty.call(check.dependencies || {}, meta.name)
+              const devSpec = (check.devDependencies || {})[meta.name]
+              // 键在 ≠ 指向对：devDependency 存在但 link: 陈旧时同样要改写
+              // （规格场景「陈旧链接在启用时被修复」；只有已正确才跳过安装）。
+              const stale = staleLinkSpec(check, { name: meta.name, dirPath: meta.dirPath })
+              if (!inDeps && (typeof devSpec !== 'string' || stale !== null)) {
                 const ins = await ensureDevDep(c, meta.name, meta.dirPath)
                 if (!ins.installed) {
                   sendJson(res, 500, { ok: false, error: `install ${meta.name} failed: ${ins.error || 'unknown'}` })
@@ -848,6 +986,34 @@ function registerHttp(ctx, host, config) {
           const payload = listPayload(snapshot(ctx, __cfg))
           if (!dropped.removed) payload.warning = `row removed; devDependency cleanup failed: ${dropped.error || 'unknown'}`
           sendJson(res, 200, payload)
+          return
+        }
+
+        if (url === `${HTTP_PREFIX}/relink`) {
+          const s0 = snapshot(ctx, __cfg)
+          const plan = relinkPlan(s0.derived)
+          const wanted = Array.isArray(args.dirs) && args.dirs.length > 0
+            ? plan.auto.filter((p) => args.dirs.includes(p.dir))
+            : plan.auto
+          if (wanted.length === 0) {
+            HOST_DIAG.lastRelink = { at: Date.now(), relinked: [], ranPnpm: false, failed: [], source: 'panel', manualCount: plan.manualCount }
+            sendJson(res, 200, { ...listPayload(snapshot(ctx, __cfg)), relink: { noop: true, relinked: [], ranPnpm: false, manualCount: plan.manualCount } })
+            return
+          }
+          const ins = await ensureDevDeps(s0.c, wanted.map((p) => ({ name: p.name, dirPath: p.dirPath })))
+          const ok = ins.failed.length === 0
+          HOST_DIAG.lastRelink = {
+            at: Date.now(),
+            relinked: ins.installed,
+            failed: ins.failed,
+            ranPnpm: ins.ranPnpm,
+            source: 'panel',
+            manualCount: plan.manualCount,
+          }
+          sendJson(res, ok ? 200 : 500, {
+            ...listPayload(snapshot(ctx, __cfg)),
+            relink: { noop: false, relinked: ins.installed, failed: ins.failed, ranPnpm: ins.ranPnpm, backup: ins.backup, manualCount: plan.manualCount },
+          })
           return
         }
 
@@ -909,6 +1075,49 @@ function registerHttp(ctx, host, config) {
     }
   })
   HOST_DIAG.endpointsRegistered = true
+  // Fire-and-forget: the first load doubles as the automatic stale-link self-check
+  // (determinable items only; one action per host start).
+  void autoRelinkOnce(ctx, __cfg)
+}
+
+/**
+ * 功能作用：宿主启动后的一次性自检——检测陈旧链接，对「可确定」的那些自动改写并只跑一次
+ *           pnpm install；每次宿主启动最多执行一次（失败也消耗额度，避免坏环境反复写）。
+ *           开关关闭时只记录"已跳过"，不做任何写入。
+ * 参数：
+ *   ctx: object -- cordis 上下文（供快照解析 profile）
+ *   cfg: object -- 插件配置（profile 覆盖等），例 {}
+ * 返回值：
+ *   Promise<void>；结果写入 HOST_DIAG.autoRelink / lastRelink
+ * 调用样例：
+ *   void autoRelinkOnce(ctx, config)
+ */
+async function autoRelinkOnce(ctx, cfg) {
+  if (AUTO_RELINK_LATCH.done) return
+  AUTO_RELINK_LATCH.done = true
+  if (__autoRelink !== true) {
+    HOST_DIAG.autoRelink = { at: Date.now(), skipped: 'disabled', relinked: [], ranPnpm: false }
+    return
+  }
+  try {
+    const s = snapshot(ctx, cfg)
+    const plan = relinkPlan(s.derived)
+    if (plan.count === 0) {
+      HOST_DIAG.autoRelink = { at: Date.now(), relinked: [], ranPnpm: false, manualCount: plan.manualCount }
+      return
+    }
+    const ins = await ensureDevDeps(s.c, plan.auto.map((p) => ({ name: p.name, dirPath: p.dirPath })))
+    HOST_DIAG.autoRelink = {
+      at: Date.now(),
+      relinked: ins.installed,
+      failed: ins.failed,
+      ranPnpm: ins.ranPnpm,
+      manualCount: plan.manualCount,
+    }
+    HOST_DIAG.lastRelink = { ...HOST_DIAG.autoRelink, source: 'auto' }
+  } catch (error) {
+    HOST_DIAG.autoRelink = { at: Date.now(), error: (error && error.message) ? error.message : String(error) }
+  }
 }
 
 // --- plugin ------------------------------------------------------------------
@@ -917,6 +1126,18 @@ function apply(ctx, config = {}) {
   const c0 = resolveContext(config, ctx && ctx.baseUrl)
   HOST_DIAG.profileName = c0.profileName
   HOST_DIAG.repoRoot = c0.repoRoot
+
+  // Settings section (optional): the automatic stale-link relink switch.
+  const settings = typeof ctx.get === 'function' ? ctx.get('settings') : null
+  if (settings !== undefined) {
+    installSettingsSection(ctx, settings)
+  } else {
+    try {
+      ctx.inject(['settings'], (sub) => {
+        installSettingsSection(ctx, sub && sub.settings ? sub.settings : sub)
+      })
+    } catch { /* no settings service: auto-relink stays at its default (on) */ }
+  }
   const ws = typeof ctx.get === 'function' ? ctx.get('webServer') : null
   if (ws !== undefined) {
     registerHttp(ctx, ws, config)
@@ -935,4 +1156,15 @@ function apply(ctx, config = {}) {
   HOST_DIAG.yamlError = probe.error
 }
 
-export { apply, inject, name, registerHttp }
+/** Test-only: flip the automatic-relink switch without a settings service. */
+export function __setAutoRelink(value) {
+  __autoRelink = value !== false
+  HOST_DIAG.autoRelinkEnabled = __autoRelink
+}
+
+/** Test-only: re-arm the one-shot latch so the automatic pass can be driven again. */
+export function __resetAutoRelinkLatch() {
+  AUTO_RELINK_LATCH.done = false
+}
+
+export { apply, inject, name, registerHttp, autoRelinkOnce as __autoRelinkOnce }
