@@ -17,6 +17,7 @@
 // Run: node dsh-esc-rewind/test/bundle.test.mjs
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -1658,6 +1659,69 @@ test('delete mode: failed delete degrades to archive and warns', async () => {
   assert.ok(toasts.includes('删除失败，已改为归档'), 'degrade warning shown')
 })
 
+test('delete mode: 宿主拒绝真删（仍有子代理）→ 降级归档 + 专用提示', async () => {
+  const chat = chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'rewind me'), runningAssistant(4)])
+  const services = makeServices({ chatOf: () => chat })
+  services.seed('s1', { title: 'Original' })
+  applyWith(services)
+  const env = mount({ services, sessionId: 's1', chat })
+  services.setSettingsValue(true)
+  await internals()._module.loadDeleteMode()
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  assert.ok(target, 'target exchange found')
+  await withFetch(async () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      error: 'refusing to delete session "s1": it still owns 2 subagent session(s) (1 running)',
+      reason: 'subagents',
+      children: 2,
+      running: 1,
+    }),
+  }), async () => {
+    const result = await internals()._module.doRewind('s1', target)
+    assert.equal(result.ok, true, '回退本身仍然成功')
+  })
+  assert.ok(services.calls.archived.includes('s1'), '宿主拒绝 → 降级归档旧会话')
+  assert.equal(window.__dsew.lastDelete.ok, false)
+  assert.equal(window.__dsew.lastDelete.reason, 'subagents')
+  assert.equal(window.__dsew.lastDelete.children, 2)
+  assert.equal(window.__dsew.lastDelete.running, 1)
+  env.rerender()
+  assert.ok(toasts.includes('该会话还有 2 个子代理（运行中 1），已改为归档（不删除）'), '专用提示')
+  assert.ok(!toasts.includes('旧会话已删除'), '不得谎报已删除')
+})
+
+test('delete mode: 子代理状态读不到时也不真删（fail-safe 归档 + 原因）', async () => {
+  const chat = chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'rewind me'), runningAssistant(4)])
+  const services = makeServices({ chatOf: () => chat })
+  services.seed('s1', { title: 'Original' })
+  applyWith(services)
+  const env = mount({ services, sessionId: 's1', chat })
+  services.setSettingsValue(true)
+  await internals()._module.loadDeleteMode()
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  assert.ok(target, 'target exchange found')
+  await withFetch(async () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      error: 'refusing to delete session "s1": subagent state unavailable (listing exploded)',
+      reason: 'subagents-unknown',
+      children: 0,
+      running: 0,
+    }),
+  }), async () => {
+    const result = await internals()._module.doRewind('s1', target)
+    assert.equal(result.ok, true, '回退本身仍然成功')
+  })
+  assert.ok(services.calls.archived.includes('s1'), '未知态同样降级归档')
+  assert.equal(window.__dsew.lastDelete.reason, 'subagents-unknown')
+  env.rerender()
+  assert.ok(toasts.some((text) => String(text).startsWith('读不到该会话的子代理状态')), '未知态提示带原因')
+  assert.ok(!toasts.includes('旧会话已删除'), '不得谎报已删除')
+})
+
 test('delete mode: first-exchange degradation deletes the old session too', async () => {
   const chat = chatOf([user(1, 'only question'), runningAssistant(2)])
   const services = makeServices({ chatOf: () => chat })
@@ -1738,6 +1802,10 @@ test('capability audit: delete goes through the self-hosted channel only', () =>
   const hostSource = fs.readFileSync(path.join(here, '..', 'src', 'index.js'), 'utf8')
   assert.ok(hostSource.includes("'/__esc-rewind/session/delete'"), 'host half serves the self-owned endpoint')
   assert.ok(!/__chameleon/.test(hostSource), 'host half does not call chameleon')
+  assert.ok(hostSource.includes("BLOCK_REASON_CHILDREN = 'subagents'"), 'host declares the children refusal reason')
+  assert.ok(hostSource.includes("BLOCK_REASON_UNKNOWN = 'subagents-unknown'"), 'host declares the unknown refusal reason')
+  assert.ok(clientSource.includes("REASON_SUBAGENTS = 'subagents'"), 'client mirrors the children refusal reason')
+  assert.ok(clientSource.includes("REASON_SUBAGENTS_UNKNOWN = 'subagents-unknown'"), 'client mirrors the unknown refusal reason')
 })
 
 // --- host half (src/index.js, real ESM — delete core + endpoint) -------------
@@ -1790,6 +1858,110 @@ test('host half: deleteSessionCore removes log dir, projcache and workspace rows
   }
 })
 
+/** Temp sessions root (both id spellings) + storageDomain fake for the guard tests. */
+function makeHostFixture(sid) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsew-guard-'))
+  fs.mkdirSync(path.join(root, 'slug', sid), { recursive: true })
+  fs.writeFileSync(path.join(root, 'slug', sid, 'session.jsonl'), '{}')
+  fs.mkdirSync(path.join(root, 'slug', 'session-' + sid), { recursive: true })
+  const makeTable = (seed) => {
+    const map = new Map(Object.entries(seed || {}))
+    return {
+      get: (k) => map.get(k),
+      entries: () => [...map.entries()],
+      put: async (k, v) => { map.set(k, v) },
+      delete: async (k) => { map.delete(k) },
+    }
+  }
+  const proj = makeTable({ [sid]: { identity: {} }, other: { identity: {} } })
+  const wsTable = makeTable({ w1: { sessionIds: [sid, 'other'] } })
+  const wsGlobal = { state: { archivedSessionIds: ['session-' + sid, 'zz'] }, get: () => wsGlobal.state, set: async (v) => { wsGlobal.state = v } }
+  const sd = {
+    get: (n) => n === 'session_projcache'
+      ? { table: (t) => (t === 'sessions' ? proj : null) }
+      : n === 'workspace' ? { table: (t) => (t === 'workspaces' ? wsTable : null), global: wsGlobal } : null,
+  }
+  return { root, sid, proj, wsTable, wsGlobal, sd }
+}
+
+test('host half: 会话仍有子代理时拒绝真删（409 + 原因/计数，磁盘与存储零改动）', async () => {
+  const sid = '11111111-2222-3333-4444-555555555555'
+  const fx = makeHostFixture(sid)
+  try {
+    const children = [
+      { kind: 'child', id: 'c1', activity: 'running' },
+      { kind: 'child', id: 'c2', activity: 'inactive' },
+    ]
+    let asked = null
+    const ctx = {
+      get: (name) => name === 'subagents'
+        ? { listChildren: async (id) => { asked = id; return children } }
+        : name === 'storageDomain' ? fx.sd : undefined,
+    }
+    await assert.rejects(() => hostMod.deleteSessionCore(ctx, sid, fx.root), (error) => {
+      assert.equal(error.status, 409)
+      assert.equal(error.details.reason, 'subagents')
+      assert.equal(error.details.children, 2)
+      assert.equal(error.details.running, 1)
+      assert.match(error.message, /still owns 2 subagent/)
+      return true
+    })
+    assert.equal(asked, sid, '守卫按本会话 id 查子代理')
+    assert.equal(hostMod.findSessionDirs(sid, fx.root).length, 2, '两种拼写的日志目录都还在')
+    assert.ok(fx.proj.get(sid) !== undefined, 'projcache 行未动')
+    assert.deepEqual(fx.wsTable.get('w1').sessionIds, [sid, 'other'], 'workspace 记账未动')
+    assert.deepEqual(fx.wsGlobal.state.archivedSessionIds, ['session-' + sid, 'zz'], '归档记账未动')
+    assert.equal(hostMod.HOST_DIAG.lastGuard.reason, 'subagents', '诊断留存守卫结论')
+    assert.equal(hostMod.HOST_DIAG.lastGuard.running, 1)
+  } finally {
+    fs.rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test('host half: 读不到子代理状态时不真删（fail-safe：409 subagents-unknown）', async () => {
+  const sid = '11111111-2222-3333-4444-666666666666'
+  const fx = makeHostFixture(sid)
+  try {
+    const ctx = {
+      get: (name) => name === 'subagents'
+        ? { listChildren: async () => { throw new Error('listing exploded') } }
+        : name === 'storageDomain' ? fx.sd : undefined,
+    }
+    await assert.rejects(() => hostMod.deleteSessionCore(ctx, sid, fx.root), (error) => {
+      assert.equal(error.status, 409)
+      assert.equal(error.details.reason, 'subagents-unknown')
+      assert.match(error.message, /subagent state unavailable \(listing exploded\)/)
+      return true
+    })
+    assert.equal(hostMod.findSessionDirs(sid, fx.root).length, 2, '日志目录未被删')
+    assert.ok(fx.proj.get(sid) !== undefined, 'projcache 行未动')
+  } finally {
+    fs.rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test('host half: 没有子代理（空列表或缺 subagents 服务）时照常真删', async () => {
+  const sid = '11111111-2222-3333-4444-777777777777'
+  for (const withService of [true, false]) {
+    const fx = makeHostFixture(sid)
+    try {
+      let asked = 0
+      const ctx = {
+        get: (name) => name === 'subagents' && withService
+          ? { listChildren: async () => { asked += 1; return [] } }
+          : name === 'storageDomain' ? fx.sd : undefined,
+      }
+      const result = await hostMod.deleteSessionCore(ctx, sid, fx.root)
+      assert.equal(result.dirRemoved, true)
+      assert.equal(result.projRemoved, true)
+      assert.deepEqual(hostMod.findSessionDirs(sid, fx.root), [], '日志目录已删')
+      assert.equal(asked, withService ? 1 : 0, withService ? '空列表也算查过' : '缺服务时不查询')
+    } finally {
+      fs.rmSync(fx.root, { recursive: true, force: true })
+    }
+  }
+})
+
 test('host half: settings field and endpoint constants are stable', () => {
   assert.equal(hostMod.NS, 'esc-rewind')
   assert.equal(hostMod.SETTINGS_FIELD, 'deleteOldOnRewind')
@@ -1798,6 +1970,8 @@ test('host half: settings field and endpoint constants are stable', () => {
   assert.equal(hostMod.STATUS_PATH, '/__esc-rewind/status')
   assert.deepEqual(hostMod.sessionIdVariants('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'),
     ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'])
+  assert.equal(hostMod.BLOCK_REASON_CHILDREN, 'subagents')
+  assert.equal(hostMod.BLOCK_REASON_UNKNOWN, 'subagents-unknown')
 })
 
 test('host half: fallback schema registers the namespace without schemastery', async () => {
@@ -1861,6 +2035,33 @@ test('host half: registerHttp serves status + delete, rejecting wrong method/mis
   const req400 = { on: (ev, cb) => { if (ev === 'end') cb() }, destroy: () => {} }
   await del.handler({ method: 'POST' }, res400)
   assert.equal(res400.status, 400)
+})
+
+test('host half: 端点把子代理守卫的拒绝透传给客户端（409 + reason/计数，先于任何磁盘动作）', async () => {
+  const registered = []
+  const host = { register: (entry) => { registered.push(entry); return () => {} } }
+  const sid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  const ctx = {
+    get: (name) => name === 'subagents'
+      ? { listChildren: async () => [{ kind: 'child', id: sid + '-child', activity: 'running' }] }
+      : undefined,
+    effect: (fn) => { const dispose = fn(); return dispose || (() => {}) },
+  }
+  hostMod.registerHttp(ctx, host)
+  const del = registered.find((e) => e.path === hostMod.DELETE_PATH)
+  const res = { writeHead: (status) => { res.status = status }, end: (body) => { res.body = body } }
+  const req = {
+    method: 'POST',
+    on: (event, cb) => { if (event === 'data') cb(JSON.stringify({ sessionId: sid })); if (event === 'end') cb() },
+    destroy: () => {},
+  }
+  await del.handler(req, res)
+  assert.equal(res.status, 409)
+  const body = JSON.parse(res.body)
+  assert.equal(body.reason, 'subagents')
+  assert.equal(body.children, 1)
+  assert.equal(body.running, 1)
+  assert.match(body.error, /subagent/)
 })
 
 // --- settings reader shapes (guards a real cordis ctx puts on the surface) ----

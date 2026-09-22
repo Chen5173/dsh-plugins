@@ -36,7 +36,7 @@
 DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在当前会话里删消息（`/compact` 用的 surface-replace 只能“换一段为一条新节点”且为宿主内部，客户端 `'rewind'` 类型是死代码）。因此“回退”用核心一等公民表达：
 
 1. **fork** 于目标回合的上一完整回合边界（与 Branch 按钮同款 `sessions.fork({atSeq})`，`increaseTitle:false` 后按需改回原标题）；
-2. **按开关处置原会话**：默认 `workspaces.archiveSession`（归档隐藏、日志保留可恢复）；开启删除后，fork+open 新分支确认可用才经宿主半真删（磁盘日志目录 + 投影缓存 + 工作区记账一并移除）；
+2. **按开关处置原会话**：默认 `workspaces.archiveSession`（归档隐藏、日志保留可恢复）；开启删除后，fork+open 新分支确认可用才经宿主半真删（磁盘日志目录 + 投影缓存 + 工作区记账一并移除），但**该会话仍挂着子代理时不删**（宿主半拒绝 → 同样降级归档，避免子代理变孤儿）；
 3. **open 分支**并还原问题文本（`inputActions.setDraft`，图片经 `readAttachment` → 草稿附件桥（新核心 `createDrafts`/`addAttachments`，旧核心 `createDraftImages`/`addImages`，按能力探测选名字）尽力还原）。
 
 **为什么删除不是默认**：客户端没有任何官方“删除会话”verb，真删必须宿主动盘（`src/index.js` 自建端点/工具），且**不可恢复**。因此开关默认关闭（归档=安全侧），只有用户显式打开才进入删除态；删除态下**无二次确认**（已接受误触即永久丢失的风险），防误触靠：默认关闭 + 图标红叉状态 + 切换/停止/执行的 toast 警示。
@@ -48,6 +48,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 - **只读诊断端点**：`GET /__esc-rewind/status` 回报宿主半健康度——`settingsSectionRegistered` / `settingsSectionError` / `deleteOldOnRewind`（当前删除模式）。非 GET 方法回 405。排查「图标点了没反应 / 删除模式像没生效」时先打它，判断的是宿主半有没有起来，不看会话内容。
 - **客户端诊断快照**：`window.__dsew`（门控计数、最后一次决策、删除模式位；不含消息内容）。
 - **删除核心** `deleteSessionCore`：拒绝运行中 agent → flush → detach → 删磁盘日志目录（两种 id 拼写）→ 清投影缓存 → 复扫磁盘（防 dispose 重建）→ 确认无残留后才清工作区/归档记账；失败抛错不碰记账（半删会话不会掉进 Ungrouped）。
+- **子代理守卫**：真删前用官方 `ctx.subagents.listChildren(sessionId)` 探一次本会话的子代理——子代理只能靠它**自己的 header** 挂父（`header.parentSession`），父日志一删就再也列不出来（界面入口只剩父会话的子代理目录），运行中的还会失去完成通知的收件人（`notifySettlement` 按父 agent 投递，父缺席即丢弃）。命中即 **409 + `{reason, children, running}`** 拒绝且不碰磁盘/记账；客户端据此**归档**并给专用 toast「该会话还有 N 个子代理（运行中 M），已改为归档（不删除）」。listing 抛错 → 同样拒绝（`reason: subagents-unknown`，fail-safe：证明不了“没有子代理”就不做不可逆操作）；`subagents` 服务缺席 → 放行（无运行时尚无法拥有子代理）。守卫结论留存 `HOST_DIAG.lastGuard` 并由 `GET /__esc-rewind/status` 回报。
 - **安全时序**：删除永远在“新分支 fork+open 成功并可用之后”；删除失败 → 降级 `archiveSession` + toast，回退本身不失败。
 
 ## 键盘捕获与防误触
@@ -92,7 +93,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 ## 开发 / 验证
 
 ```bash
-node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（67 条，含删除模式、提示时机、草稿附件双代桥接、命令描述契约、未落定输入三来源与还原时序用例）
+node sub-plugins/dsh-esc-rewind/test/bundle.test.mjs   # 逻辑 harness（74 条，含删除模式、子代理守卫、提示时机、草稿附件双代桥接、命令描述契约、未落定输入三来源与还原时序用例）
 node --check sub-plugins/dsh-esc-rewind/src/client.js
 node --check sub-plugins/dsh-esc-rewind/src/index.js
 ```

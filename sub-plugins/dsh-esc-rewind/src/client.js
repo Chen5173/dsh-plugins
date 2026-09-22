@@ -72,6 +72,9 @@ window.__ModuleLoader__.load({
     const SETTINGS_FIELD = 'deleteOldOnRewind'
     /** Host delete endpoint (node half serves it when a web surface exists). */
     const DELETE_ENDPOINT = '/__esc-rewind/session/delete'
+    /** Host refusal reasons (mirror of the node half constants). */
+    const REASON_SUBAGENTS = 'subagents'
+    const REASON_SUBAGENTS_UNKNOWN = 'subagents-unknown'
     const COMPOSER_ATTR = 'data-composer-input'
     const REWIND_COMMAND = 'rewind'
     /** How many draft images a rewind may try to restore. */
@@ -234,6 +237,8 @@ window.__ModuleLoader__.load({
       'dispose.error': '切换失败：{msg}',
       'rewind.deleted': '旧会话已删除',
       'rewind.delete.fail': '删除失败，已改为归档',
+      'rewind.subagents': '该会话还有 {n} 个子代理（运行中 {r}），已改为归档（不删除）',
+      'rewind.subagents.unknown': '读不到该会话的子代理状态，已改为归档（不删除）：{msg}',
     }
     const enDict = {
       'esc.hint': 'Stopped · press Esc again to rewind this turn',
@@ -255,6 +260,8 @@ window.__ModuleLoader__.load({
       'dispose.error': 'Switch failed: {msg}',
       'rewind.deleted': 'Old session deleted',
       'rewind.delete.fail': 'Delete failed — archived instead',
+      'rewind.subagents': 'Old session still owns {n} subagent(s) ({r} running) — archived instead of deleted',
+      'rewind.subagents.unknown': 'Subagent state unreadable — archived instead of deleted: {msg}',
     }
 
     function localeFallbackLang() {
@@ -1372,10 +1379,14 @@ window.__ModuleLoader__.load({
      * Permanently delete one session through the host half. Called ONLY after
      * the new branch is open and usable (see doRewind); a failure degrades to
      * archiving the old session so nothing is ever lost to a failed delete.
-     * Returns { deleted, archived } — archived=true means the fallback ran.
+     * The host refuses (409 + reason) while the session still owns subagent
+     * children — a child is reachable only through its own header, so the parent
+     * log is the single handle it has — and that refusal gets its own toast.
+     * Returns { deleted, archived, blocked } — blocked carries the host reason.
      */
     async function deleteOldSession(sessionId) {
       let deleted = false
+      let blocked = null
       try {
         if (typeof fetch !== 'function') throw new Error('fetch-unavailable')
         const response = await fetch(DELETE_ENDPOINT, {
@@ -1385,17 +1396,31 @@ window.__ModuleLoader__.load({
         })
         const body = await response.json().catch(() => ({}))
         if (!response.ok || body.ok !== true) {
+          if (body && typeof body.reason === 'string') {
+            blocked = {
+              reason: body.reason,
+              children: Number(body.children) || 0,
+              running: Number(body.running) || 0,
+            }
+          }
           throw new Error(body.error || ('delete-failed-' + response.status))
         }
         deleted = true
         __diag.lastDelete = { sessionId, ok: true }
       } catch (error) {
         __diag.deleteFail = (error && error.message) ? error.message : String(error)
-        __diag.lastDelete = { sessionId, ok: false, error: __diag.deleteFail }
+        __diag.lastDelete = {
+          sessionId,
+          ok: false,
+          error: __diag.deleteFail,
+          reason: blocked ? blocked.reason : null,
+          children: blocked ? blocked.children : null,
+          running: blocked ? blocked.running : null,
+        }
       }
       if (deleted) {
         publishToast(__t('rewind.deleted'))
-        return { deleted: true, archived: false }
+        return { deleted: true, archived: false, blocked: null }
       }
       // Degrade: keep the old session recoverable instead of leaving a half state.
       let archived = false
@@ -1408,8 +1433,14 @@ window.__ModuleLoader__.load({
       } catch (error) {
         __diag.archiveFail = (error && error.message) ? error.message : String(error)
       }
-      publishToast(__t('rewind.delete.fail'))
-      return { deleted: false, archived }
+      if (blocked && blocked.reason === REASON_SUBAGENTS) {
+        publishToast(__t('rewind.subagents', { n: blocked.children, r: blocked.running }))
+      } else if (blocked && blocked.reason === REASON_SUBAGENTS_UNKNOWN) {
+        publishToast(__t('rewind.subagents.unknown', { msg: __diag.deleteFail }))
+      } else {
+        publishToast(__t('rewind.delete.fail'))
+      }
+      return { deleted: false, archived, blocked: blocked ? blocked.reason : null }
     }
 
     /** True when delete mode is armed (safe default: archive). */

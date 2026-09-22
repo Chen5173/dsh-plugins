@@ -1,6 +1,6 @@
 # 验收清单 — dsh-esc-rewind
 
-逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关、提示时机的耐久证据判定、草稿附件双代桥接 0.1.2 旧名 ⇄ 0.1.5 新名、命令描述双契约、未落定输入三来源与还原时序（含子会话继承残留、晚武装补跑、同页二次回退））由 `test/bundle.test.mjs`（67 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
+逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关/子代理守卫、提示时机的耐久证据判定、草稿附件双代桥接 0.1.2 旧名 ⇄ 0.1.5 新名、命令描述双契约、未落定输入三来源与还原时序（含子会话继承残留、晚武装补跑、同页二次回退））由 `test/bundle.test.mjs`（74 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
 
 架构重点：**回退 = fork 分支 + 按开关处置原会话**（默认归档，append-only 日志无原地删除；删除模式经宿主半真删）；armed 是派生状态（running 或 尾部 interrupted + 草稿为空）。
 
@@ -89,3 +89,6 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 5.10 `[B]` describe 读不到/报错时开关回退归档态（`window.__dsew.deleteMode === false`），绝不误开删除
 - [ ] 5.11 `[B]` 卸载插件后：settings.yaml 中手写的 `esc-rewind:` 段若存在则无害残留（README 说明清理）；已删除的会话不可恢复（功能语义）
 - [ ] 5.12 `[B]` 与 `@huanlin/dsh-plugin-session-delete` 共存：各自按钮/开关正常，删除当前会话（chameleon）与回退处置旧会话（本插件）互不干扰
+- [ ] 5.13 `[B]` **有运行中子代理的会话不真删**：主会话跑一个后台子代理（`subagent` 的 `run_in_background`），主会话停下等它完成通知时开启删除模式并回退 → fork 出新分支照常打开；旧会话**被归档而不是删除**（磁盘日志目录仍在），toast「该会话还有 N 个子代理（运行中 M），已改为归档（不删除）」；`window.__dsew.lastDelete.reason === 'subagents'` 且 `running >= 1`；子代理仍在旧会话名下继续跑，完成后通知仍落到旧会话（新分支里看不到它——核心无「改挂」能力，属已知边界）
+- [ ] 5.14 `[B]` **子代理状态读不到时也不删**（fail-safe）：人为让 listing 失败（或 `GET /__esc-rewind/status` 的 `lastGuard.known === null`）→ 同样不真删 + toast「读不到该会话的子代理状态，已改为归档（不删除）：<原因>」；`lastDelete.reason === 'subagents-unknown'`
+- [ ] 5.15 `[B]` **不引入退化**：从没派过子代理的会话在删除模式下回退仍**真删**（目录消失、toast「旧会话已删除」）；`GET /__esc-rewind/status` 的 `lastGuard.children === 0`

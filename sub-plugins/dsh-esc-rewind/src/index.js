@@ -11,7 +11,11 @@
 //     client half can read it through `remote.settings.describe()`.
 //
 //   POST /__esc-rewind/session/delete   (webServer HTTP endpoint)
-//     permanently deletes one session: refuses a live agent, flushes a live
+//     permanently deletes one session, but ONLY a childless one: a subagent
+//     child is listed through its OWN header (parentSession), so removing the
+//     parent log orphans it permanently — and a running child loses the parent
+//     its settlement notice is addressed to. Refuses with 409 + {reason} and
+//     the client degrades to archive. Then: refuses a live agent, flushes a live
 //     session, removes its on-disk log dir (both id spellings), drops the
 //     projection-cache row, and — only after the log is confirmed gone —
 //     removes the workspace/archive accounting. Mirrors the storage facts the
@@ -52,10 +56,15 @@ const inject = []
 
 const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/** Refusal reasons the client maps to dedicated toasts (stable contract strings). */
+export const BLOCK_REASON_CHILDREN = 'subagents'
+export const BLOCK_REASON_UNKNOWN = 'subagents-unknown'
+
 class DeleteError extends Error {
-  constructor(message, status) {
+  constructor(message, status, details) {
     super(message)
     this.status = status
+    this.details = details || null
   }
 }
 
@@ -237,6 +246,42 @@ export function detachLiveSession(ctx, sessionId) {
   return detached
 }
 
+// --- subagent guard ----------------------------------------------------------
+
+/**
+ * Count one session's durable direct subagent children before anything
+ * destructive runs. A child is reachable only through its own header
+ * (`parentSession`), so deleting the parent orphans it for good, and a child
+ * that is still running loses the parent its settlement notice is addressed to.
+ * Returns { known, blocked, reason, children, running, error }: an absent
+ * `subagents` service is `known:false` (nothing can own a child), while a
+ * failing listing is `known:null` + blocked — the irreversible step is never
+ * taken when the absence of children cannot be proven.
+ */
+export async function subagentGuardOf(ctx, sessionId) {
+  const subagents = typeof ctx.get === 'function' ? ctx.get('subagents') : null
+  if (!subagents || typeof subagents.listChildren !== 'function') {
+    return { known: false, blocked: false, reason: null, children: 0, running: 0, error: null }
+  }
+  let entries
+  try {
+    entries = await subagents.listChildren(sessionId)
+  } catch (error) {
+    const message = (error && error.message) ? error.message : String(error)
+    return { known: null, blocked: true, reason: BLOCK_REASON_UNKNOWN, children: 0, running: 0, error: message }
+  }
+  const list = Array.isArray(entries) ? entries.filter((entry) => entry && typeof entry === 'object') : []
+  const running = list.filter((entry) => entry.activity === 'running').length
+  return {
+    known: true,
+    blocked: list.length > 0,
+    reason: list.length > 0 ? BLOCK_REASON_CHILDREN : null,
+    children: list.length,
+    running,
+    error: null,
+  }
+}
+
 // --- core delete -------------------------------------------------------------
 
 /**
@@ -246,10 +291,20 @@ export function detachLiveSession(ctx, sessionId) {
  * have re-created it), then — only once no dir remains — remove workspace
  * accounting. A filesystem refusal throws BEFORE workspace accounting changes,
  * so a half-deleted session cannot fall out of its group into "Ungrouped".
+ * The subagent guard runs first and refuses (409) without touching anything.
  */
 export async function deleteSessionCore(ctx, sessionId, rootOverride) {
   if (!SESSION_ID_RE.test(String(sessionId || ''))) {
     throw new DeleteError(`invalid session id: ${String(sessionId)}`, 400)
+  }
+  const guard = await subagentGuardOf(ctx, sessionId)
+  HOST_DIAG.lastGuard = { sessionId, ...guard }
+  if (guard.blocked) {
+    throw new DeleteError(guard.reason === BLOCK_REASON_CHILDREN
+      ? `refusing to delete session "${sessionId}": it still owns ${guard.children} subagent session(s) (${guard.running} running)`
+      : `refusing to delete session "${sessionId}": subagent state unavailable (${guard.error})`,
+    409,
+    { reason: guard.reason, children: guard.children, running: guard.running })
   }
   const stopped = await stopAgentIfRunning(ctx, sessionId)
   await flushSessionIfLive(ctx, sessionId)
@@ -283,6 +338,8 @@ export const HOST_DIAG = {
   settingsSectionRegistered: false,
   settingsSectionError: null,
   settingsValue: DEFAULT_DELETE_OLD,
+  /** Last subagent guard outcome (diagnostics / status probe). */
+  lastGuard: null,
 }
 
 /**
@@ -413,6 +470,7 @@ export function registerHttp(ctx, host) {
         settingsSectionRegistered: HOST_DIAG.settingsSectionRegistered,
         settingsSectionError: HOST_DIAG.settingsSectionError,
         deleteOldOnRewind: HOST_DIAG.settingsValue === true,
+        lastGuard: HOST_DIAG.lastGuard,
       })
     },
   }))
@@ -442,7 +500,8 @@ export function registerHttp(ctx, host) {
         sendJson(res, 200, { ok: true, removed: [sessionId], ...result })
       } catch (e) {
         const status = e instanceof DeleteError && e.status ? e.status : 500
-        sendJson(res, status, { error: e.message })
+        const details = e instanceof DeleteError && e.details ? e.details : null
+        sendJson(res, status, details ? { error: e.message, ...details } : { error: e.message })
       }
     },
   }))

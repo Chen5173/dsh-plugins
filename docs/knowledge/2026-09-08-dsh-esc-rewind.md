@@ -147,4 +147,13 @@
   3. `armPendingRestore` 提到 `sessions.open(childId)` **之前**（`__pending` 按 childId 键控，父会话的桥不会消费）；补模块级武装通知（同 `__toastListeners`）让「武装晚于挂载」也能补跑；「一次回退只回填一次」改为「已回填的会话 id」而非一次性布尔 ref（旧写法同页第二次回退永不回填）。
 - **诊断**：`__dsew.pendingSource / childPendingSource`（`inbox-projection` `queue-mirror` `echo`）、`pendingConfirmMs / childPendingConfirmMs`、`pendingStaged / pendingApplied / pendingLateArm / pendingDropped`、`inboxProjectionSeen`。
 - **测试**：套件 **67/67**（新增 7 条：投影通道清父会话、未对账回声拦住回退、子会话继承项被清、子会话先挂载仍还原、同页二次回退仍还原、晚武装补跑、无投影时降级走 queue 镜像）。**红绿验证**：7 条新用例跑在 v7.4 的 `client.js` 上 **60/67**（7 条全红，报错点分别是「投影项没被删」「回声时仍 fork」「子会话继承项没被删」「晚武装没回填」「第二次没回填」），当前实现 **67/67**。
-- **顺带**：`dsh-open-session-workdir/test/interception.test.mjs` 失败（`isFolderRevealPath not found in client-registry.js — their bundle changed shape`）与本插件无关，是既有的宿主 bundle 形状漂移，未修。
+- **顺带**：`dsh-open-session-workdir/test/interception.test.mjs` 失败（`isFolderRevealPath not found in client-registry.js — their bundle changed shape`）与本插件无关，是既有的宿主 bundle 形状漂移，未修。（2026-09-22 复跑已绿：该漂移被上游修掉。）
+
+## v7.6（2026-09-22）：删除模式加子代理守卫——「会话还挂着子代理就不真删」
+
+- **触发**：用户报「主 agent 跑着子代理、主 agent 停下等它的完成通知时 rewind 回退（删除模式）」→ 主会话被真删，**子代理不见了、也没挂到新会话上**。
+- **真机取证**（`D:\dsh\.dsh_home`；settings 里 `esc-rewind.deleteOldOnRewind: true`）：被删父会话 `session-e71582a6` 的子代理 `6455048f`（`subagent/descriptor{mode:'continuable'}`，label「Mac 侧重建与回归流水线」）**在父会话被删后 8 分钟仍在写日志**（turn 2 从 14:09 起未结束）⇒ 完成通知永远送不出去；同期 `session-cbec2279` 被删后留下 **24 个** 子代理孤儿（全库扫描：98 个会话里 27 个「父不在磁盘上」的孤儿子代理）。
+- **根因（宿主才是真源，四条都核对过）**：① 子代理**只能靠自己的 header** 被枚举（`subagent/src/list-children.ts:90` 过滤 `header.parentSession === parentId && origin === 'subagent'`）⇒ 父日志一删就永久失去入口；② 完成通知投给**父会话 agent**（`subagent/src/continuation-activation.ts:823` `notifySettlement` → `ctx.agents.get(parentSession)`，父缺席**静默 return**）；③ 侧栏根本不列子代理行（`client/ui-workspace/src/client/tree.ts:146` `origin !== 'subagent'`），入口只有父会话的子代理目录；④ 投递授权按 header 的 `parentSession` 校验（`api/session-controller/src/history.ts:346`、`src/agent.ts:85-91`）⇒ **新分支接管不了旧子代理**，宿主也**没有** reparent/adopt verb（全仓 grep 无生产者）。
+- **修法（方案 A，用户选定）**：宿主半新增 `subagentGuardOf(ctx, sessionId)`，`deleteSessionCore` 在**任何破坏性动作之前**用官方服务 `ctx.subagents.listChildren(sessionId)` 探一次：有子代理（running 或 inactive）→ 抛 `409 + {reason:'subagents', children, running}`；listing 抛错 → `409 + subagents-unknown`（fail-safe）；`subagents` 服务缺席 → 放行（无运行时尚无法拥有子代理）。客户端解析结构化 `reason` 后走既有降级路径**归档** + 专用 toast（含 N/M 计数），`deleted:false`。
+- **可复用要点**：① 宿主拒绝要表达成**结构化 reason** 而不是文案，客户端才能给准确提示；② 「读不到就拒删」与仓库既有的「describe 失败一律回退归档」是同一条安全侧原则；③ `ctx.subagents.listChildren` 是插件**不必 import 核心包**就能用的官方缝（返回 `activity: running|inactive`）；④ **「子代理改挂到新会话」在现有核心不可能**——header 是日志首事件、不可变，别在这条路上设计功能。
+- **测试**：套件 **74/74**（新增 6 条：客户端「宿主拒绝 → 归档 + 专用提示」「未知态 fail-safe」；宿主「有子代理即拒绝且磁盘/存储零改动」「未知态拒绝」「空列表或缺服务照常删」；端点「409 透传且守卫先于任何磁盘动作」；另 capability audit 增 4 条两侧字面量一致性断言）。**红绿验证**：新用例跑在 HEAD 版源码上 **66/74**（8 条全红）。全仓库 sweep（管理器 4 支 + 子插件全部）无回归。
