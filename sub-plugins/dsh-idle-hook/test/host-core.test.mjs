@@ -533,6 +533,16 @@ await checkAsync('executor reports a missing interpreter as a spawn error', asyn
   assert.match(String(result.error), /spawn/)
 })
 
+check('示例 Windows 脚本必须带 UTF-8 BOM：PS 5.1 把无 BOM 的 .ps1 按 ANSI 解码，中文注释会撑坏引号 ⇒ ParserError', () => {
+  const dir = path.join(here, '..', 'examples')
+  const scripts = fs.readdirSync(dir).filter((name) => name.endsWith('.ps1'))
+  assert.ok(scripts.length > 0, '示例目录里至少要有一个 .ps1')
+  for (const name of scripts) {
+    const head = fs.readFileSync(path.join(dir, name)).subarray(0, 3)
+    assert.deepEqual([...head], [0xEF, 0xBB, 0xBF], name + ' 缺少 UTF-8 BOM（PS 5.1 会按 ANSI 解码）')
+  }
+})
+
 fs.rmSync(tmp, { recursive: true, force: true })
 
 console.log('')

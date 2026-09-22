@@ -62,6 +62,13 @@
 - **`/usr/bin/touch` 那条是用例的平台假设**：改用仓库既有的 `test/fixtures/probe.mjs`（`.mjs` 由自动解释器认成 node，跨平台；它本来就把 stdin JSON 写进 `argv[2]` 指定的文件），两条规则都指向它——「启用的规则真的跑了 / 停用的规则没跑」两个断言的含意不变。
 - **可复用结论**：本仓库的测试是在 **Windows** 上跑全量 sweep 的，任何「真子进程 / 真路径」用例必须用 `process.execPath` + fixture 或 `path.join` 构造，**不能硬写 POSIX 绝对路径**；反过来，凡是**接受注入 `platform` 的函数**，拼接路径也必须用目标平台的规则，否则那个 `platform` 在测试里只是装饰。
 
+### 12. Windows 上「试跑失败：ParserError / UnexpectedToken」= 示例 `.ps1` 是无 BOM 的 UTF-8（2026-09-22 补）
+- **症状**（用户报）：设置 → 插件 → 空闲通知 里对示例规则点「试跑」→ `失败 (退出码 1)`，stderr 尾巴只有 `CategoryInfo : ParserError: (:) [], ParentContainsErrorRecordException` + `FullyQualifiedErrorId : UnexpectedToken`；报错**指向的行看起来完全无害**（`}`、`} catch { … }`），标题字段还带 `DSH????` 这类mojibake。
+- **取证**：`~/.dsh/idle-hook-history.json` 的 `entries[].stderr` 就是宿主记下的原文（按 GBK 解码才读得懂）；脚本本体 `examples/notify-windows.ps1` 前三字节是 `<#` 而不是 `EF BB BF`。
+- **根因**：规则的解释器解析是 `interpreterFor('.ps1') → powershell -NoProfile -ExecutionPolicy Bypass -File`，即**系统自带的 Windows PowerShell 5.1**（本机实测 `5.1.26100.8655`）。**5.1 对无 BOM 的 `.ps1` 按 ANSI 代码页解码**（PS 6+ 才默认 UTF-8）⇒ 简中机器按 GBK 解 UTF-8 字节 ⇒ 中文注释变乱码、**引号配对被打断**（后续报错因此落在 ASCII 行上）。同内容加 BOM 后在本机 dry-run 直接通过（`DRY-RUN 标题=DSH 停下来了 · 本轮结束`，exit 0），与修复前同一份文件的 ParserError 形成对照。
+- **修法**：把 `.ps1` 存成 **UTF-8 with BOM**（内容一字不改，只加 3 字节）；护栏 = `test/host-core.test.mjs` 里断言 `examples/*.ps1` 前三字节为 `EF BB BF`（先跑成红、加 BOM 后绿）。**不要**改用 `pwsh`/加 `chcp` 绕过：脚本文件解码发生在解析之前，只有 BOM 或纯 ASCII 能救。
+- **可复用结论**：① 凡是**给 Windows 用户跑**的 `.ps1`（示例脚本、生成的脚本、文档里的片段另存），一律 **UTF-8 with BOM**，并在测试里加编码护栏——这类回归只能在真机暴露；② 排查 PowerShell 报错先看**报错行之外的字符集**：乱码标题 + 无害行报错 = 编码，不是语法；③ 插件把 stderr 原样留在 `idle-hook-history.json`，**这就是最快的真机取证入口**（不用复现）。
+
 ## 验证方式
 ```sh
 node sub-plugins/dsh-idle-hook/test/host-core.test.mjs   # 50 项：矩阵/解释器/上下文/presence/失败计数 + 真子进程执行、超时杀、非零退出（2026-09-21 实测计数）

@@ -199,6 +199,7 @@ POPO_ACCESS_KEY="your_access_key"   # 只在你自己的机器上、被 git 忽�
 
 - **macOS**：第一次发通知系统会弹「允许通知」，要点允许；不点就只剩提示音。`DISPLAY`/图形会话不在时（比如 ssh 里）桌面通知会静默失败，声音仍可用。
 - **Windows**：Toast 需要**交互式登录会话**（人在桌面登录状态）才显示；远程无人登录、计划任务/服务里跑不会弹，脚本会自动退到气泡通知或 `msg`。中文靠 UTF-8 字节解码，不会乱码。
+- **⚠️ Windows 脚本必须存成「UTF-8 **带 BOM**」**：规则默认用系统自带的 **Windows PowerShell 5.1**，它读**无 BOM** 的 `.ps1` 时按**系统 ANSI 代码页**（简中机器 = GBK）解码 —— 脚本里的中文注释会变成乱码并撑坏引号配对，于是**连纯 ASCII 的行都开始报错**：`ParserError … UnexpectedToken`（实测在 `notify-windows.ps1` 上表现为「`}` 是意外的标记」「`catch` 后面必须跟一个 catch 块」这类指向无害行的报错）。**自己另存/复制脚本时务必保留 BOM**；仓库里由 `test/host-core.test.mjs` 的编码护栏守着（`examples/*.ps1` 必须前三字节是 `EF BB BF`）。
 - **超时**：插件按规则的「超时秒数」（默认 30 秒）杀掉脚本。所有示例的网络调用都限 5 秒（`curl --max-time 5` / `urllib timeout=5`），`notify-router.py` 单渠道 8 秒、总预算 20 秒。自己改代码时别加同步等待。
 - **不阻塞**：脚本永远不要在 stdin 上等人输入 —— 终端里直接手跑时，示例都会跳过 stdin 读取。
 - **试跑**：规则列表里有「试跑」按钮；命令行上也都可以 `--dry-run`（`notify-windows.ps1 -DryRun`），只打印将要发送的 URL/JSON，不真发。第一次配好规则建议先 dry-run 看一眼。
