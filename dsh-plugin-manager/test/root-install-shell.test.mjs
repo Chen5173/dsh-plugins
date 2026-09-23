@@ -82,6 +82,17 @@ test('shell name IS the plugin identity: dsh-plugin-manager, same as the inner p
   assert.equal(root.name, inner.name, 'shell and inner package must agree, or the two install entry points create two different plugins')
 })
 
+test('shell and inner package carry the SAME version', () => {
+  // Versioning policy (AGENTS.md): any change to a sub-plugin or to the manager
+  // itself bumps BOTH version fields by one patch step. The shell is what a git
+  // install ships, so a drift here means the install entry point lies about how
+  // fresh the snapshot is. "Content changed => it was bumped" needs a git
+  // baseline and stays a review rule; the equality below is the offline guard.
+  assert.match(String(root.version || ''), /^\d+\.\d+\.\d+$/, 'shell version must be a plain semver string')
+  assert.match(String(inner.version || ''), /^\d+\.\d+\.\d+$/, 'inner version must be a plain semver string')
+  assert.equal(root.version, inner.version, 'shell and inner package must never drift apart')
+})
+
 test('shell is private and never published to a registry', () => {
   assert.equal(root.private, true, 'the shell only exists so the repository can be installed; publishing it would put a second copy of the manager on npm')
 })
