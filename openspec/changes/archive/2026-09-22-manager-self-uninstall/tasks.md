@@ -27,7 +27,7 @@
 - [x] 5.2 `dsh-plugin-manager/ACCEPTANCE.md` 新增人工项：真机跑一次一键卸载 → 重启 `dsh web` 无 `failed to import loader entry` / `Cannot find package`；再跑一次是 noop；源码目录仍在。
 - [x] 5.3 知识库：把"核心 remove 无钩子 + 悬空行的后果 + 自包含脚本的作用域"写成一条可复用结论（新篇或并入 `2026-09-11-install-via-git-url.md`），并在 `docs/knowledge/README.md` 追加索引行。
 - [x] 5.4 新增 `docs/change-reports/2026-09-22-manager-self-uninstall-change-report.md`。
-- [ ] 5.5 主 spec 同步（归档时执行，归档由用户触发）。
+- [x] 5.5 主 spec 同步（归档时执行，归档由用户触发）。
 
 ## 6. 真机验收（用户侧）
 

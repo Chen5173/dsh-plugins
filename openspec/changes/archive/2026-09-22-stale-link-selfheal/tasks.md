@@ -27,7 +27,7 @@
 - [x] 5.2 `dsh-plugin-manager/ACCEPTANCE.md`：新增人工项（自动重定位留痕、关开关只提示、`fresh` 时零写入）。
 - [x] 5.3 `docs/knowledge/2026-09-18-batch-remove-all.md` 修正表述：不是"未定义行为"，而是 **规格（plugin-manager spec 场景「陈旧链接在启用时被修复」）已有要求、实现漏做**；并在 `docs/knowledge/README.md` 追加索引行。
 - [x] 5.4 新增 `docs/change-reports/2026-09-22-stale-link-selfheal-change-report.md`。
-- [ ] 5.5 主 spec 同步（归档时执行，归档由用户触发）。
+- [x] 5.5 主 spec 同步（归档时执行，归档由用户触发）。
 
 ## 6. 真机验收（用户侧）
 

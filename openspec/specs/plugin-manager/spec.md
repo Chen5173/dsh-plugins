@@ -2,9 +2,7 @@
 
 ## Purpose
 在 DSH Web 设置页提供一个「本地插件」面板，让用户只安装 `dsh-plugin-manager` 一个插件即可管理本仓库（monorepo）内全部 `dsh-*` 子插件在 web profile 中的激活状态：列出子包与各自状态、一键激活/停用/移除、缺失依赖时自动安装、以及把旧的「逐个 dependencies+bundles」布局一键迁移为新模型。
-
 ## Requirements
-
 ### Requirement: 面板列出仓库子插件并推导状态
 
 系统 SHALL 在设置页新增一级入口「本地插件」，列出管理器所在仓库的**子插件根**下的每一个 `dsh-*` 子包（排除管理器自身），并为每个子包显示：包名、目录名、`package.json` 描述，以及推导出的状态之一——`已激活`（profile 激活清单中存在且未 disabled，且包已在 profile 中可解析）、`已停用`（清单中存在但 disabled）、`未安装`（包未在 profile 依赖中，无法解析）、`非插件目录`（缺少有效插件 `package.json`）。扫描到的新子包（从未激活过）MUST 以「未安装/未激活」状态出现并可被用户激活。
@@ -77,7 +75,7 @@
 
 ### Requirement: 启用缺失依赖的子插件时自动安装
 
-系统 SHALL 在用户启用一个「未安装/未激活」的子插件时，先确保该包已可解析：需要时在目标 profile 目录写入 devDependency `link:<子插件实际所在绝对目录>`（仅加 devDependency，不加进 `dsh.profile.bundles`），并在需要时执行 `pnpm install`，安装成功后再写入激活行。当 devDependency 已存在但 `link:` 指向的不是该子插件当前所在目录（例如目录已被移动到 `sub-plugins/`）时，系统 SHALL 把它视为需要修复并改写为当前目录，而不是直接信任旧路径。安装或写行失败时，MUST NOT 出现“看似已启用”的半状态：面板给出可理解的错误并可重试，子插件保持原状态，profile `package.json` 由备份回滚。
+系统 SHALL 在用户启用一个子插件时（单行「开启」与批量「全部开启」使用同一实现），先确保该包已可解析：需要时在目标 profile 目录写入 devDependency `link:<子插件实际所在绝对目录>`（仅加 devDependency，不加进 `dsh.profile.bundles`），并在需要时执行 `pnpm install`，安装成功后再写入激活行。**判定必须区分"键在不在"与"指向对不对"**：当 devDependency 已存在但 `link:` 指向的不是该子插件当前所在目录（目录已被移动、换机器/换 profile、安装入口变更等）时，系统 SHALL 把它视为需要修复并改写为当前目录，MUST NOT 因为"键已存在"而跳过修复、MUST NOT 直接信任旧路径。只有"键存在且指向当前实际目录"时才可以不写文件、不跑安装。安装或写行失败时，MUST NOT 出现“看似已启用”的半状态：面板给出可理解的错误并可重试，子插件保持原状态，profile `package.json` 由备份回滚。
 
 #### Scenario: 启用未安装子插件自动装依赖
 
@@ -88,6 +86,16 @@
 
 - **WHEN** profile devDependencies 中该子插件的 `link:` 指向旧目录（如移动前的仓库根路径），用户点击启用
 - **THEN** 管理器把该 `link:` 改写为子插件当前所在目录并执行安装，随后写入激活行，插件变为「已激活」
+
+#### Scenario: 陈旧链接在「全部开启」时也被修复
+
+- **WHEN** 多个子插件的 `link:` 都已陈旧，用户点击「全部开启」
+- **THEN** 管理器把它们的 `link:` 一次性全部改写为各自当前目录，只执行**一次** `pnpm install`，随后写入激活行
+
+#### Scenario: 链接已正确时不写文件不安装
+
+- **WHEN** devDependency 已存在且 `link:` 正指向该子插件当前所在目录，用户点击启用
+- **THEN** 管理器不写 `package.json`、不跑 `pnpm install`，只写激活行
 
 #### Scenario: 安装失败不产生半状态
 
@@ -134,12 +142,12 @@
 
 ### Requirement: 设置入口与生效模型
 
-系统 SHALL 在设置页把「本地插件」作为一级入口呈现（位于内置「插件」节之后），并展示目标 profile 名与仓库路径。开关/移除/迁移后：宿主侧行为经 profile patch 热重载实时生效；对带浏览器客户端 UI 的子插件，MUST 提示「刷新页面使界面生效」并提供刷新按钮，MUST NOT 自动刷新页面。目标 profile 默认取当前 GUI 运行的 web profile，且 SHOULD 允许通过设置覆盖；目录定位优先用管理器自身所在目录的上一级，找不到时 MUST 给出可读错误而非静默空列表。
+系统 SHALL 在设置页左侧拥有**一个自有的一级入口「本地插件」**（注册 `settings.section`：id `local-plugins`，order 16，label「本地插件」），并由该入口**声明子槽 `settings.localPlugins.tab`（list）与渲染 tab chrome**；管理器自己的管理面板 MUST 是该入口内的一个 tab（id `plugins`，order 0），本仓库其它插件的设置面板 MUST 作为同一入口内的其它 tab 出现——设置左侧导航里本仓插件 MUST NOT 再各占一行，也 MUST NOT 把本仓内容混进核心「插件」页。面板 SHALL 展示目标 profile 名与仓库路径；tab 栏 SHALL 与核心「插件」页同款（当前 tab 有下划线指示，首次选中的 tab 挂载后保持挂载以便切换不丢本地草稿）。开关/移除/迁移后：宿主侧行为经 profile patch 热重载实时生效；对带浏览器客户端 UI 的子插件，MUST 提示「刷新页面使界面生效」并提供刷新按钮，MUST NOT 自动刷新页面。目标 profile 默认取当前 GUI 运行的 web profile，且 SHOULD 允许通过设置覆盖；目录定位优先用管理器自身所在目录的上一级，找不到时 MUST 给出可读错误而非静默空列表。当运行的核心没有声明 `settings.localPlugins.tab` 槽时，注册 MUST 被跳过且 MUST NOT 抛出未捕获错误。
 
 #### Scenario: 入口出现在设置左侧导航
 
 - **WHEN** 用户打开设置页
-- **THEN** 左侧导航出现「本地插件」一级入口（在「插件」之后），点开即渲染面板
+- **THEN** 左侧导航出现**「本地插件」一级入口**（核心「插件」入口保持原样）；进入后 tab 列表里第一个 tab 就是管理面板，点开即渲染；管理器不再占用其它导航行
 
 #### Scenario: 客户端插件开关后提示手动刷新
 
@@ -150,6 +158,11 @@
 
 - **WHEN** 管理器无法定位/读取其所在仓库根（目录被移动或权限不足）
 - **THEN** 面板显示可读错误与目标路径，而不是空白列表或崩溃
+
+#### Scenario: 核心没有插件页 tab 槽时降级
+
+- **WHEN** 运行的核心未声明 `settings.localPlugins.tab`（旧核心）
+- **THEN** 注册被跳过、不产生未捕获错误，管理器的宿主侧能力与其它插件不受影响
 
 ### Requirement: 子插件目录布局与行 id 稳定性
 
@@ -423,3 +436,130 @@ N SHALL 等于上述「真能改动」的项数。执行后每个受管子插件
 
 - **WHEN** 批量改动中包含带客户端 UI 的子插件
 - **THEN** 面板提示需要刷新页面使这些子插件的界面生效，并提供刷新按钮；页面不会被自动刷新
+
+### Requirement: 陈旧链接的自动检测是只读的
+
+系统 SHALL 为每个受管子插件判定其 profile 依赖态之一：`absent`（无依赖键）、`fresh`（键存在且 `link:` 指向该子插件当前实际目录）、`stale-mismatch`（键存在、目标目录存在但不是当前实际目录）、`stale-target-missing`（键存在但目标目录不存在）。判定 SHALL 使用解析后的真实路径比较，并在大小写不敏感的文件系统（Windows/macOS 默认）上把仅大小写/分隔符差异视为 `fresh`。检测 SHALL 在宿主半加载时与面板每次拉取数据时各执行一次，MUST 是只读的：MUST NOT 因检测写 profile 文件、MUST NOT 因检测执行安装。判定结果 SHALL 随面板数据面暴露（每个插件带 `linkState`）。
+
+#### Scenario: 检测出目标不存在的陈旧链接
+
+- **WHEN** 某子插件的 `link:` 指向一个已不存在的目录
+- **THEN** 该插件在面板数据里是 `linkState: 'stale-target-missing'`，且此过程没有写任何文件、没有执行安装
+
+#### Scenario: 检测出指向别处的陈旧链接
+
+- **WHEN** 某子插件的 `link:` 指向的目录存在，但不是它当前所在的目录
+- **THEN** 该插件为 `linkState: 'stale-mismatch'`，并在数据里带上"声明指向 vs 当前实际目录"
+
+#### Scenario: 仅大小写或分隔符差异不算陈旧
+
+- **WHEN** `link:` 的写法与该子插件当前实际目录只在大小写或路径分隔符上不同（如 `D:/Repo/x` vs `D:\\Repo\\X`）
+- **THEN** 判定为 `fresh`，不触发任何修复
+
+#### Scenario: 检测不改环境
+
+- **WHEN** 系统完成一次检测（无论结果如何）
+- **THEN** profile 的 `package.json` 与 `cordis.patch.yml` 逐字节不变
+
+### Requirement: 能确定就自动修，不确定只提示
+
+系统 SHALL 在检测到陈旧项后自动修复**可确定**的那些：仅当该子插件在当前仓库中能唯一定位到实际目录、且自动重定位开关开启时，才改写其 `link:` 为当前目录，并在一次动作内为全部可修项只执行**一次** `pnpm install`，写文件前留下带时间戳的备份；任何失败 MUST 回滚到动作前状态且 MUST NOT 留半状态。**每次宿主启动最多自动执行一次**重定位动作。对 `stale-target-missing` 且当前仓库里找不到该插件实际目录、或存在多个候选的项，系统 MUST NOT 猜路径，MUST 只提示（不写文件、不安装）。自动重定位的结果（时间、处理了哪些条目、成功或失败原因）SHALL 在面板与诊断数据中可见。
+
+#### Scenario: 可确定时自动重写并只安装一次
+
+- **WHEN** 宿主半加载时检测到 2 个子插件的 `link:` 陈旧，且它们在当前仓库中都能唯一定位
+- **THEN** 管理器改写这 2 条 `link:`、恰好执行一次 `pnpm install`、留下 `*.bak-<ts>` 备份，并在面板/诊断中记录本次自动重定位的条目与结果
+
+#### Scenario: 确定不了的一律不猜
+
+- **WHEN** 检测到某子插件的 `link:` 目标目录不存在，且当前仓库里没有它的实际目录
+- **THEN** 不写任何文件、不执行安装，只在面板横幅中把它列入"需人工处理"，并说明原因
+
+#### Scenario: 一次启动最多修一次
+
+- **WHEN** 同一次宿主运行期间，面板被反复刷新并多次拉取数据
+- **THEN** 自动重定位动作最多再次发生 0 次（该启动的额度已用尽），后续检测只读
+
+#### Scenario: 开关关闭时只检测
+
+- **WHEN** 用户在设置里关闭自动重定位开关，随后宿主重启并检测到可修项
+- **THEN** 不写文件、不安装，只在面板显示横幅与可修项清单
+
+#### Scenario: 自动修失败时回滚且不留半状态
+
+- **WHEN** 自动重定位过程中写文件或安装失败
+- **THEN** profile `package.json` 回滚到动作前内容，插件状态保持原样，面板与诊断给出失败原因，且该启动不再重试
+
+### Requirement: 面板自检横幅与一键重定位
+
+面板 SHALL 在存在陈旧链接时显示横幅：包含总数、逐条明细（插件名、`linkState`、声明指向与当前实际目录）以及"可自动修复"与"需人工处理"的分区；并提供「重定位」按钮，对全部可确定项执行与自动修复相同的动作（一次安装、写前备份、失败回滚）。不存在陈旧项时 MUST NOT 显示横幅、MUST NOT 写任何文件。按钮执行中与执行后 SHALL 明确呈现结果（处理条目、安装是否发生、失败原因）。
+
+#### Scenario: 横幅列出可修与不可修
+
+- **WHEN** 面板检测到 3 条陈旧项，其中 2 条可确定、1 条目标缺失
+- **THEN** 横幅显示总数 3，可自动修复区列出 2 条并可直接点「重定位」，需人工处理区列出剩余 1 条及其原因
+
+#### Scenario: 一键重定位只安装一次
+
+- **WHEN** 用户点击「重定位」处理 2 条可修项
+- **THEN** 两条 `link:` 被一次改写、`pnpm install` 恰好执行一次，成功后横幅消失
+
+#### Scenario: 无陈旧项时零副作用
+
+- **WHEN** 所有子插件的链接都正确，用户打开面板
+- **THEN** 不显示横幅，且 profile 两份文件逐字节不变、没有执行任何安装
+
+### Requirement: 自包含的一键卸载命令
+
+系统 SHALL 提供一个**不依赖 DSH 宿主与 `dsh` CLI** 的卸载命令（随 `dsh-plugin-manager` 包分发的 Node 脚本），一次调用完成：解析目标 profile → 删除该 profile 中**全部受管子插件的激活行**（`cordis.patch.yml`）与**指向本仓库 `sub-plugins/` 的 `link:` 依赖键**（`package.json`）→ 删除 `dsh-plugin-manager` 自身的依赖键与其在 `dsh.profile.bundles` 中的条目 → 在 profile 目录执行**恰好一次** `pnpm install`。命令 MUST 在写文件前为两份文件各留一份带时间戳的备份（`*.bak-<ts>`），MUST NOT 删除任何源码目录，MUST NOT 触碰其它插件的激活行、依赖键或 bundles 条目。
+
+命令 SHALL 支持**干跑**（只打印将删除的内容，不写文件、不安装）与**逐项结果输出**（删了哪些行/键、是否执行了安装、备份路径）。当没有可删除项时，命令 SHALL 是幂等 `noop`（不写文件、不安装、不报错）。
+
+#### Scenario: 一条命令清空子插件并移除管理器
+
+- **WHEN** 在一个装有管理器的 profile 上运行该卸载命令
+- **THEN** 受管子插件的激活行与 `link:` 依赖键、管理器自身的依赖键、`dsh.profile.bundles` 中的管理器条目全部消失；`cordis.patch.yml` 与 `package.json` 各被写入一次、各留一份 `*.bak-<ts>`；`pnpm install` 恰好执行一次
+
+#### Scenario: 干跑不动任何文件
+
+- **WHEN** 用户带干跑参数运行该命令
+- **THEN** 输出列出将删除的行、依赖键与是否会执行安装；两份文件逐字节不变、没有执行安装
+
+#### Scenario: 其它插件与源码目录不受影响
+
+- **WHEN** profile 中同时存在非本仓库插件的行（如 `mcp-*`、第三方插件）与其依赖键
+- **THEN** 它们逐字节不变；本仓库各子插件的源码目录、以及被 `link:` 指向的任何开发 checkout 目录都仍然存在
+
+#### Scenario: 重复执行是幂等 noop
+
+- **WHEN** 对已经卸载过的 profile 再次运行该命令
+- **THEN** 命令报告无可删除项，不写文件、不执行安装，退出码为成功
+
+#### Scenario: 安装阶段失败时给出可收尾的降级路径
+
+- **WHEN** 最后的 `pnpm install` 失败（例如 Windows 上删除脚本自身所在目录遇到 EBUSY/EPERM）
+- **THEN** 命令如实报告失败原因，并打印"重跑一次 `pnpm install`"的收尾命令；此前的删除结果保持可用（用户重跑即可收尾），且不谎报成功
+
+### Requirement: 面板提供复制卸载命令且不自动执行
+
+管理器的设置面板 SHALL 提供一个「复制卸载命令」入口：按**当前 profile** 拼出可直接粘贴执行的那条命令（兼容两种装法：git 快照下脚本路径在 `node_modules/dsh-plugin-manager/dsh-plugin-manager/tools/` 下，本地 `link:` 装法下在仓库目录里），并在复制前展示**将删除什么**（受管子插件行数、依赖键数、是否会执行一次安装、以及"源码目录不会被删除"的说明）。该入口 MUST 只复制命令、MUST NOT 自动执行卸载，MUST 在剪贴板不可用时给出可手动复制的文本。
+
+#### Scenario: 复制到的命令与将删除内容一致
+
+- **WHEN** 用户点击「复制卸载命令」
+- **THEN** 剪贴板得到一条指向当前 profile 的卸载命令，且面板同时显示"将删除 N 条激活行 / M 个依赖键 + 管理器自身，源码目录保留"
+
+#### Scenario: 只复制不执行
+
+- **WHEN** 用户点击该入口
+- **THEN** 不写任何文件、不执行安装、不改变任何插件状态；卸载仍必须由用户在终端亲自运行那条命令
+
+### Requirement: 卸载后 profile 状态可自证干净
+
+卸载命令执行成功后，profile SHALL 处于"启动不需要任何本仓库子插件"的状态：不存在受管子插件的激活行、不存在指向本仓库 `sub-plugins/` 的 `link:` 依赖键、`dsh.profile.bundles` 中不含 `dsh-plugin-manager`。系统 SHALL 让这一点可核对（命令逐项列出清掉了什么，或在结束时输出可直接比对的文件路径与条目数）。
+
+#### Scenario: 卸载后按文件自证
+
+- **WHEN** 卸载命令成功结束
+- **THEN** 输出或后续核对显示：`cordis.patch.yml` 中受管子插件行数为 0、`package.json` 中指向本仓库 `sub-plugins/` 的键数为 0、`dsh.profile.bundles` 不含管理器；随后启动 GUI host 不再出现 `failed to import loader entry` / `Cannot find package`
+
