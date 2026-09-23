@@ -1044,11 +1044,11 @@ function stubFetch(state, { dshModel } = {}) {
   return calls
 }
 
-test('panel: registers one Plugins-page tab at order 30 (no Settings nav row)', () => {
+test('panel: registers one tab (order 30) inside the「本地插件」settings entry', () => {
   let registration = null
   const ctx = {
     slots: {
-      inject: (name, fn) => { assert.equal(name, 'settings.plugins.tab'); fn() },
+      inject: (name, fn) => { assert.equal(name, 'settings.localPlugins.tab'); fn() },
       register: (meta, Component) => { registration = { meta, Component } },
     },
   }

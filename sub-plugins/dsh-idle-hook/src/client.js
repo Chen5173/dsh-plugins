@@ -1122,8 +1122,8 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       componentCtx = ctx
       // One tab inside the core "Plugins" settings page (no Settings nav row).
-      ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-        name: 'settings.plugins.tab',
+      ctx.slots.inject('settings.localPlugins.tab', () => ctx.slots.register({
+        name: 'settings.localPlugins.tab',
         id: 'idle-hook',
         order: 40,
         label: () => t('nav'),

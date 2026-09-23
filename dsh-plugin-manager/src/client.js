@@ -154,6 +154,9 @@ window.__ModuleLoader__.load({
     const S = {
       page: { maxWidth: 780, color: 'var(--dsw-alias-label-primary)', display: 'flex', flexDirection: 'column', gap: 12 },
       heading: { margin: 0, fontSize: 18, fontWeight: 600 },
+      tabs: { display: 'flex', alignItems: 'flex-end', gap: 22, borderBottom: '.5px solid var(--dsw-alias-border-l2)', marginTop: 2 },
+      tab: { position: 'relative', border: 0, padding: '7px 1px 9px', background: 'transparent', color: 'var(--dsw-alias-label-tertiary)', font: 'inherit', fontSize: 13, lineHeight: '20px', cursor: 'pointer' },
+      tabActive: { position: 'relative', border: 0, padding: '7px 1px 9px', background: 'transparent', color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 13, lineHeight: '20px', cursor: 'pointer', boxShadow: 'inset 0 -2px 0 0 var(--dsw-alias-label-primary)' },
       intro: { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 13 },
       metaRow: { display: 'flex', flexWrap: 'wrap', gap: '6px 18px', color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, fontFamily: 'var(--ds-font-family-code, monospace)' },
       banner: { border: '.5px solid var(--dsw-alias-border-l4)', background: 'var(--dsw-alias-bg-layer-3)', borderRadius: 12, padding: '10px 14px', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', fontSize: 13 },
@@ -249,7 +252,82 @@ window.__ModuleLoader__.load({
     const APPLY_MAX_MS = 12000
 
     // --- panel component ----------------------------------------------------
-    function LocalPluginsSection() {
+    /** Child slot of the local-plugins settings entry: one tab per local plugin panel. */
+    const LOCAL_TAB_SLOT = 'settings.localPlugins.tab'
+    /** Client ctx captured at apply time (the tab ledger lives on the slot registry). */
+    let __slotsCtx = null
+
+    /**
+     * 功能作用：从槽位台账读出「本地插件」入口下的 tab 行（id/order/label），与核心
+     *           ui-settings-plugins 的 useTabs 同口径（order 升序、label 惰性求值）。
+     * 参数：无（用模块级 __slotsCtx）
+     * 返回值：Array -- [{ id, order, label }]
+     * 调用样例：const rows = localTabRows()
+     */
+    function localTabRows() {
+      const slots = __slotsCtx && __slotsCtx.slots
+      if (!slots || typeof slots.entries !== 'function') return []
+      return slots.entries(LOCAL_TAB_SLOT)
+        .map((entry) => {
+          const options = (entry && entry.options) || {}
+          const label = typeof options.label === 'function' ? options.label() : options.label
+          return { id: options.id, order: options.order === undefined ? 0 : options.order, label: label || options.id }
+        })
+        .filter((row) => typeof row.id === 'string' && row.id !== '')
+        .sort((a, b) => (a.order === b.order ? (a.id < b.id ? -1 : 1) : a.order - b.order))
+    }
+
+    /**
+     * 功能作用：设置页一级入口「本地插件」的壳——渲染 tab 栏与当前面板（子槽 renderSlot(…, { only })），
+     *           首个选中的 tab 首次挂载后保持挂载（切换不丢本地草稿），与核心「插件」页同款行为。
+     * 参数：
+     *   props: object -- 槽位标准 props（用到 renderSlot）
+     * 返回值：
+     *   React 元素
+     * 调用样例：
+     *   ctx.slots.register({ name: 'settings.section', id: 'local-plugins', ... }, LocalPluginsSection)
+     */
+    function LocalPluginsSection(props) {
+      const [, force] = React.useState(0)
+      React.useEffect(() => {
+        const slots = __slotsCtx && __slotsCtx.slots
+        if (!slots || typeof slots.subscribe !== 'function') return undefined
+        const off = slots.subscribe(LOCAL_TAB_SLOT, () => force((n) => n + 1))
+        return () => { try { off() } catch { /* already gone */ } }
+      }, [])
+      const rows = localTabRows()
+      const [active, setActive] = React.useState(undefined)
+      const [visited, setVisited] = React.useState({})
+      const current = rows.some((row) => row.id === active) ? active : (rows[0] ? rows[0].id : undefined)
+      React.useEffect(() => {
+        if (current === undefined) return
+        setVisited((prev) => (prev[current] === true ? prev : { ...prev, [current]: true }))
+      }, [current])
+      const renderSlot = props && props.renderSlot
+      if (rows.length === 0) return React.createElement('p', { style: S.empty }, t('noPlugins'))
+      return React.createElement('div', { style: S.page },
+        React.createElement('h3', { style: S.heading }, t('nav')),
+        React.createElement('div', { style: S.tabs, role: 'tablist', 'aria-label': t('nav') },
+          rows.map((row) => React.createElement('button', {
+            key: row.id,
+            type: 'button',
+            role: 'tab',
+            'aria-selected': row.id === current,
+            'data-active': row.id === current ? 'true' : 'false',
+            style: row.id === current ? S.tabActive : S.tab,
+            onClick: () => setActive(row.id),
+          }, row.label)),
+        ),
+        rows.filter((row) => row.id === current || visited[row.id] === true).map((row) => React.createElement('div', {
+          key: row.id,
+          role: 'tabpanel',
+          style: { display: row.id === current ? 'flex' : 'none', flexDirection: 'column' },
+        }, typeof renderSlot === 'function' ? renderSlot(LOCAL_TAB_SLOT, {}, { only: row.id }) : null)),
+      )
+    }
+
+    /** The manager's own panel — first tab of the local-plugins entry. */
+    function LocalPluginsPanel() {
       const [data, setData] = useState(null)
       const [err, setErr] = useState(null)
       const [busy, setBusy] = useState(null) // 'migrate' | dir name
@@ -567,12 +645,22 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       // One tab inside the core "Plugins" settings page (ui-settings-plugins owns
       // the single Plugins nav entry + tab chrome); no Settings nav row of our own.
-      ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-        name: 'settings.plugins.tab',
+      // One settings nav entry「本地插件」owned here; every local plugin contributes a
+      // tab into the child slot this entry declares (no extra Settings nav rows).
+      __slotsCtx = ctx
+      ctx.slots.inject('settings.section', () => ctx.slots.register({
+        name: 'settings.section',
         id: 'local-plugins',
-        order: 20,
+        order: 16,
         label: () => t('nav'),
+        children: { [LOCAL_TAB_SLOT]: { kind: 'list', scope: 'root' } },
       }, LocalPluginsSection))
+      ctx.slots.inject(LOCAL_TAB_SLOT, () => ctx.slots.register({
+        name: LOCAL_TAB_SLOT,
+        id: 'plugins',
+        order: 0,
+        label: () => t('nav'),
+      }, LocalPluginsPanel))
     }
 
     // Test-only hooks (window.__DSH_TEST__ is set by test/bundle.test.mjs only).

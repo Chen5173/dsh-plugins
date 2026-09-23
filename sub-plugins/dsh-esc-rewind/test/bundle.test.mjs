@@ -541,6 +541,7 @@ test('apply registers one overlay entry and the /rewind contribution', () => {
   const services = makeServices()
   applyWith(services)
   assert.equal(services.registered.length, 3, 'overlay bridge + header dispose toggle + orphan tab')
+  assert.equal(orphanTabEntry(services).options.name, 'settings.localPlugins.tab', 'tab lives on the local-plugins entry')
   const overlay = services.registered.find((r) => r.options.name === 'conversation.input.overlay')
   assert.ok(overlay, 'overlay bridge registered')
   assert.equal(overlay.options.id, 'esc-rewind')
@@ -1814,7 +1815,7 @@ function treeText(node) {
 
 /** The orphan tab entry as registered by the bundle. */
 function orphanTabEntry(services) {
-  return services.registered.find((entry) => entry.options.name === 'settings.plugins.tab')
+  return services.registered.find((entry) => entry.options.name === 'settings.localPlugins.tab')
 }
 
 /**
@@ -1839,11 +1840,11 @@ function buttonByText(tree, label) {
   return collectNodes(tree).find((node) => node.type === 'button' && treeText(node) === label)
 }
 
-test('orphan tab: 注册到核心「插件」页（id/order/惰性 label），旧核心无该槽时静默降级', async () => {
+test('orphan tab: 注册到「本地插件」入口的 tab 槽（id/order/惰性 label），无该槽时静默降级', async () => {
   const services = makeServices()
   applyWith(services)
   const entry = orphanTabEntry(services)
-  assert.ok(entry, '注册了 settings.plugins.tab')
+  assert.ok(entry, '注册了 settings.localPlugins.tab')
   assert.equal(entry.options.id, 'subagents')
   assert.equal(entry.options.order, 50)
   assert.equal(typeof entry.options.label, 'function', 'label 惰性求值（核心按语言重取）')
@@ -2004,7 +2005,7 @@ test('capability audit: delete goes through the self-hosted channel only', () =>
   assert.ok(hostSource.includes("BLOCK_REASON_UNKNOWN = 'subagents-unknown'"), 'host declares the unknown refusal reason')
   assert.ok(clientSource.includes("REASON_SUBAGENTS = 'subagents'"), 'client mirrors the children refusal reason')
   assert.ok(clientSource.includes("REASON_SUBAGENTS_UNKNOWN = 'subagents-unknown'"), 'client mirrors the unknown refusal reason')
-  assert.ok(clientSource.includes("'settings.plugins.tab'"), 'orphan panel lives on the core Plugins page tab slot')
+  assert.ok(clientSource.includes("'settings.localPlugins.tab'"), 'orphan panel lives on the「本地插件」entry tab slot')
 })
 
 // --- host half (src/index.js, real ESM — delete core + endpoint) -------------

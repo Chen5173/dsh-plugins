@@ -1,6 +1,6 @@
 # dsh-plugin-manager
 
-**本地插件管理器**：装上这一个插件，就能在 DSH Web **设置 → 插件 → 本地插件**（核心「插件」页里的一个 tab）里管理本仓库全部 `dsh-*` 子插件 —— 查看状态、逐个或批量开关（激活 / 停用）、移除、把旧布局一键迁移到管理器模型。
+**本地插件管理器**：装上这一个插件，DSH Web 设置页左侧就多一个一级入口**「本地插件」**——本入口由本插件拥有并在内部用 **tab** 承载各本地插件的面板（管理器自己 = 第一个 tab「本地插件」，其余由各子插件贡献）。在这里管理本仓库全部 `dsh-*` 子插件：查看状态、逐个或批量开关（激活 / 停用）、移除、把旧布局一键迁移到管理器模型。
 
 ## 安装
 
@@ -83,7 +83,7 @@ node "~/.dsh/profiles/web/node_modules/dsh-plugin-manager/dsh-plugin-manager/too
 
 - Node ≥ 20（`package.json` 的 `engines`）。
 - 宿主：profile 顶层能解析 `js-yaml`（web profile 已具备）。
-- 浏览器：需要核心提供 `react` 模块字与 `settings.plugins.tab` 槽（核心「插件」设置页声明的列表槽；旧核心没有该槽时面板不出现，但管理器宿主机能照常工作）；面板注入 `@deepseek-ai/dsh-client-runtime@^0.1.2-rc.1`。
+- 浏览器：需要核心提供 `react` 模块字与 `settings.localPlugins.tab` 槽（核心「插件」设置页声明的列表槽；旧核心没有该槽时面板不出现，但管理器宿主机能照常工作）；面板注入 `@deepseek-ai/dsh-client-runtime@^0.1.2-rc.1`。
 
 ---
 

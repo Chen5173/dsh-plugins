@@ -158,14 +158,23 @@
 - **可复用要点**：① 宿主拒绝要表达成**结构化 reason** 而不是文案，客户端才能给准确提示；② 「读不到就拒删」与仓库既有的「describe 失败一律回退归档」是同一条安全侧原则；③ `ctx.subagents.listChildren` 是插件**不必 import 核心包**就能用的官方缝（返回 `activity: running|inactive`）；④ **「子代理改挂到新会话」在现有核心不可能**——header 是日志首事件、不可变，别在这条路上设计功能。
 - **测试**：套件 **74/74**（新增 6 条：客户端「宿主拒绝 → 归档 + 专用提示」「未知态 fail-safe」；宿主「有子代理即拒绝且磁盘/存储零改动」「未知态拒绝」「空列表或缺服务照常删」；端点「409 透传且守卫先于任何磁盘动作」；另 capability audit 增 4 条两侧字面量一致性断言）。**红绿验证**：新用例跑在 HEAD 版源码上 **66/74**（8 条全红）。全仓库 sweep（管理器 4 支 + 子插件全部）无回归。
 
-## v7.7（2026-09-22）：设置入口收拢为核心「插件」页 tab + 孤儿子代理回收
+## v7.7（2026-09-22）：设置入口收拢为「本地插件」一级入口 tab + 孤儿子代理回收
 
 - **需求**（用户拍板）：① 设置里只留**一个入口**，本仓各插件的内容以 **tab** 切；② 回收历史孤儿——只做「停止运行中的孤儿」与「找回成普通会话」，**不做删除**，且**全手动**。
-- **核心已有这套机制（本轮只读核对）**：`ui-settings-plugins` **独占唯一的「插件」导航行并渲染 tab chrome**（源码注释：*owns the one Plugins navigation entry and the tab chrome; feature plugins contribute pages without competing for Settings nav rows*），它在运行期声明列表槽 `settings.plugins.tab`（`kind: 'list', scope: 'root'`，owner props 为空），tab 首次选中才挂载、之后保持挂载。**贡献范式**（范本 `packages/client/ui-settings-plugin-inventory/src/client/index.ts`）：`ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({ name, id, order, label, locale? }, Component))`。⚠️ **插件不能凭空造设置导航行**：slot registry 只允许注册到**父项已声明**的子槽，未声明槽 `register` 直接抛 `slot "<name>" is not declared`。
+- **核心已有这套机制（本轮只读核对）**：`ui-settings-plugins` **独占唯一的「插件」导航行并渲染 tab chrome**（源码注释：*owns the one Plugins navigation entry and the tab chrome; feature plugins contribute pages without competing for Settings nav rows*），它在运行期声明列表槽 `settings.localPlugins.tab`（`kind: 'list', scope: 'root'`，owner props 为空），tab 首次选中才挂载、之后保持挂载。**贡献范式**（范本 `packages/client/ui-settings-plugin-inventory/src/client/index.ts`）：`ctx.slots.inject('settings.localPlugins.tab', () => ctx.slots.register({ name, id, order, label, locale? }, Component))`。⚠️ **插件不能凭空造设置导航行**：slot registry 只允许注册到**父项已声明**的子槽，未声明槽 `register` 直接抛 `slot "<name>" is not declared`。
 - **迁移映射**（只改注册行、组件零改动——三处组件都不吃 `settings.section` 的 owner props）：`dsh-plugin-manager` `local-plugins` 16 → tab **20**；`dsh-hindsight-model` 17 → tab **30**；`dsh-idle-hook` 19 → tab **40**；esc-rewind 新增 tab `subagents` **50**（核心自带 `configurable` 0 / `all` 10 在前）。
 - **孤儿 = 可达性（传递）**：`origin === 'subagent'` 且其 `parentSession` 缺失、或父自身也不可达。依据：侧栏不渲染子代理行（`client/ui-workspace/src/client/tree.ts:146`），子代理只能从**父会话的子代理目录**进入（`subagent/src/list-children.ts:90` 按子会话自身 header 的 `parentSession` 列举）⇒ 父一删，整棵子树彻底没有入口。
 - **找回 = fork 成普通会话**：宿主半只读扫描给出行（含 `atSeq` = 最后一个 `turn/end`、`canRescue`），客户端用官方 `sessions.fork({sessionId, atSeq})` + `rename(label)` + `open(childId)`；`commands.fork` 的语义（新会话 `origin` 空、`isSeeded`、沿用源 workspace）使新会话**侧栏可见且可继续**——这是现有核心下让孤儿「重新可用」的**唯一**路子；原孤儿不删；运行中的孤儿**先停再 fork**（未落盘内容进不了种子）。
 - **宿主半只读扫描的两个细节**：语料用 `sessionQuery.listSessions()`（一次拿全量 header 判可达性）；逐项 label/`atSeq` 用 `sessionQuery.observeSession(id, { projectionMode: 'none' })` —— 观察对象是 **`Disposable`**，用完必须 `observation[Symbol.dispose]()` 释放租约（不释放会 pin 住冷读缓存），并发上限 4、单条失败只降级该行。
 - **停止的诚实语义**：`agents.get(id)` 不存在 → `not-running`（幂等 no-op）；存在 → `cancel({kind:'user'})` + 有上限地等 `whenIdle()`；等到 → `confirmed:true`，超时/信号失败 → `confirmed:false` + reason，**绝不谎报成功**。
-- **可复用要点**：① 想给设置页添东西，先找**核心已经声明好的槽**（`settings.plugins.tab` / `settings.plugin.item` / `settings.general.item`），别自建导航行；② 「不可达/孤儿」这类判定要按**用户实际能进哪条路**（可达性）定义，而不是只看一条字段是否存在；③ 插件改不了别人的会话 header，所以「让孤儿复活」只能靠**复制出普通会话**，不能靠改挂。
+- **可复用要点**：① 想给设置页添东西，先找**核心已经声明好的槽**（`settings.localPlugins.tab` / `settings.plugin.item` / `settings.general.item`），别自建导航行；② 「不可达/孤儿」这类判定要按**用户实际能进哪条路**（可达性）定义，而不是只看一条字段是否存在；③ 插件改不了别人的会话 header，所以「让孤儿复活」只能靠**复制出普通会话**，不能靠改挂。
 - **测试**：esc-rewind 套件 **86/86**（新增 12 条：宿主「orphanSetOf 四态」「只读扫描（label/canRescue/running/释放租约）」「单条失败降级 + 缺服务」「stopOrphanRun 三态」「孤儿端点 4 组」；客户端「tab 注册 + 旧核心降级」「打开只读 + 渲染」「空/失败态」「停止 POST + 未确认静默」「找回链路（先停→fork(atSeq)→沿用标签→open）」「无回合禁用 + 批量勾选」「全手动不变量」），其余三插件注册断言同步更新；**红绿**：新用例跑在 `HEAD` 源码上 esc-rewind **17 红**、manager **1 红**、hindsight **1 红**、idle-hook **1 红**，实现后全绿；管理器 4 支 + 子插件全量 sweep 无回归。
+
+### v7.7 修正（2026-09-22，用户反馈）：设置页要「自建一级入口 + 内部 tab」，不是塞进核心「插件」页
+
+- 用户否决了"把本仓各插件的设置页贡献到核心 `settings.plugins.tab`"：核心「插件」页会与其它内容混杂。要的是**设置左侧新增一个自有的一级入口「本地插件」**，各插件面板作为它内部的 tab。
+- 先前结论有误：`settings.section` 本身就是核心声明的 list 槽，**任何插件都能注册自己的一个一级入口**，并在该注册里用 `children` 声明自有子槽、自己渲染 tab chrome（核心 `ui-settings-plugins` 用的正是这套）。
+- 落地形态：`dsh-plugin-manager` 注册 `settings.section`（id `local-plugins`，order 16，label「本地插件」）+ `children: { "settings.localPlugins.tab": { kind: "list", scope: "root" } }`；自己的管理面板是第一个 tab（id `plugins`，order 0）；三个子插件注册到 `settings.localPlugins.tab`（esc-rewind `subagents` 50 / hindsight 30 / idle-hook 40）。
+- 自建 tab chrome 的两个关键点：① tab 台账用 `ctx.slots.entries(slot)` + `ctx.slots.subscribe(slot, …)` 自己订阅；② 当前 tab 用 `props.renderSlot(slot, {}, { only: id })` 挂载，并"首挂载后保持挂载"（切回来不丢草稿）。
+- 副作用：入口归管理器所有 ⇒ **管理器被停用时这些 tab 一并消失**（"一个入口"的代价，与用户预期一致）。
+- 同批反馈的 UI 打磨：孤儿面板按钮改成与核心卡片同几何（`.5px var(--dsw-alias-border-l3)` / radius 6 / height 26 / padding `0 10px`），破坏性动作（停止）用 `--dsw-alias-state-error-primary` 描边；每行操作**右对齐**（`marginLeft: auto`），行内元信息收进左侧两行。

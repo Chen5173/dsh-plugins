@@ -78,8 +78,8 @@ window.__ModuleLoader__.load({
     /** Read-only orphan scan / stop endpoints (host half mirrors the paths). */
     const ORPHANS_ENDPOINT = '/__esc-rewind/orphans'
     const ORPHANS_STOP_ENDPOINT = '/__esc-rewind/orphans/stop'
-    /** Core "Plugins" settings page: one tab per feature plugin (ui-settings-plugins). */
-    const TAB_SLOT = 'settings.plugins.tab'
+    /** Tab slot declared by dsh-plugin-manager's「本地插件」settings entry. */
+    const TAB_SLOT = 'settings.localPlugins.tab'
     const TAB_ID = 'subagents'
     const TAB_ORDER = 50
     const COMPOSER_ATTR = 'data-composer-input'
@@ -2050,6 +2050,41 @@ window.__ModuleLoader__.load({
     }
 
     /** Settings → 插件 → 「子代理」: orphan reclaim, manual only (open = read-only). */
+    /** Core-matching outline button (same geometry as the settings plugin cards). */
+    const O_BTN = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      height: 26,
+      padding: '0 10px',
+      border: '.5px solid var(--dsw-alias-border-l3)',
+      borderRadius: 6,
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-primary)',
+      font: 'inherit',
+      fontSize: 13,
+      lineHeight: '20px',
+      cursor: 'pointer',
+      flex: 'none',
+    }
+    /** Destructive variant used by「停止」(it drops the run's result for good). */
+    const O_BTN_DANGER = { ...O_BTN, borderColor: 'var(--dsw-alias-state-error-primary)', color: 'var(--dsw-alias-state-error-primary)' }
+    const O_TOOLS = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
+    const O_COUNT = { marginLeft: 'auto', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
+    const O_ROW = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      flexWrap: 'wrap',
+      padding: '8px 0',
+      borderBottom: '.5px solid var(--dsw-alias-border-l2)',
+      listStyle: 'none',
+    }
+    const O_META = { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }
+    const O_NAME = { fontSize: 13, color: 'var(--dsw-alias-label-primary)', wordBreak: 'break-all' }
+    const O_SUB = { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
+    const O_ACTIONS = { marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8, flex: 'none' }
+    const O_RESULT = { width: '100%', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }
+
     function OrphansPanel(props) {
       const seatT = props && typeof props.t === 'function' ? props.t : null
       const t = seatT || __t
@@ -2116,37 +2151,44 @@ window.__ModuleLoader__.load({
       const head = [
         React.createElement('h2', { key: 'title' }, t('orphans.title')),
         React.createElement('p', { key: 'intro' }, t('orphans.intro')),
-        React.createElement('div', { key: 'tools' },
-          React.createElement('button', { type: 'button', disabled: busy, onClick: () => { load() } }, t('orphans.refresh')),
-          React.createElement('button', { type: 'button', disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'stop') } }, t('orphans.stopSelected')),
-          React.createElement('button', { type: 'button', disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'rescue') } }, t('orphans.rescueSelected')),
-          React.createElement('span', { key: 'count' }, t('orphans.count', { n: rows.length })),
+        React.createElement('div', { key: 'tools', style: O_TOOLS },
+          React.createElement('button', { type: 'button', style: O_BTN, disabled: busy, onClick: () => { load() } }, t('orphans.refresh')),
+          React.createElement('button', { type: 'button', style: O_BTN_DANGER, disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'stop') } }, t('orphans.stopSelected')),
+          React.createElement('button', { type: 'button', style: O_BTN, disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'rescue') } }, t('orphans.rescueSelected')),
+          React.createElement('span', { key: 'count', style: O_COUNT }, t('orphans.count', { n: rows.length })),
         ),
       ]
       let body
       if (phase === 'loading') body = React.createElement('p', { key: 'loading' }, t('orphans.loading'))
       else if (phase === 'error') body = React.createElement('p', { key: 'error' }, t('orphans.error', { msg: error }))
       else if (rows.length === 0) body = React.createElement('p', { key: 'empty' }, t('orphans.empty'))
-      else body = React.createElement('ul', { key: 'rows' }, rows.map((row) => React.createElement('li', { key: row.id },
-        React.createElement('label', null,
-          React.createElement('input', {
-            type: 'checkbox',
-            checked: selected[row.id] === true,
-            onChange: () => { setSelected((previous) => { const next = { ...previous }; next[row.id] = !(previous[row.id] === true); return next }) },
-          }),
-          ' ' + (row.label || row.id),
-        ),
-        React.createElement('span', null, row.running === true ? ' · ' + t('orphans.running') : ''),
-        React.createElement('span', null, ' · ' + t('orphans.parent') + ': ' + shortId(row.parentId)),
-        React.createElement('button', { type: 'button', disabled: busy, onClick: () => { act([row.id], 'stop') } }, t('orphans.stop')),
-        React.createElement('button', {
-          type: 'button',
-          disabled: busy || row.canRescue !== true,
-          title: row.canRescue === true ? '' : t('orphans.noBoundary'),
-          onClick: () => { act([row.id], 'rescue') },
-        }, t('orphans.rescue')),
-        results[row.id] ? React.createElement('span', null, ' · ' + results[row.id]) : null,
-      )))
+      else body = React.createElement('ul', { key: 'rows', style: { margin: 0, padding: 0, listStyle: 'none' } },
+        rows.map((row) => React.createElement('li', { key: row.id, style: O_ROW },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 } },
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: selected[row.id] === true,
+              onChange: () => { setSelected((previous) => { const next = { ...previous }; next[row.id] = !(previous[row.id] === true); return next }) },
+            }),
+            React.createElement('div', { style: O_META },
+              React.createElement('span', { style: O_NAME }, row.label || row.id),
+              React.createElement('span', { style: O_SUB },
+                (row.running === true ? t('orphans.running') + ' · ' : '')
+                + t('orphans.parent') + ': ' + shortId(row.parentId)),
+            ),
+          ),
+          React.createElement('div', { style: O_ACTIONS },
+            React.createElement('button', { type: 'button', style: O_BTN_DANGER, disabled: busy, onClick: () => { act([row.id], 'stop') } }, t('orphans.stop')),
+            React.createElement('button', {
+              type: 'button',
+              style: O_BTN,
+              disabled: busy || row.canRescue !== true,
+              title: row.canRescue === true ? '' : t('orphans.noBoundary'),
+              onClick: () => { act([row.id], 'rescue') },
+            }, t('orphans.rescue')),
+          ),
+          results[row.id] ? React.createElement('span', { style: O_RESULT }, results[row.id]) : null,
+        )))
       return React.createElement('div', { className: 'dsew-orphans' }, head.concat([body]))
     }
 

@@ -1,12 +1,12 @@
 ## ADDED Requirements
 
-### Requirement: 设置入口是核心「插件」页里的一个 tab
+### Requirement: 设置入口是「本地插件」一级入口里的一个 tab
 
-插件 SHALL 在核心已声明的 `settings.plugins.tab` 列表槽注册一个「子代理」页（tab id `subagents`，order 50），并 MUST NOT 为孤儿回收另注册 `settings.section` 一级导航行（该导航行由核心 `ui-settings-plugins` 独占并渲染 tab chrome，功能插件以 tab 贡献页面）。tab 标签 MUST 随界面语言切换。当运行的核心没有声明该槽时，注册 MUST 被跳过且 MUST NOT 抛出未捕获错误，插件的其它能力（Esc 回退、会话头处置开关、删除通道）MUST 照常工作。
+插件 SHALL 在 **dsh-plugin-manager 声明并渲染的 `settings.localPlugins.tab`** 槽注册一个「子代理」页（tab id `subagents`，order 50），并 MUST NOT 为孤儿回收另注册 `settings.section` 一级导航行（设置左侧只有一个「本地插件」入口，由管理器拥有）。tab 标签 MUST 随界面语言切换。当运行的核心没有声明该槽时，注册 MUST 被跳过且 MUST NOT 抛出未捕获错误，插件的其它能力（Esc 回退、会话头处置开关、删除通道）MUST 照常工作。
 
 #### Scenario: 插件页出现「子代理」tab
 
-- **WHEN** 用户打开 设置 → 插件
+- **WHEN** 用户打开 设置 → 本地插件
 - **THEN** tab 列表出现「子代理」，与其它功能插件贡献的 tab 并列（按 order 排序），点开即渲染孤儿回收面板
 
 #### Scenario: 标签随语言切换
@@ -16,7 +16,7 @@
 
 #### Scenario: 槽位缺失时不拖垮插件
 
-- **WHEN** 运行的核心未声明 `settings.plugins.tab`（旧核心）
+- **WHEN** 运行的核心未声明 `settings.localPlugins.tab`（旧核心）
 - **THEN** tab 注册被跳过、不产生未捕获错误，插件其余功能照常工作
 
 ### Requirement: 孤儿子代理按可达性判定并只读呈现

@@ -241,19 +241,23 @@ function factoryApi() {
 }
 
 // Mount helpers: get the section component via apply()/slots.
-function mountSection() {
+/** Mount one registration by slot name (the manager now owns a nav entry + its tabs). */
+function mountSection(target = 'settings.localPlugins.tab') {
   const api = factoryApi()
-  let registered = null
-  let section = null
+  const pending = []
+  const registered = []
   const slots = {
-    inject: (name, cb) => { registered = cb },
-    register: (opts, comp) => { section = comp },
+    inject: (name, cb) => { pending.push({ name, cb }) },
+    // Mirror the real registry entry shape: .options (ledger) + .opts (assertions).
+    register: (opts, comp) => { registered.push({ opts, comp, options: opts, component: comp }); return { dispose() {} } },
+    entries: (name) => registered.filter((e) => e.options.name === name),
+    subscribe: () => () => {},
   }
   api.apply({ slots })
-  assert.ok(registered, 'slots.inject called')
-  registered(slots)
-  assert.ok(section, 'section registered')
-  return section
+  for (const item of pending) item.cb()
+  const found = registered.find((entry) => entry.opts.name === target)
+  assert.ok(found, 'registered slot: ' + target)
+  return found.comp
 }
 
 // Walking helpers.
@@ -288,24 +292,44 @@ const flush = () => new Promise((resolve) => setImmediate(resolve))
 
 // --- tests -------------------------------------------------------------------
 
-test('bundle registers the Plugins-page tab (local-plugins, order 20)', () => {
+test('bundle owns the「本地插件」nav entry (order 16) and its own panel tab (order 0)', () => {
   const api = factoryApi()
   assert.deepEqual(api.inject, ['slots'])
-  let registered = null
+  const pending = []
   const entry = []
   const slots = {
-    inject: (name, cb) => { registered = cb },
+    inject: (name, cb) => { pending.push(cb) },
     register: (opts, comp) => entry.push({ opts, comp }),
   }
   api.apply({ slots })
-  assert.equal(typeof registered, 'function', 'slots.inject callback captured')
-  registered(slots)
-  assert.equal(entry.length, 1)
-  assert.equal(entry[0].opts.name, 'settings.plugins.tab')
-  assert.equal(entry[0].opts.id, 'local-plugins')
-  assert.equal(entry[0].opts.order, 20)
-  assert.equal(entry[0].opts.label(), '本地插件')
-  assert.equal(typeof entry[0].comp, 'function')
+  for (const cb of pending) cb()
+  assert.equal(entry.length, 2, 'nav entry + the manager panel tab')
+  const nav = entry.find((e) => e.opts.name === 'settings.section')
+  assert.ok(nav, 'registers the local-plugins settings section')
+  assert.equal(nav.opts.id, 'local-plugins')
+  assert.equal(nav.opts.order, 16)
+  assert.equal(nav.opts.label(), '本地插件')
+  assert.equal(nav.opts.children['settings.localPlugins.tab'].kind, 'list', 'declares the tab child slot')
+  const tab = entry.find((e) => e.opts.name === 'settings.localPlugins.tab')
+  assert.ok(tab, 'the manager panel is one tab of the entry')
+  assert.equal(tab.opts.id, 'plugins')
+  assert.equal(tab.opts.order, 0)
+  assert.equal(typeof nav.comp, 'function', 'nav entry component is the tab chrome')
+  assert.equal(typeof tab.comp, 'function', 'panel component registered as a tab')
+})
+
+test('the nav entry renders a tab bar over the declared child slot', async () => {
+  const section = mountSection('settings.section')
+  const calls = []
+  fresh()
+  begin()
+  const tree = section({
+    renderSlot: (name, owner, select) => { calls.push({ name, select }); return { __element: true, type: 'div', props: { children: 'slot:' + (select && select.only) } } },
+  })
+  const labels = byType(tree, 'button').map((b) => textOf(b))
+  assert.deepEqual(labels, ['本地插件'], 'the tab bar lists the contributed tabs')
+  assert.equal(tree.props.children.length >= 2, true, 'heading + tabs + panel')
+  assert.deepEqual(calls, [{ name: 'settings.localPlugins.tab', select: { only: 'plugins' } }], 'the active tab mounts through renderSlot(..., { only })')
 })
 
 test('renders plugin rows from /list with state text and no auto reload', async () => {
