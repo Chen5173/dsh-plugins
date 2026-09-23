@@ -69,3 +69,28 @@
 5. 规格/文档改写：三个 spec delta、proposal/design、README/ACCEPTANCE、知识库与本文档中"核心「插件」页 tab"的措辞统一改为「本地插件」一级入口 + `settings.localPlugins.tab`。
 
 **验证**：管理器 6 支套件、esc-rewind 86/86、hindsight 114/114、idle-hook 22 + 51、全仓 sweep 全绿；`openspec validate` 通过。管理器 harness 新增"入口渲染 tab 栏并只挂载当前 tab"用例，且 slots 桩改为收集式 inject（支持一个插件注册多处）。
+
+## 7. 追加：孤儿删除（2026-09-22，用户需求）
+
+用户要求「子代理」面板加**删除**；确认的语义：**受子代理守卫拒绝、不级联**，另加**批量删除 + 全选/取消全选**。
+
+- 宿主半：新增 `POST /__esc-rewind/orphans/delete` + `deleteOrphanRun()`，复用既有受守卫的删除核心 `deleteSessionCore()`（先 cancel+静默，再删日志 → 投影缓存 → 工作区记账；目录未清干净会在动工作区记账前抛错）。守卫拒绝（自己还挂着子代理）与「读不到子代理状态」都如实翻成 `{deleted:false, reason, children}`，**绝不级联、绝不绕过守门**。
+- 客户端：逐行「删除」（危险色）+ 批量「删除选中 (N)」+ 「全选 / 取消全选」；删除前 `window.confirm`（文案含数量与不可恢复）；结果文案区分 已删除 / 被拒（含子级数）/ 已不存在 / 失败；删除成功后从勾选集合移除。
+- 规格：新增要求「删除不可达孤儿（真删，受守卫且不级联）」+ 4 场景；原先「本轮 MUST NOT 提供「删除孤儿」动作」改写为「显式触发 + 删除必须先确认」（该条款是本仓自设的保守边界，用户明确要求删除后按新语义修正）。
+- 版本：按 AGENTS.md 新规则，两处清单 `0.2.1 → 0.2.2`。
+
+**验证**：`bundle.test` 89/89（新增 3 条：端点守卫拒绝 + 真实删除、面板全选→批量→结果文案、取消确认不发请求）；管理器 6 支套件与全仓 sweep 全绿；版本护栏 PASS；`openspec validate` 通过。
+
+## 8. 现场排障：删除报 `delete-failed-405`（2026-09-22，真机首次点删除）
+
+**现象**：面板点「删除」→ 该行显示 `删除失败：delete-failed-405`。
+
+**定位**：405 不是本插件处理器发的（它回的是 `{error:"method not allowed"}`，面板会显示那句话）——回的是 **webworker 隧道的路由车道**（`packages/experimental/webworker-runtime/src/transport/tunnel.ts`，boot/路由表在宿主启动时确定，未注册的路径按拒绝处理并透传状态码）。现场 profile 是 `dsh-plugin-manager: link:E:/GitHubProjects/...`（子插件全部 link 进工作树）⇒ **客户端半刷新即拿到新按钮，宿主半仍是改动前启动的旧进程**，路由表里没有 `/__esc-rewind/orphans/delete`。
+
+**处置**：重启 `dsh web`（宿主半改动一律需要重启；客户端半只需刷新页面——这是本仓反复记录的不对称）。
+
+**顺手加固（防止下次再靠猜）**：
+- 客户端：`stopOrphans` / `deleteOrphans` 收到 **404/405** 时抛 `host-endpoint-missing:<status>`，面板改显示「**宿主半没有这个端点（404/405）：宿主半的改动需要重启 dsh web 才生效**」，不再暴露裸错误码。
+- 宿主半：`GET /__esc-rewind/status` 新增 `endpoints`（本次进程实际注册的路由列表），一次 GET 即可判定「是宿主没重启还是真 bug」。
+
+**验证**：`bundle.test` 90/90（新增用例：删除端点回 405 且无 JSON body ⇒ 面板显示重启提示、且**不**出现 `delete-failed-405`）；管理器 6 支套件与全仓 sweep 全绿。

@@ -78,6 +78,7 @@ window.__ModuleLoader__.load({
     /** Read-only orphan scan / stop endpoints (host half mirrors the paths). */
     const ORPHANS_ENDPOINT = '/__esc-rewind/orphans'
     const ORPHANS_STOP_ENDPOINT = '/__esc-rewind/orphans/stop'
+    const ORPHANS_DELETE_ENDPOINT = '/__esc-rewind/orphans/delete'
     /** Tab slot declared by dsh-plugin-manager's「本地插件」settings entry. */
     const TAB_SLOT = 'settings.localPlugins.tab'
     const TAB_ID = 'subagents'
@@ -263,6 +264,17 @@ window.__ModuleLoader__.load({
       'orphans.parent': '父会话',
       'orphans.stop': '停止',
       'orphans.rescue': '找回',
+      'orphans.remove': '删除',
+      'orphans.removeSelected': '删除选中',
+      'orphans.selectAll': '全选',
+      'orphans.clearSelection': '取消全选',
+      'orphans.removeConfirm': '删除选中的 {n} 个不可达子代理？删除不可恢复（会话日志、投影缓存与工作区记账一并移除）。仍挂着子代理的会被拒绝并原样保留。',
+      'orphans.removed': '已删除',
+      'orphans.removeBlocked': '未删除：自己还挂着 {n} 个子代理（请先删子级）',
+      'orphans.removeUnknownBlock': '未删除：读不到子代理状态（fail-safe）',
+      'orphans.removeMissing': '未删除：会话已不存在',
+      'orphans.removeFailed': '删除失败：{msg}',
+      'orphans.hostStale': '宿主半没有这个端点（404/405）：宿主半的改动需要重启 dsh web 才生效——重启后刷新本页再试',
       'orphans.stopSelected': '停止选中',
       'orphans.rescueSelected': '找回选中',
       'orphans.noBoundary': '没有完整回合，无法找回',
@@ -307,6 +319,17 @@ window.__ModuleLoader__.load({
       'orphans.parent': 'parent',
       'orphans.stop': 'Stop',
       'orphans.rescue': 'Rescue',
+      'orphans.remove': 'Delete',
+      'orphans.removeSelected': 'Delete selected',
+      'orphans.selectAll': 'Select all',
+      'orphans.clearSelection': 'Clear selection',
+      'orphans.removeConfirm': 'Delete {n} unreachable subagent(s)? This cannot be undone (session logs, projection cache and workspace accounting are removed). Any session that still owns subagents is refused and left untouched.',
+      'orphans.removed': 'Deleted',
+      'orphans.removeBlocked': 'Not deleted: it still owns {n} subagent(s) — delete the children first',
+      'orphans.removeUnknownBlock': 'Not deleted: subagent state unavailable (fail-safe)',
+      'orphans.removeMissing': 'Not deleted: session no longer exists',
+      'orphans.removeFailed': 'Delete failed: {msg}',
+      'orphans.hostStale': 'The running host does not expose this endpoint (404/405): host-half changes need a dsh web RESTART — restart, refresh this page, then retry',
       'orphans.stopSelected': 'Stop selected',
       'orphans.rescueSelected': 'Rescue selected',
       'orphans.noBoundary': 'No completed turn — cannot rescue',
@@ -2000,9 +2023,37 @@ window.__ModuleLoader__.load({
       })
       const body = await response.json().catch(() => ({}))
       if (!response.ok || body.ok !== true) {
+        if (response.status === 404 || response.status === 405) throw new Error('host-endpoint-missing:' + response.status)
         throw new Error(body.error || ('stop-failed-' + response.status))
       }
       return Array.isArray(body.results) ? body.results : []
+    }
+
+    /** Delete one batch of orphans for real (guarded delete per id). */
+    async function deleteOrphans(ids) {
+      const list = Array.isArray(ids) ? ids.filter(Boolean) : []
+      if (list.length === 0) return []
+      if (typeof fetch !== 'function') throw new Error('fetch-unavailable')
+      const response = await fetch(ORPHANS_DELETE_ENDPOINT, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: list }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || body.ok !== true) {
+        if (response.status === 404 || response.status === 405) throw new Error('host-endpoint-missing:' + response.status)
+        throw new Error(body.error || ('delete-failed-' + response.status))
+      }
+      return Array.isArray(body.results) ? body.results : []
+    }
+
+    /** Human text for one delete result (deleted / refused by the guard / missing / failed). */
+    function deleteResultText(t, row) {
+      if (row && row.deleted === true) return t('orphans.removed')
+      if (row && row.reason === 'subagents') return t('orphans.removeBlocked', { n: Number(row.children) || 0 })
+      if (row && row.reason === 'subagents-unknown') return t('orphans.removeUnknownBlock')
+      if (row && row.reason === 'not-found') return t('orphans.removeMissing')
+      return t('orphans.removeFailed', { msg: (row && (row.reason || row.message)) || 'unknown' })
     }
 
     /** Human text for one stop result (confirmed / unconfirmed / no-op). */
@@ -2120,12 +2171,22 @@ window.__ModuleLoader__.load({
       const act = React.useCallback(async (ids, kind) => {
         const list = (Array.isArray(ids) ? ids : []).filter(Boolean)
         if (list.length === 0) return
+        if (kind === 'delete' && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+          if (!window.confirm(t('orphans.removeConfirm', { n: list.length }))) return
+        }
         setBusy(true)
         try {
           if (kind === 'stop') {
             const stopped = await stopOrphans(list)
             for (const row of stopped) note(row.id, stopResultText(t, row))
             __diag.orphanActions = __diag.orphanActions.concat([{ kind: 'stop', ids: list, at: Date.now() }]).slice(-10)
+          } else if (kind === 'delete') {
+            const removed = await deleteOrphans(list)
+            for (const row of removed) note(row.id, deleteResultText(t, row))
+            __diag.orphanDeletes = (__diag.orphanDeletes || []).concat([{ ids: list, deleted: removed.filter((row) => row.deleted === true).length, at: Date.now() }]).slice(-10)
+            for (const row of removed) {
+              if (row.deleted === true) setSelected((previous) => { const next = { ...previous }; delete next[row.id]; return next })
+            }
           } else {
             for (const id of list) {
               const row = rows.find((candidate) => candidate.id === id)
@@ -2141,21 +2202,32 @@ window.__ModuleLoader__.load({
           await load()
         } catch (err) {
           const message = (err && err.message) ? err.message : String(err)
-          for (const id of list) note(id, t(kind === 'stop' ? 'orphans.stopFailed' : 'orphans.rescueFailed', { msg: message }))
+          const stale = message.indexOf('host-endpoint-missing:') === 0
+          const failureKey = kind === 'stop' ? 'orphans.stopFailed' : kind === 'delete' ? 'orphans.removeFailed' : 'orphans.rescueFailed'
+          for (const id of list) note(id, stale ? t('orphans.hostStale') : t(failureKey, { msg: message }))
         } finally {
           setBusy(false)
         }
       }, [rows, load, note])
 
       const selectedIds = rows.filter((row) => selected[row.id] === true).map((row) => row.id)
+      const allSelected = rows.length > 0 && selectedIds.length === rows.length
+      const toggleAll = () => setSelected(() => {
+        if (allSelected) return {}
+        const next = {}
+        for (const row of rows) next[row.id] = true
+        return next
+      })
       const head = [
         React.createElement('h2', { key: 'title' }, t('orphans.title')),
         React.createElement('p', { key: 'intro' }, t('orphans.intro')),
         React.createElement('div', { key: 'tools', style: O_TOOLS },
           React.createElement('button', { type: 'button', style: O_BTN, disabled: busy, onClick: () => { load() } }, t('orphans.refresh')),
+          React.createElement('button', { type: 'button', style: O_BTN, disabled: rows.length === 0, onClick: toggleAll }, allSelected ? t('orphans.clearSelection') : t('orphans.selectAll')),
           React.createElement('button', { type: 'button', style: O_BTN_DANGER, disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'stop') } }, t('orphans.stopSelected')),
           React.createElement('button', { type: 'button', style: O_BTN, disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'rescue') } }, t('orphans.rescueSelected')),
-          React.createElement('span', { key: 'count', style: O_COUNT }, t('orphans.count', { n: rows.length })),
+          React.createElement('button', { type: 'button', style: O_BTN_DANGER, disabled: busy || selectedIds.length === 0, onClick: () => { act(selectedIds, 'delete') } }, t('orphans.removeSelected')),
+          React.createElement('span', { key: 'count', style: O_COUNT }, selectedIds.length === 0 ? t('orphans.count', { n: rows.length }) : t('orphans.count', { n: rows.length }) + ' · ' + selectedIds.length + '/' + rows.length),
         ),
       ]
       let body
@@ -2186,6 +2258,7 @@ window.__ModuleLoader__.load({
               title: row.canRescue === true ? '' : t('orphans.noBoundary'),
               onClick: () => { act([row.id], 'rescue') },
             }, t('orphans.rescue')),
+            React.createElement('button', { type: 'button', style: O_BTN_DANGER, disabled: busy, onClick: () => { act([row.id], 'delete') } }, t('orphans.remove')),
           ),
           results[row.id] ? React.createElement('span', { style: O_RESULT }, results[row.id]) : null,
         )))

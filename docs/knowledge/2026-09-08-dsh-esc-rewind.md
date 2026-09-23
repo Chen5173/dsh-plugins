@@ -168,7 +168,7 @@
 - **宿主半只读扫描的两个细节**：语料用 `sessionQuery.listSessions()`（一次拿全量 header 判可达性）；逐项 label/`atSeq` 用 `sessionQuery.observeSession(id, { projectionMode: 'none' })` —— 观察对象是 **`Disposable`**，用完必须 `observation[Symbol.dispose]()` 释放租约（不释放会 pin 住冷读缓存），并发上限 4、单条失败只降级该行。
 - **停止的诚实语义**：`agents.get(id)` 不存在 → `not-running`（幂等 no-op）；存在 → `cancel({kind:'user'})` + 有上限地等 `whenIdle()`；等到 → `confirmed:true`，超时/信号失败 → `confirmed:false` + reason，**绝不谎报成功**。
 - **可复用要点**：① 想给设置页添东西，先找**核心已经声明好的槽**（`settings.localPlugins.tab` / `settings.plugin.item` / `settings.general.item`），别自建导航行；② 「不可达/孤儿」这类判定要按**用户实际能进哪条路**（可达性）定义，而不是只看一条字段是否存在；③ 插件改不了别人的会话 header，所以「让孤儿复活」只能靠**复制出普通会话**，不能靠改挂。
-- **测试**：esc-rewind 套件 **86/86**（新增 12 条：宿主「orphanSetOf 四态」「只读扫描（label/canRescue/running/释放租约）」「单条失败降级 + 缺服务」「stopOrphanRun 三态」「孤儿端点 4 组」；客户端「tab 注册 + 旧核心降级」「打开只读 + 渲染」「空/失败态」「停止 POST + 未确认静默」「找回链路（先停→fork(atSeq)→沿用标签→open）」「无回合禁用 + 批量勾选」「全手动不变量」），其余三插件注册断言同步更新；**红绿**：新用例跑在 `HEAD` 源码上 esc-rewind **17 红**、manager **1 红**、hindsight **1 红**、idle-hook **1 红**，实现后全绿；管理器 4 支 + 子插件全量 sweep 无回归。
+- **测试**：esc-rewind 套件 **89/89**（v7.7 时新增 12 条；2026-09-22 追加「删除孤儿」再 +3 条：宿主「orphanSetOf 四态」「只读扫描（label/canRescue/running/释放租约）」「单条失败降级 + 缺服务」「stopOrphanRun 三态」「孤儿端点 4 组」；客户端「tab 注册 + 旧核心降级」「打开只读 + 渲染」「空/失败态」「停止 POST + 未确认静默」「找回链路（先停→fork(atSeq)→沿用标签→open）」「无回合禁用 + 批量勾选」「全手动不变量」），其余三插件注册断言同步更新；**红绿**：新用例跑在 `HEAD` 源码上 esc-rewind **17 红**、manager **1 红**、hindsight **1 红**、idle-hook **1 红**，实现后全绿；管理器 4 支 + 子插件全量 sweep 无回归。
 
 ### v7.7 修正（2026-09-22，用户反馈）：设置页要「自建一级入口 + 内部 tab」，不是塞进核心「插件」页
 

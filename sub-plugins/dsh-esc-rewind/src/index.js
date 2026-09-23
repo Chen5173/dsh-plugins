@@ -63,6 +63,7 @@ export const STATUS_PATH = '/__esc-rewind/status'
 export const ORPHANS_PATH = '/__esc-rewind/orphans'
 /** Stop one batch of orphan runs (cancel + bounded quiescence). */
 export const ORPHANS_STOP_PATH = '/__esc-rewind/orphans/stop'
+export const ORPHANS_DELETE_PATH = '/__esc-rewind/orphans/delete'
 
 /** No hard host dependencies: every service is reached lazily. */
 const inject = []
@@ -643,6 +644,37 @@ function readBody(req) {
   })
 }
 
+/**
+ * 功能作用：真删一个孤儿会话——复用受守卫的删除核心（先 cancel+静默，再删日志/投影缓存/工作区记账），
+ *           并把守卫拒绝（自己还挂着子代理）如实翻成一行结果，绝不级联、绝不绕过守门。
+ * 参数：
+ *   ctx: object -- 宿主 ctx
+ *   sessionId: string -- 孤儿会话 id
+ * 返回值：
+ *   { id, deleted: boolean, reason?, children?, running?, message?, detail? }
+ *   例：deleteOrphanRun(ctx, '6455048f-…') → { id: '6455048f-…', deleted: true }
+ * 调用样例：
+ *   const row = await deleteOrphanRun(ctx, id)
+ */
+export async function deleteOrphanRun(ctx, sessionId) {
+  try {
+    const detail = await deleteSessionCore(ctx, sessionId)
+    return { id: sessionId, deleted: true, detail }
+  } catch (error) {
+    const status = error && Number.isFinite(error.status) ? error.status : 500
+    const details = (error && error.details) || {}
+    return {
+      id: sessionId,
+      deleted: false,
+      status,
+      reason: details.reason || (status === 404 ? 'not-found' : status === 409 ? 'blocked' : 'delete-failed'),
+      children: details.children,
+      running: details.running,
+      message: (error && error.message) ? error.message : String(error),
+    }
+  }
+}
+
 export function registerHttp(ctx, host) {
   if (!host || typeof host.register !== 'function') return
   // Read-only status probe: confirms the host half is live, the settings
@@ -663,6 +695,7 @@ export function registerHttp(ctx, host) {
         deleteOldOnRewind: HOST_DIAG.settingsValue === true,
         lastGuard: HOST_DIAG.lastGuard,
         orphans: HOST_DIAG.lastOrphanScan,
+        endpoints: HOST_DIAG.registeredPaths || [],
       })
     },
   }))
@@ -740,6 +773,41 @@ export function registerHttp(ctx, host) {
       const results = []
       for (const id of ids) results.push(await stopOrphanRun(ctx, id))
       sendJson(res, 200, { ok: true, results, stopped: results.filter((row) => row.confirmed).length })
+    },
+  }))
+  // Delete orphans for real, one guarded delete per id. A session that still owns
+  // subagents is refused with its child count (no cascade) so the user can clean
+  // the children first from the same list; the guard is never bypassed.
+  ctx.effect(() => host.register({
+    kind: 'exact',
+    path: ORPHANS_DELETE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'method not allowed' })
+        return
+      }
+      let args = {}
+      try {
+        const body = await readBody(req)
+        if (body) args = JSON.parse(body)
+      } catch {
+        sendJson(res, 400, { error: 'bad json body' })
+        return
+      }
+      const ids = Array.isArray(args.ids) ? args.ids.map((id) => String(id || '').trim()).filter(Boolean) : []
+      if (ids.length === 0) {
+        sendJson(res, 400, { error: 'ids required' })
+        return
+      }
+      const invalid = ids.find((id) => !SESSION_ID_RE.test(id))
+      if (invalid !== undefined) {
+        sendJson(res, 400, { error: `invalid session id: ${invalid}` })
+        return
+      }
+      const results = []
+      for (const id of ids) results.push(await deleteOrphanRun(ctx, id))
+      const deleted = results.filter((row) => row.deleted === true).length
+      sendJson(res, 200, { ok: true, results, deleted, blocked: results.length - deleted })
     },
   }))
 }

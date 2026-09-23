@@ -1970,6 +1970,134 @@ test('orphan tab: 无完整回合的孤儿禁用「找回」并给出原因；�
   assert.deepEqual(services.calls.forks, [], '禁用状态下没有 fork')
 })
 
+test('orphan tab: 「删除」逐行/批量都走受守卫端点；全选→批量→结果如实（含守卫拒绝）', async () => {
+  const blocked = 'aaaaaaaa-1111-2222-3333-444444444444'
+  const plain = 'bbbbbbbb-1111-2222-3333-444444444444'
+  const services = makeServices()
+  applyWith(services)
+  const posts = []
+  const confirms = []
+  const previousConfirm = globalThis.window.confirm
+  globalThis.window.confirm = (message) => { confirms.push(message); return true }
+  try {
+    await withFetch(async (url, opts) => {
+      if (String(url).indexOf('/orphans/delete') !== -1) {
+        posts.push(JSON.parse(opts.body))
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            ok: true, deleted: 1, blocked: 1,
+            results: [
+              { id: blocked, deleted: false, reason: 'subagents', children: 2, status: 409 },
+              { id: plain, deleted: true },
+            ],
+          }),
+        }
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          ok: true, count: 2,
+          orphans: [
+            { id: blocked, label: '父级孤儿', parentId: 'gone', running: false, canRescue: true, atSeq: 3, lastActivity: 1, error: null },
+            { id: plain, label: '普通孤儿', parentId: 'gone', running: false, canRescue: true, atSeq: 3, lastActivity: 1, error: null },
+          ],
+        }),
+      }
+    }, async () => {
+      const state = {}
+      const tree = await renderOrphans(services, state)
+      assert.equal(buttonByText(tree, '删除').props.disabled, false, '逐行删除可点')
+      assert.equal(buttonByText(tree, '删除选中').props.disabled, true, '未勾选时批量删除禁用')
+      assert.ok(buttonByText(tree, '全选'), '提供全选')
+      buttonByText(tree, '全选').props.onClick()
+      const all = await renderOrphans(services, state)
+      assert.ok(buttonByText(all, '取消全选'), '全选后按钮变取消全选')
+      assert.equal(buttonByText(all, '删除选中').props.disabled, false, '全选后批量可用')
+      buttonByText(all, '取消全选').props.onClick()
+      const cleared = await renderOrphans(services, state)
+      assert.ok(buttonByText(cleared, '全选'), '取消全选后回到全选')
+      assert.equal(buttonByText(cleared, '删除选中').props.disabled, true, '清空选择后批量重新禁用')
+      buttonByText(cleared, '全选').props.onClick()
+      const selectedAgain = await renderOrphans(services, state)
+      buttonByText(selectedAgain, '删除选中').props.onClick()
+      const after = await renderOrphans(services, state)
+      assert.deepEqual(posts, [{ ids: [blocked, plain] }], '批量删除 POST 全部勾选 id')
+      assert.match(String(confirms[0]), /2/, '确认框写明数量')
+      assert.match(String(confirms[0]), /不可恢复/, '确认框写明不可恢复')
+      const text = treeText(after)
+      assert.ok(text.indexOf('已删除') !== -1, '成功项如实回报')
+      assert.ok(text.indexOf('未删除：自己还挂着 2 个子代理（请先删子级）') !== -1, '守卫拒绝如实回报（含子级数）')
+    })
+  } finally {
+    if (previousConfirm === undefined) delete globalThis.window.confirm
+    else globalThis.window.confirm = previousConfirm
+  }
+})
+
+test('orphan tab: 取消删除确认时一个请求都不发（破坏性动作必须显式确认）', async () => {
+  const sid = 'cccccccc-1111-2222-3333-444444444444'
+  const services = makeServices()
+  applyWith(services)
+  const posts = []
+  const previousConfirm = globalThis.window.confirm
+  globalThis.window.confirm = () => false
+  try {
+    await withFetch(async (url, opts) => {
+      if (String(url).indexOf('/orphans/delete') !== -1) {
+        posts.push(JSON.parse(opts.body))
+        return { ok: true, status: 200, json: async () => ({ ok: true, deleted: 1, blocked: 0, results: [{ id: sid, deleted: true }] }) }
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ ok: true, count: 1, orphans: [{ id: sid, label: '孤儿', parentId: 'gone', running: false, canRescue: true, atSeq: 1, lastActivity: 1, error: null }] }),
+      }
+    }, async () => {
+      const state = {}
+      const tree = await renderOrphans(services, state)
+      buttonByText(tree, '删除').props.onClick()
+      const after = await renderOrphans(services, state)
+      assert.deepEqual(posts, [], '取消确认 ⇒ 不发请求')
+      assert.equal(treeText(after).indexOf('已删除'), -1, '没有删除结果')
+    })
+  } finally {
+    if (previousConfirm === undefined) delete globalThis.window.confirm
+    else globalThis.window.confirm = previousConfirm
+  }
+})
+
+test('orphan tab: 宿主半缺端点（404/405）时给出「重启 dsh web」的可操作提示，而不是裸错误码', async () => {
+  const sid = 'dddddddd-1111-2222-3333-444444444444'
+  const services = makeServices()
+  applyWith(services)
+  const previousConfirm = globalThis.window.confirm
+  globalThis.window.confirm = () => true
+  try {
+    await withFetch(async (url) => {
+      if (String(url).indexOf('/orphans/delete') !== -1) {
+        // 运行中的宿主没注册这条路由：隧道回 405 且没有 JSON body（实测现场）
+        return { ok: false, status: 405, json: async () => { throw new Error('no json body') } }
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ ok: true, count: 1, orphans: [{ id: sid, label: '孤儿', parentId: 'gone', running: false, canRescue: true, atSeq: 1, lastActivity: 1, error: null }] }),
+      }
+    }, async () => {
+      const state = {}
+      const tree = await renderOrphans(services, state)
+      buttonByText(tree, '删除').props.onClick()
+      const after = await renderOrphans(services, state)
+      const text = treeText(after)
+      assert.ok(text.indexOf('宿主半没有这个端点') !== -1, '提示宿主半缺端点')
+      assert.ok(text.indexOf('重启 dsh web') !== -1, '提示需要重启宿主')
+      assert.equal(text.indexOf('delete-failed-405'), -1, '不再暴露裸错误码')
+    })
+  } finally {
+    if (previousConfirm === undefined) delete globalThis.window.confirm
+    else globalThis.window.confirm = previousConfirm
+  }
+})
+
 test('orphan tab: 全手动不变量（无定时器；刷新只发 GET）', async () => {
   const source = fs.readFileSync(bundlePath, 'utf8')
   assert.ok(!/setInterval/.test(source), '面板不得有定时器')
@@ -2387,9 +2515,10 @@ test('host half: registerHttp serves status + delete, rejecting wrong method/mis
   // cordis ctx.effect runs the registration callback immediately.
   const ctx = { get: () => undefined, effect: (fn) => { const dispose = fn(); return dispose || (() => {}) } }
   hostMod.registerHttp(ctx, host)
-  assert.equal(registered.length, 4, 'status + delete + orphans + orphans/stop registered')
+  assert.equal(registered.length, 5, 'status + delete + orphans + orphans/stop + orphans/delete registered')
   assert.ok(registered.find((e) => e.path === hostMod.ORPHANS_PATH), 'orphan scan endpoint registered')
   assert.ok(registered.find((e) => e.path === hostMod.ORPHANS_STOP_PATH), 'orphan stop endpoint registered')
+  assert.ok(registered.find((e) => e.path === hostMod.ORPHANS_DELETE_PATH), 'orphan delete endpoint registered')
   const status = registered.find((e) => e.path === hostMod.STATUS_PATH)
   const del = registered.find((e) => e.path === hostMod.DELETE_PATH)
   assert.ok(status && del, 'both endpoints present')
@@ -2436,6 +2565,60 @@ test('host half: 端点把子代理守卫的拒绝透传给客户端（409 + rea
   assert.equal(body.children, 1)
   assert.equal(body.running, 1)
   assert.match(body.error, /subagent/)
+})
+
+test('host half: 孤儿删除端点——逐项受守卫真删，拒绝如实回报（不级联，未受守卫的真删）', async () => {
+  const registered = []
+  const host = { register: (entry) => { registered.push(entry); return () => {} } }
+  const blockedId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  const okId = '11111111-2222-3333-4444-555555555555'
+  const children = { [blockedId]: [{ kind: 'child', id: blockedId + '-kid', activity: 'running' }] }
+  const ctx = {
+    get: (name) => {
+      if (name === 'subagents') return { listChildren: async (parent) => children[parent] || [] }
+      if (name === 'agents') return { get: () => undefined }
+      return undefined
+    },
+    effect: (fn) => { const dispose = fn(); return dispose || (() => {}) },
+  }
+  const previousHome = process.env.DSH_HOME
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsew-orphan-del-'))
+  process.env.DSH_HOME = tmpHome
+  try {
+    const slug = path.join(tmpHome, 'sessions', 'myslug')
+    fs.mkdirSync(path.join(slug, okId), { recursive: true })
+    fs.writeFileSync(path.join(slug, okId, 'session.jsonl'), '{}')
+    hostMod.registerHttp(ctx, host)
+    const endpoint = registered.find((e) => e.path === hostMod.ORPHANS_DELETE_PATH)
+    const call = async (body) => {
+      const res = { writeHead: (status) => { res.status = status }, end: (payload) => { res.body = payload } }
+      const req = {
+        method: 'POST',
+        on: (event, cb) => { if (event === 'data') cb(JSON.stringify(body)); if (event === 'end') cb() },
+        destroy: () => {},
+      }
+      await endpoint.handler(req, res)
+      return { status: res.status, body: res.body ? JSON.parse(res.body) : null }
+    }
+    assert.equal((await call({ ids: [] })).status, 400, 'empty ids rejected')
+    assert.equal((await call({ ids: ['not-an-id'] })).status, 400, 'invalid id rejected')
+    const guarded = await call({ ids: [blockedId] })
+    assert.equal(guarded.status, 200)
+    assert.equal(guarded.body.results[0].deleted, false)
+    assert.equal(guarded.body.results[0].reason, 'subagents', 'guard reason surfaced verbatim')
+    assert.equal(guarded.body.results[0].children, 1, 'child count surfaced')
+    assert.equal(guarded.body.deleted, 0)
+    assert.equal(guarded.body.blocked, 1)
+    assert.equal(fs.existsSync(path.join(slug, blockedId)), false, 'refusal happens before any disk action')
+    const done = await call({ ids: [okId] })
+    assert.equal(done.body.results[0].deleted, true, 'an unguarded orphan really is deleted')
+    assert.equal(done.body.deleted, 1)
+    assert.equal(hostMod.findSessionDirs(okId, path.join(tmpHome, 'sessions')).length, 0, 'log dir gone')
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    fs.rmSync(tmpHome, { recursive: true, force: true })
+  }
 })
 
 // --- settings reader shapes (guards a real cordis ctx puts on the surface) ----
