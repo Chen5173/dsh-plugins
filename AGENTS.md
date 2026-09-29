@@ -11,13 +11,14 @@ DSH 插件开发/收集仓库（本地 git monorepo；每个插件是独立子�
 改完**至少跑对应测试**；全部离线可跑、不起服务器、不开端口、不碰正在运行的 `web` profile。
 
 ```bash
-# 管理器（6 支）
+# 管理器（7 支）
 node dsh-plugin-manager/test/host-core.test.mjs        # 宿主纯逻辑：扫描/行变换/状态/迁移规划/意图合并/批量规划/链接态
 node dsh-plugin-manager/test/bundle.test.mjs           # 客户端注册与面板逻辑（React shim + fetch stub）
 node dsh-plugin-manager/test/debounce.test.mjs         # 真 handler + 临时 DSH_HOME：连点只写一次 patch + 陈旧链接自愈
 node dsh-plugin-manager/test/batch-remove-all.test.mjs # 批量「全部移除」：一次写/一次安装/双回滚
 node dsh-plugin-manager/test/uninstall.test.mjs        # 自包含卸载脚本：恰好一次写/一次安装/其它键不动/幂等
 node dsh-plugin-manager/test/root-install-shell.test.mjs # 仓库根安装外壳（20 条断言，含两处版本一致）
+node dsh-plugin-manager/test/entry-config.test.mjs     # 宿主半的 0.2.0 条目配置契约（5 条：Config 三成员 / 宽松校验 / apply 读取 / 不覆盖 / 0.1.x installSection 路线）
 # 子插件（每个包的 bundle.test.mjs 校验 manifest + 注册 + patch）
 for f in sub-plugins/*/test/*.test.mjs; do node "$f" || echo "FAIL $f"; done
 ```

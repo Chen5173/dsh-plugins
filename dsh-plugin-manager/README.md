@@ -83,7 +83,7 @@ node "~/.dsh/profiles/web/node_modules/dsh-plugin-manager/dsh-plugin-manager/too
 
 - Node ≥ 20（`package.json` 的 `engines`）。
 - 宿主：profile 顶层能解析 `js-yaml`（web profile 已具备）。
-- 浏览器：需要核心提供 `react` 模块字与 `settings.localPlugins.tab` 槽（核心「插件」设置页声明的列表槽；旧核心没有该槽时面板不出现，但管理器宿主机能照常工作）；面板注入 `@deepseek-ai/dsh-client-runtime@^0.1.2-rc.1`。
+- 浏览器：需要核心提供 `react` 模块字与 `settings.localPlugins.tab` 槽（核心「插件」设置页声明的列表槽；旧核心没有该槽时面板不出现，但管理器宿主机能照常工作）。客户端不依赖任何 `@deepseek-ai/*` 宿主包（0.2.0 起 `dsh.client.inject` 只声明 boot 图内的包行，本包不再声明）。宿主半导出 `Config`（`autoRelink`）：0.2.0 退役了 `settings.installSection`，设置命名空间改为「profile 条目 id 的 Config」——本包因此在设置页出现「自动重定位」开关；0.1.x 仍走 installSection。
 
 ---
 

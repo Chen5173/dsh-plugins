@@ -5,7 +5,7 @@
 
 ## 0. 前置
 
-- [ ] 0.1 [A] `node sub-plugins/dsh-idle-hook/test/host-core.test.mjs` 全绿（36 项）——触发矩阵、解释器映射、参数/占位符/工作目录、上下文与隐私边界、presence 三档、去抖、失败计数、历史滚动，以及**真子进程**执行/超时杀/非零退出/解释器缺失
+- [ ] 0.1 [A] `node sub-plugins/dsh-idle-hook/test/host-core.test.mjs` 全绿（51 项）——触发矩阵、解释器映射、参数/占位符/工作目录、上下文与隐私边界、presence 三档、去抖、失败计数、历史滚动，以及**真子进程**执行/超时杀/非零退出/解释器缺失
 - [ ] 0.2 [A] `node sub-plugins/dsh-idle-hook/test/bundle.test.mjs` 全绿（22 项）——bundle id、`settings.localPlugins.tab` 注册（id/order/label）、规则渲染、总开关写入、规则保存、试跑、心跳、历史面板、宿主半零 core import 护栏、两个瀑布 prepend + `return next()`
 - [ ] 0.3 [A] `node --check sub-plugins/dsh-idle-hook/src/{index,client,host-core}.js` 无语法错误
 - [ ] 0.4 [A] `grep -c "from '@deepseek-ai/" sub-plugins/dsh-idle-hook/src/index.js` 为 0（宿主半零 core import 铁律）
@@ -85,3 +85,11 @@
 
 - [ ] 9.1 [B] 长回合里模型频繁停下又继续时，通知不会刷屏（去抖 + 边沿语义共同作用）
 - [ ] 9.2 [B] 停用插件后宿主半立即停止触发（无需重启）；刷新页面后界面消失
+
+## 10. 0.2.0 设置路线（entry-config）
+
+0.2.0 退役了 `settings.installSection`，命名空间改为「profile 条目 id」并投影条目自身导出的 `Config`；命中时 `/status` 的 `settings.source === 'entry-config'`。
+
+- [ ] 10.1 [B] 0.2.0：设置 → 本地插件 →「空闲通知」**不再出现红框** `No configurable plugin entry "idle-hook"`；顶部不再显示「设置服务不可用」；`GET /__idle-hook/status` 的 `settings.ready === true` 且 `settings.source === 'entry-config'`
+- [ ] 10.2 [B] 0.2.0：面板里新增/编辑一条规则 → 保存 → 刷新页面规则仍在；profile `cordis.patch.yml` 的 `- id: idle-hook` 行出现 `config:`（含 `rules`），写入后该条目重启一次（状态端点短暂 5xx 属正常）
+- [ ] 10.3 [B] 0.1.x 回归：`settings.source === 'section'`，规则仍落在 `settings.yaml` 的 `idle-hook:` 段，面板行为不变

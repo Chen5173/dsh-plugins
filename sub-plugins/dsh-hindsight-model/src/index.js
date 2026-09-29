@@ -199,6 +199,20 @@ export function createDshReader(ctx) {
     }
   }
 
+  /**
+   * 读一个设置命名空间的值：0.1.x 走 `settings.get(ns)`；0.2.0 的设置服务没有 `get`，
+   * 改从 `describe()` 的条目列表里按 ns 取 `value`（0.2.0 的 ns 就是条目 id）。
+   */
+  function readSettingsNamespace(settings, ns) {
+    if (typeof settings.get === 'function') return settings.get(ns)
+    if (typeof settings.describe === 'function') {
+      const rows = settings.describe() || []
+      const row = Array.isArray(rows) ? rows.find((candidate) => candidate && candidate.ns === ns) : undefined
+      return row ? row.value : undefined
+    }
+    return undefined
+  }
+
   function routeOf(provider) {
     const llm = get('llm')
     const settings = get('settings')
@@ -212,7 +226,7 @@ export function createDshReader(ctx) {
     if (!entry) return null
     let node
     try {
-      node = settings.get(entry.settingsNs)
+      node = readSettingsNamespace(settings, entry.settingsNs)
     } catch {
       return null
     }
@@ -504,6 +518,47 @@ function fallbackSectionSchema(field, fallback) {
 }
 
 /**
+ * 0.2.0 条目配置：本插件的 profile 行就是设置命名空间（ns = 条目 id）。
+ *
+ * 0.2.0 退役了 `settings.installSection` / `register`；设置服务改为投影条目自己导出的
+ * `Config`，对其它 ns 抛 `No configurable plugin entry`。link: 宿主半解析不到
+ * `@deepseek-ai/schemastery`，schema 手写（同 dsh-idle-hook / dsh-esc-rewind）：
+ * `~standard.validate` 给 cordis、`meta.volatile` + 真实 refs 表 `toJSON()` 给设置服务、
+ * `~standard.vendor` 故意不叫 schemastery（让写配置走条目重启，apply 拿到新值）。
+ */
+const CONFIG_SCHEMA_JSON = Object.freeze({"uid":7,"refs":{"5":{"type":"boolean","meta":{"default":true}},"7":{"type":"object","meta":{"default":{},"volatile":true},"dict":{"autoStart":5}}}})
+
+/** 归一化条目配置：只认领 autoStart，其余键原样保留。 */
+export function normalizeEntryConfig(input) {
+  const source = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {}
+  const raw = source[AUTO_FIELD]
+  return Object.assign({}, source, { [AUTO_FIELD]: typeof raw === 'boolean' ? raw : AUTO_DEFAULT })
+}
+
+/** 导出给 loader / 设置服务。 */
+function entryConfigSchema() {
+  const schema = (input) => normalizeEntryConfig(input)
+  schema.meta = { volatile: true }
+  schema.type = 'object'
+  schema.toJSON = () => JSON.parse(JSON.stringify(CONFIG_SCHEMA_JSON))
+  schema['~standard'] = {
+    version: 1,
+    vendor: 'dsh-hindsight-model',
+    validate(value) {
+      try { return { value: normalizeEntryConfig(value) } }
+      catch (error) { return { issues: [{ message: (error && error.message) ? error.message : String(error) }] } }
+    },
+  }
+  return schema
+}
+
+/** 本插件在 profile 里的条目 id（管理器按目录名去掉 dsh- 前缀写入）。 */
+export const ENTRY_ID = 'hindsight-model'
+
+/** 导出的 Config。 */
+export const Config = entryConfigSchema()
+
+/**
  * Register this plugin's settings namespace and keep a writable handle on it.
  *
  * The real API matters here: `installSection()` registers the namespace (what
@@ -521,9 +576,62 @@ function fallbackSectionSchema(field, fallback) {
 /** Survives an HMR re-apply: `register()` fails loud on a duplicate namespace. */
 let autoScope = null
 
+/** 最近一次 apply(ctx, config) 拿到的条目配置（0.2.0；写配置会重启条目并刷新它）。 */
+let latestEntryConfig = null
+
+/**
+ * 0.2.0 条目配置路线：读 = apply 时的 Config，写 = `settings.update(条目 id, patch)`
+ * （写下去会让条目重启，apply 再跑一次并刷新 latestEntryConfig）。
+ * 命名空间必须是条目 id，否则核心抛 No configurable plugin entry —— 我们的 Config
+ * 导出正是为了让这一行成为「可配置条目」。
+ */
+function wireEntryConfig(bridge, settings) {
+  HOST_DIAG.schemaSource = 'entry-config'
+  bridge.read = () => {
+    const config = latestEntryConfig
+    const raw = config && typeof config === 'object' ? config[AUTO_FIELD] : undefined
+    return typeof raw === 'boolean' ? raw : undefined
+  }
+  bridge.write = async (value) => {
+    try {
+      await settings.update(ENTRY_ID, { [AUTO_FIELD]: value })
+      HOST_DIAG.autoStartValue = value
+      HOST_DIAG.settingsSectionRegistered = true
+      HOST_DIAG.settingsSectionError = null
+      return { ok: true }
+    } catch (error) {
+      const message = String((error && error.message) || error)
+      HOST_DIAG.settingsSectionError = message
+      return { ok: false, error: message }
+    }
+  }
+  // 诚实上报：条目真的出现在 describe() 里才算「命名空间已注册」。
+  try {
+    const rows = settings.describe() || []
+    const row = Array.isArray(rows) ? rows.find((candidate) => candidate && candidate.ns === ENTRY_ID) : undefined
+    if (row) {
+      HOST_DIAG.settingsSectionRegistered = true
+      HOST_DIAG.settingsSectionError = null
+      const raw = row.value && typeof row.value === 'object' ? row.value[AUTO_FIELD] : undefined
+      if (typeof raw === 'boolean') HOST_DIAG.autoStartValue = raw
+    } else {
+      HOST_DIAG.settingsSectionError = `entry "${ENTRY_ID}" is not configurable yet`
+    }
+  } catch (error) {
+    HOST_DIAG.settingsSectionError = String((error && error.message) || error)
+  }
+}
+
 function attachAutoSettings(ctx, bridge, settings) {
   if (!settings) {
     HOST_DIAG.settingsSectionError = 'settings-service-unavailable'
+    return
+  }
+  // 0.2.0：既没有 installSection 也没有 register —— 条目自身的 Config 就是命名空间，
+  // 写走设置服务的条目配置 API（host 侧），读用 apply 时解析出的值。
+  if (typeof settings.installSection !== 'function' && typeof settings.register !== 'function'
+    && typeof settings.update === 'function' && typeof settings.describe === 'function') {
+    wireEntryConfig(bridge, settings)
     return
   }
   const wireScope = (scope) => {
@@ -620,7 +728,9 @@ function createAutoBridge() {
   }
 }
 
-export function apply(ctx) {
+export function apply(ctx, config) {
+  // 0.2.0：profile 行解析后的 Config（0.1.x 行上没有 config，此值为 null）。
+  latestEntryConfig = (config && typeof config === 'object' && !Array.isArray(config)) ? config : null
   const bridge = createAutoBridge()
   const deps = filesystemDeps()
   deps.readAutoStart = () => bridge.read()

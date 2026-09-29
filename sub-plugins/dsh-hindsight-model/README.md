@@ -71,6 +71,11 @@ Hindsight（Vectorize 的长期记忆层）虽然以 DSH 插件形式装入，�
 
 ## 已知行为与能力边界
 
+### 0.2.0 起的两条路线（能力探测，两代同一份代码）
+
+- **自动启动开关**：0.1.x 走 `settings.register`/`installSection` 注册命名空间；**0.2.0 退役了这两个 API**，命名空间就是本插件的 profile 条目，因此宿主半导出 `Config`（`autoStart`）让该条目成为「可配置条目」——读 = `apply(ctx, config)`，写 = `settings.update(条目 id, …)`（随后条目重启、apply 再跑一次）。设置页与面板改的是同一个键。
+- **读 DSH 的 key/model**：0.1.x 用 `settings.get(ns)`；0.2.0 的设置服务没有 `get`，改为 `describe()` 按 ns 取 `value` 再沿 `llm.listConfigurableProviders()` 给的 `settingsPath` 下钻（0.2.0 的 ns 就是条目 id）。取不到时如实降级为 `available:false` 并写明缺哪一段，绝不猜。
+
 - **上游会整体重写 `.env`**：任何经过官方启动路径的动作都会 `write_text(render_config(...))` 重建该文件，且**只把「传入配置里有的键」写成活动行**。本插件的行级写入依赖「启动路径会把既有非小写键带过去」这一点存活；**外层存在同名键、或官方插件用残缺配置走了一次 `profile create --merge` 时，你的键会丢**——这正是面板要把 ③ 列出来的原因。别把它当插件 bug。
 - **官方插件的自动拉起在本机不生效**：它的 `preflightDaemon()` 里 `detectLlm()` 只认宿主进程 env 的 `HINDSIGHT_API_LLM_PROVIDER` / `OPENAI_API_KEY` / … 或 `which claude`（Windows 上没有 `which`），而你的 provider 写在 profile `.env` 里，于是它每次只记一条 `daemon_no_llm` 就返回。**即使把那份 env 补给它也不建议**：它的启动器那条 `spawn(uv)` 没做窗口隐藏（实测会新开一个 `conhost`），并且 `daemonEnv()` 会把宿主 env 里所有 `HINDSIGHT_API_*` 交给 `profile create --merge` 写回 profile——等于让「外层 env 会赢」。**自动启动现在归本插件**（见上文），它走同一条被净化、不碰 `profile create` 的命令；官方那条不动也无妨，已健康就采纳。
 - **只跟随一个 profile**：`coding-agent.json` 里的 `daemonProfile`；不做多 profile 切换，**也不做**开机自启（Windows 服务 / 任务计划）或崩溃监护。

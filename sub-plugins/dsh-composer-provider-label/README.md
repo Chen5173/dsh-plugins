@@ -66,7 +66,7 @@ composer 工具行右侧组、**模型选择器左边一格**：`[…] [provider
 
 ## 名字从哪来（优先级）
 
-1. **settings 里的别名**：`dsh-composer-provider-label.providerAliases` 中用户写的短名；
+1. **settings 里的别名**：`providerAliases` 中用户写的短名。命名空间随世代不同——**0.2.0 起是条目 id `composer-provider-label`**（设置服务投影条目自身的 `Config`），0.1.x 是声明段 `dsh-composer-provider-label`（客户端两个都认）；
 2. **内置表**：只预置 `deepseek-official → office`（官方 provider 的注册显示名硬编码为 `DeepSeek`，太泛，所以内置一个覆盖）；
 3. **注册显示名**（目录里 `group.name`，即 settings 里该 provider 的 `displayName`），**剪掉尾部括号段**——`ARK (Coding Plan)` 显示为 `ARK`，完整名留在 tooltip；
 4. 都拿不到 → 显示 provider **id**（如 `codemaker` 没配 displayName 时就是 `codemaker`）。
@@ -80,7 +80,9 @@ dsh-composer-provider-label:
     deepseek-official: DeepSeek  # 改掉内置的 office
 ```
 
-> **已知限制**：settings 段只有在宿主半能解析到 `@deepseek-ai/schemastery` 时才会注册；在本地 `link:` 安装形态下解析不到（仓库祖先链上没有 `node_modules`），此时 `providerAliases` **不生效**，插件只用内置别名（`office`）。这是宿主半的加载形态限制，不是配置写错。
+> **两代落点**：
+> - **0.2.0 起**：别名写进 profile 里本插件条目的 `config:` 段（`providerAliases`）——宿主半导出**手写 `Config`**（`~standard` + `meta.volatile` + 真实 schemastery refs 表 `toJSON()`），条目因此成为「可配置条目」，客户端按 ns `composer-provider-label` 读到它。
+> - **0.1.x**：仍旧走 `settings.installSection` 声明的 `dsh-composer-provider-label` 段；该段只有在宿主半能**动态**解析到 `@deepseek-ai/schemastery` 时才注册，本地 `link:` 安装解析不到（仓库祖先链上没有 `node_modules`）⇒ 此时 `providerAliases` 不生效，插件只用内置别名（`office`）。这是加载形态限制，不是配置写错；0.2.0 的手写 schema 已经不受它限制。
 
 ## 行为
 
@@ -137,12 +139,12 @@ tooltip 文案跟随客户端语言（zh/en）；标签文本是 provider 名字
 ## 开发
 
 ```bash
-node sub-plugins/dsh-composer-provider-label/test/bundle.test.mjs   # 51 条逻辑断言 + 能力审计
+node sub-plugins/dsh-composer-provider-label/test/bundle.test.mjs   # 55 条逻辑断言 + 能力审计
 node --check sub-plugins/dsh-composer-provider-label/src/index.js
 node --check sub-plugins/dsh-composer-provider-label/src/client.js
 ```
 
-51 条断言覆盖：bundle 注册协议、槽位 id/order、locale 字典、四条路由场景（显式 / 沿用 / 默认 / 无路由）、括号剪裁、office 内置别名、settings 别名覆盖与三种失败回退、三个刷新信号、zh/en、纯函数单测、client 与 node 内置表一致性、node 半空安全；以及本轮扩展：菜单开关与零副作用、根层/提供方层/模型层内容与顺序、失败项置灰、未广告的当前提供方合成行、四种选模型规则（保留 / 默认优先 / 第一个 / effort 继承）、选完自动进入模型层、显示范围切换与 localStorage 持久化、空态与一键切回、写入参数形状、忙碌态、拒绝写入的错误态、子代理会话禁用、目录失败的重试入口、缺 `Menu` 时的只读降级，以及**能力审计**（`selectModel` 只允许一个调用点，其余改状态 Remote 与 settings 写入一律禁止）。GUI 侧的视觉/布局/主题/真实安装见 [ACCEPTANCE.md](./ACCEPTANCE.md)。
+55 条断言覆盖：bundle 注册协议、槽位 id/order、locale 字典、四条路由场景（显式 / 沿用 / 默认 / 无路由）、括号剪裁、office 内置别名、settings 别名覆盖与三种失败回退、三个刷新信号、zh/en、纯函数单测、client 与 node 内置表一致性、node 半空安全；以及本轮扩展：菜单开关与零副作用、根层/提供方层/模型层内容与顺序、失败项置灰、未广告的当前提供方合成行、四种选模型规则（保留 / 默认优先 / 第一个 / effort 继承）、选完自动进入模型层、显示范围切换与 localStorage 持久化、空态与一键切回、写入参数形状、忙碌态、拒绝写入的错误态、子代理会话禁用、目录失败的重试入口、缺 `Menu` 时的只读降级，以及**能力审计**（`selectModel` 只允许一个调用点，其余改状态 Remote 与 settings 写入一律禁止）。GUI 侧的视觉/布局/主题/真实安装见 [ACCEPTANCE.md](./ACCEPTANCE.md)。
 
 ## License
 

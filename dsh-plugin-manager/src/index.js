@@ -173,6 +173,48 @@ function installSettingsSection(ctx, settings) {
     .catch(() => register(fallbackSectionSchema(AUTO_RELINK_FIELD, DEFAULT_AUTO_RELINK)))
 }
 
+
+/**
+ * 0.2.0 条目配置：插件自己的 profile 行就是设置命名空间。
+ *
+ * 0.2.0 退役了 `settings.installSection`；设置服务改为投影每个条目导出的 `Config`
+ * （ns = **条目 id**），对其它 ns 一律抛 `No configurable plugin entry`。link: 宿主半
+ * 解析不到 `@deepseek-ai/schemastery`（实测 ERR_MODULE_NOT_FOUND），所以 schema 手写：
+ *   - cordis `resolveConfig` → `Config[~standard].validate(raw)`；
+ *   - 设置服务 → `meta.volatile` + `toJSON()`（真实 schemastery 的 refs 表）；
+ *   - loader diff → `~standard.vendor`：**故意不叫 schemastery**，让写配置走普通路径
+ *     （条目重启 → apply(ctx, config) 拿到新值），而不是我们表达不了的 volatile 原地提交。
+ * 校验保持**宽松**：本行的 config 还带着 repoRoot/pluginsRoot/profile 等安装参数，
+ * 任何未声明的键都原样透传。
+ */
+const CONFIG_SCHEMA_JSON = Object.freeze({"uid":3,"refs":{"1":{"type":"boolean","meta":{"default":true}},"3":{"type":"object","meta":{"default":{},"volatile":true},"dict":{"autoRelink":1}}}})
+
+/** 归一化条目配置：只认领 autoRelink，其余键原样保留。 */
+export function normalizeEntryConfig(input) {
+  const source = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {}
+  const raw = source[AUTO_RELINK_FIELD]
+  return Object.assign({}, source, { [AUTO_RELINK_FIELD]: typeof raw === 'boolean' ? raw : DEFAULT_AUTO_RELINK })
+}
+
+/** 导出给 loader / 设置服务（见上面的块注释）。 */
+function entryConfigSchema() {
+  const schema = (input) => normalizeEntryConfig(input)
+  schema.meta = { volatile: true }
+  schema.type = 'object'
+  schema.toJSON = () => JSON.parse(JSON.stringify(CONFIG_SCHEMA_JSON))
+  schema['~standard'] = {
+    version: 1,
+    vendor: 'dsh-plugin-manager',
+    validate(value) {
+      try { return { value: normalizeEntryConfig(value) } }
+      catch (error) { return { issues: [{ message: (error && error.message) ? error.message : String(error) }] } }
+    },
+  }
+  return schema
+}
+
+/** 导出的 Config（loader 读 runtime.Config；设置服务据此把本行变成可配置条目）。 */
+export const Config = entryConfigSchema()
 // --- tiny HTTP helpers -------------------------------------------------------
 
 function sendJson(res, status, obj) {
@@ -1126,6 +1168,11 @@ function apply(ctx, config = {}) {
   const c0 = resolveContext(config, ctx && ctx.baseUrl)
   HOST_DIAG.profileName = c0.profileName
   HOST_DIAG.repoRoot = c0.repoRoot
+  // 0.2.0：条目 Config 里的开关值（0.1.x 的行没有 config，此分支不生效，仍走 installSection）。
+  if (config && typeof config[AUTO_RELINK_FIELD] === 'boolean') {
+    __autoRelink = config[AUTO_RELINK_FIELD] !== false
+    HOST_DIAG.autoRelinkEnabled = __autoRelink
+  }
 
   // Settings section (optional): the automatic stale-link relink switch.
   const settings = typeof ctx.get === 'function' ? ctx.get('settings') : null

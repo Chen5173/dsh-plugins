@@ -50,14 +50,130 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
-    // Toast is an optional affordance: if the primitives package is absent we
-    // degrade to silent handling, never a crash.
-    var Toast = null
+    // --- self-owned controls (0.2.0 contract: no host client package imports) ---
+    // The 0.2.0 module table refuses require() of a package that is not a boot
+    // row ("runtime mirror of the bundle purity gate"). @deepseek-ai/dsh-client-ui-primitives
+    // is not guaranteed to be a row on a 0.2.0 profile, so the primitives
+    // import below is OPTIONAL: when it resolves (pre-0.2.0 installs) it wins,
+    // otherwise the plugin renders with its own token-based controls mirroring
+    // the host look (copied minimal from the primitives' 0.2.0 sources).
+    var _uc_primitives = null
     try {
-      Toast = require('@deepseek-ai/dsh-client-ui-primitives').Toast || null
-    } catch {
-      Toast = null
+      _uc_primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+    } catch { _uc_primitives = null }
+
+    /** Inline SVG icon factory (16x16 currentColor, host style). */
+    function _ucIcon(pathD, size) {
+      return React.createElement('svg', {
+        width: size || 16, height: size || 16, viewBox: '0 0 16 16',
+        fill: 'none', xmlns: 'http://www.w3.org/2000/svg',
+        style: { flex: 'none', display: 'inline-block', verticalAlign: 'middle' },
+        'aria-hidden': true,
+      }, React.createElement('path', { d: pathD, fill: 'currentColor' }))
     }
+    const uIconRefresh = (p) => _ucIcon('M7.92136 0.349152C10.3744 0.349234 12.5564 1.5052 13.9557 3.29894L15.1281 2.12759C15.3303 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8854 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98908 1.74106 7.92136 1.74097C4.46436 1.74097 1.66233 4.543 1.66233 8C1.66233 11.457 4.46436 14.259 7.92136 14.259C11.3782 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92136 15.6508C3.69614 15.6508 0.270508 12.2252 0.270508 8C0.270508 3.77478 3.69614 0.349152 7.92136 0.349152Z', p && p.size)
+    const uIconCheck = (p) => _ucIcon('M13.5 3.5L6.5 12.5L2.5 8', p && p.size)
+    const uIconWarning = (p) => _ucIcon('M8 1.5L15 14H1L8 1.5ZM8 6V9.5M8 11.5V11.6', p && p.size)
+    const uIconClose = (p) => _ucIcon('M4 4L12 12M12 4L4 12', p && p.size)
+    const uIconCopy = (p) => _ucIcon('M5.5 5.5H12.5V12.5H5.5V5.5ZM3.5 10.5V3.5H10.5', p && p.size)
+    const uIconFolderOpen = (p) => _ucIcon('M1.5 4H6L7.5 5.5H14.5V12.5H1.5V4ZM1.5 6.5V12.5L4 7.5H14.5', p && p.size)
+    const uIconLoading = (p) => _ucIcon('M8 1.5V4M8 12V14.5M1.5 8H4M12 8H14.5M3.4 3.4L5.2 5.2M10.8 10.8L12.6 12.6M12.6 3.4L10.8 5.2M5.2 10.8L3.4 12.6', p && p.size)
+    const uIconChevronDown = (p) => _ucIcon('M3 5.5L8 10.5L13 5.5', p && p.size)
+    const uIconCheckCircle = (p) => _ucIcon('M8 1.5C11.59 1.5 14.5 4.41 14.5 8C14.5 11.59 11.59 14.5 8 14.5C4.41 14.5 1.5 11.59 1.5 8C1.5 4.41 4.41 1.5 8 1.5ZM5.5 8L7.2 9.7L10.5 6.5', p && p.size)
+    const IconRefreshOutline16 = uIconRefresh
+    const IconCheckOutline16 = uIconCheck
+    const IconWarningOutline16 = uIconWarning
+    const IconCloseOutline16 = uIconClose
+    const IconCopyOutline16 = uIconCopy
+    const IconFolderOpenOutline16 = uIconFolderOpen
+    const IconLoadingOutline16 = uIconLoading
+    const IconChevronDownOutline14 = uIconChevronDown
+    const IconCheckCircleOutlineRegular = uIconCheckCircle
+
+    /** Self-owned Toast: top-center banner mirroring the primitives surface. */
+    function UcToast({ text, icon, tone, onDone, holdMs }) {
+      const latestOnDone = React.useRef(onDone)
+      React.useLayoutEffect(() => { latestOnDone.current = onDone }, [onDone])
+      React.useEffect(() => {
+        const timer = setTimeout(() => { try { latestOnDone.current() } catch { /* noop */ } }, (holdMs || 3000) + 1000)
+        return () => { clearTimeout(timer) }
+      }, [holdMs])
+      const portal = (typeof document !== 'undefined' && typeof ReactDOM !== 'undefined' && ReactDOM.createPortal)
+        ? ReactDOM.createPortal : null
+      const el = React.createElement('div', {
+        role: 'alert',
+        style: {
+          position: 'fixed', top: 40, left: '50%', zIndex: 1100, pointerEvents: 'none',
+          display: 'flex', alignItems: 'center', gap: 10, width: 'max-content',
+          maxWidth: 'min(640px, calc(100vw - 48px))', padding: '12px 16px',
+          borderRadius: 'var(--dsw-radius-lg)',
+          background: 'var(--dsw-alias-toast-bg)', color: 'var(--dsw-alias-toast-label)',
+          fontSize: 14, lineHeight: '22px', boxShadow: 'var(--dsw-shadow-lv3)',
+          transform: 'translateX(-50%)', opacity: 1,
+        },
+      }, [
+        tone === 'success'
+          ? React.createElement('span', { key: 'i', style: { display: 'grid', placeItems: 'center', flex: 'none', color: 'var(--dsw-alias-state-success-primary)' }, 'aria-hidden': true },
+            React.createElement(IconCheckCircleOutlineRegular, { size: 16 }))
+          : (icon !== undefined && icon !== null
+            ? React.createElement('span', { key: 'i', style: { display: 'grid', placeItems: 'center', flex: 'none', color: 'var(--dsw-alias-state-warn-label)' }, 'aria-hidden': true }, icon)
+            : null),
+        React.createElement('span', { key: 't', style: { minWidth: 0 } }, text),
+      ])
+      return portal ? portal(el, document.body) : el
+    }
+
+    /** Self-owned Tooltip: hover bubble; children's handlers are chained. */
+    function UcTooltip({ label, side, delayMs, children }) {
+      const [pos, setPos] = React.useState(null)
+      const anchor = React.useRef(null)
+      const timer = React.useRef(null)
+      const side_ = side || 'top'
+      const show = () => {
+        const el = anchor.current
+        if (!el) return
+        const r = el.getBoundingClientRect()
+        let left = r.left + r.width / 2
+        let top = r.top - 8
+        if (side_ === 'bottom') top = r.bottom + 8
+        setPos({ left, top })
+      }
+      const delayed = (fn) => {
+        if (timer.current) clearTimeout(timer.current)
+        timer.current = setTimeout(fn, delayMs || 0)
+      }
+      React.useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
+      const child = React.Children.only(children)
+      return React.createElement(React.Fragment, null, [
+        React.cloneElement(child, {
+          ref: (el) => { anchor.current = el; if (typeof child.ref === 'function') child.ref(el) },
+          onMouseEnter: (e) => { if (child.props.onMouseEnter) child.props.onMouseEnter(e); delayed(show) },
+          onMouseLeave: (e) => { if (child.props.onMouseLeave) child.props.onMouseLeave(e); if (timer.current) clearTimeout(timer.current); setPos(null) },
+          onFocus: (e) => { if (child.props.onFocus) child.props.onFocus(e); delayed(show) },
+          onBlur: (e) => { if (child.props.onBlur) child.props.onBlur(e); if (timer.current) clearTimeout(timer.current); setPos(null) },
+        }),
+        pos === null ? null : React.createElement('span', {
+          role: 'tooltip',
+          style: {
+            position: 'fixed', left: pos.left, top: pos.top, zIndex: 1200,
+            transform: side_ === 'bottom' ? 'translateX(-50%)' : 'translateX(-50%) translateY(-100%)',
+            padding: '4px 8px', borderRadius: 'var(--dsw-radius-md)',
+            background: 'var(--dsw-alias-tooltip-bg)', color: 'var(--dsw-alias-tooltip-label)',
+            fontSize: 12, lineHeight: '16px', whiteSpace: 'nowrap',
+            boxShadow: 'var(--dsw-shadow-lv2)', pointerEvents: 'none',
+          },
+        }, typeof label === 'function' ? label() : label),
+      ])
+    }
+
+    /** Resolve the shared controls: prefer the primitives row (pre-0.2.0), else self-owned. */
+    const Toast = (_uc_primitives && _uc_primitives.Toast) || UcToast
+    const Tooltip = (_uc_primitives && _uc_primitives.Tooltip) || UcTooltip
+    const Menu = (_uc_primitives && _uc_primitives.Menu) || null
+    const writeClipboard = (_uc_primitives && _uc_primitives.writeClipboard) || (async (text) => {
+      try { await navigator.clipboard.writeText(text); return { ok: true } } catch (e) { return { ok: false, error: e } }
+    })
+
 
     const SLOT = 'conversation.input.overlay'
     const ROW_ID = 'esc-rewind'
@@ -212,6 +328,8 @@ window.__ModuleLoader__.load({
       inboxProjectionSeen: false,
       titleFail: null,
       archiveFail: null,
+      /** 归档是否走了「停止并归档」重试（0.2.0 的会话仍活跃拒绝）。 */
+      archiveStopActivity: false,
       deleteFail: null,
       settingsReadFail: null,
       deleteMode: false,
@@ -250,6 +368,7 @@ window.__ModuleLoader__.load({
       'dispose.error': '切换失败：{msg}',
       'rewind.deleted': '旧会话已删除',
       'rewind.delete.fail': '删除失败，已改为归档',
+      'rewind.archive.fail': '旧会话归档失败：{msg}（它仍留在列表里）',
       'rewind.subagents': '该会话还有 {n} 个子代理（运行中 {r}），已改为归档（不删除）',
       'rewind.subagents.unknown': '读不到该会话的子代理状态，已改为归档（不删除）：{msg}',
       'orphans.tab': '子代理',
@@ -305,6 +424,7 @@ window.__ModuleLoader__.load({
       'dispose.error': 'Switch failed: {msg}',
       'rewind.deleted': 'Old session deleted',
       'rewind.delete.fail': 'Delete failed — archived instead',
+      'rewind.archive.fail': 'Failed to archive the old session: {msg} (it stays in the list)',
       'rewind.subagents': 'Old session still owns {n} subagent(s) ({r} running) — archived instead of deleted',
       'rewind.subagents.unknown': 'Subagent state unreadable — archived instead of deleted: {msg}',
       'orphans.tab': 'Subagents',
@@ -1256,8 +1376,11 @@ window.__ModuleLoader__.load({
           if (deleteModeOn()) {
             await deleteOldSession(sessionId)
           } else {
-            try { await workspaces.archiveSession(sessionId) } catch (error) {
-              __diag.archiveFail = (error && error.message) ? error.message : String(error)
+            // 0.2.0 起 archiveSession 返回 RemoteResult 且默认拒绝「仍活跃」的会话，
+            // 旧的 try/catch 写法会静默失败 —— 见 archiveOldSession 的桥接。
+            const archived = await archiveOldSession(sessionId)
+            if (!archived.ok) {
+              publishToast(__t('rewind.archive.fail', { msg: archived.message || archived.code || 'unknown' }))
             }
           }
           __diag.rewinds += 1
@@ -1461,6 +1584,63 @@ window.__ModuleLoader__.load({
      * log is the single handle it has — and that refusal gets its own toast.
      * Returns { deleted, archived, blocked } — blocked carries the host reason.
      */
+    /**
+     * 归档原会话（回退的默认处置）。
+     *
+     * 0.2.0 的两处契约变化，0.1.x 的写法（只 catch 异常）在 0.2.0 上会**静默失败**：
+     *   1. `workspaces.archiveSession(id, options?)` 返回 RemoteResult
+     *      （`{ok:true,value}` / `{ok:false,error}`），**被拒绝时不抛异常** ——
+     *      只 catch 不检查返回值 = 归档没发生却当成功；
+     *   2. 仍有运行中工作的会话默认被拒绝（`WorkspaceActiveSessionError` →
+     *      `workspace/session-active`），要带 `{ stopActivity: true }` 才会
+     *      「停止并归档」—— 与核心「归档会话」确认框的 stopAndArchiveSession 同款语义。
+     * 回退本来就是要放弃原会话，所以命中「仍活跃」时补一次 stopActivity 重试；
+     * 其余拒绝如实记录并让调用方提示，绝不静默。
+     * - 参数类型：sessionId -- string：被回退的原会话。
+     * - 返回值：Promise<{ok, code, message, stopped}>；stopped 表示走了重试。
+     * - 调用样例：const archived = await archiveOldSession('session-…')
+     */
+    async function archiveOldSession(sessionId) {
+      const workspaces = __svc.workspaces
+      if (!workspaces || typeof workspaces.archiveSession !== 'function') {
+        return { ok: false, code: 'archive-unavailable', message: null, stopped: false }
+      }
+      const attempt = async (options) => {
+        const result = options === undefined
+          ? await workspaces.archiveSession(sessionId)
+          : await workspaces.archiveSession(sessionId, options)
+        // 0.2.0：拒绝走返回值；0.1.x：旧实现直接抛（下方 catch 同一处理）。
+        if (result && typeof result === 'object' && 'ok' in result && result.ok === false) {
+          const failure = new Error(String((result.error && (result.error.message || result.error.code)) || 'archive-failed'))
+          failure.code = (result.error && result.error.code) || null
+          throw failure
+        }
+        return result
+      }
+      try {
+        await attempt(undefined)
+        __diag.archiveFail = null
+        __diag.archiveStopActivity = false
+        return { ok: true, code: null, message: null, stopped: false }
+      } catch (error) {
+        const code = (error && error.code) || null
+        const message = (error && error.message) ? String(error.message) : String(error)
+        const active = code === 'workspace/session-active' || /session-active|running work/i.test(message)
+        if (!active) {
+          __diag.archiveFail = message
+          return { ok: false, code, message, stopped: false }
+        }
+        try {
+          await attempt({ stopActivity: true })
+          __diag.archiveFail = null
+          __diag.archiveStopActivity = true
+          return { ok: true, code: null, message: null, stopped: true }
+        } catch (retryError) {
+          __diag.archiveFail = (retryError && retryError.message) ? String(retryError.message) : String(retryError)
+          return { ok: false, code: (retryError && retryError.code) || null, message: __diag.archiveFail, stopped: false }
+        }
+      }
+    }
     async function deleteOldSession(sessionId) {
       let deleted = false
       let blocked = null
@@ -1500,16 +1680,8 @@ window.__ModuleLoader__.load({
         return { deleted: true, archived: false, blocked: null }
       }
       // Degrade: keep the old session recoverable instead of leaving a half state.
-      let archived = false
-      try {
-        const workspaces = __svc.workspaces
-        if (workspaces && typeof workspaces.archiveSession === 'function') {
-          await workspaces.archiveSession(sessionId)
-          archived = true
-        }
-      } catch (error) {
-        __diag.archiveFail = (error && error.message) ? error.message : String(error)
-      }
+      const fallback = await archiveOldSession(sessionId)
+      const archived = fallback.ok
       if (blocked && blocked.reason === REASON_SUBAGENTS) {
         publishToast(__t('rewind.subagents', { n: blocked.children, r: blocked.running }))
       } else if (blocked && blocked.reason === REASON_SUBAGENTS_UNKNOWN) {
@@ -2486,7 +2658,7 @@ window.__ModuleLoader__.load({
             publishToast, doRewind, issueStop, ensureIdle, clearQueue,
             settlePendingInputs, pendingInputsOf, armPendingRestore, clearPendingRestore,
             probeCoreGeneration, markModernCore, sessionSnapshotOf,
-            createDraftAttachments, releaseDraftAttachment, restoreDraftAttachments,
+            createDraftAttachments, releaseDraftAttachment, restoreDraftAttachments, archiveOldSession,
             exchangesOfSession, isSubagentSession, sessionFacts,
             refreshHistory, knownExchangesOf, resetHistoryCache,
             loadDeleteMode, setDeleteMode, deleteOldSession, deleteModeOn,

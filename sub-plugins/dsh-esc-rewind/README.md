@@ -27,7 +27,7 @@
 | 子代理（subagent）会话 | 不提供回退；会话头也不显示处置开关 |
 | 空白（blank）会话 | 会话头不显示处置开关 |
 | 停止时在排队中的消息 | 回退时一并清掉（`updateQueue remove`） |
-| **处置开关（会话头右侧图标排）** | 档案柜=归档（默认）⇄ 红色带叉垃圾桶=删除，单击切换；**全局偏好**，经 settings 命名空间 `esc-rewind.deleteOldOnRewind` 持久化（设置页可见），所有普通会话的回退都按它处置旧会话 |
+| **处置开关（会话头右侧图标排）** | 档案柜=归档（默认）⇄ 红色带叉垃圾桶=删除，单击切换；**全局偏好**，经 settings 命名空间 `esc-rewind.deleteOldOnRewind` 持久化（设置页可见），所有普通会话的回退都按它处置旧会话。**0.2.0 起归档是「停止并归档」**：`workspaces.archiveSession` 返回 Result 且对仍有运行中工作的会话默认拒绝，插件桥接为「被拒即带 `stopActivity: true` 重试一次」，最终失败会提示，绝不静默（诊断 `__dsew.archiveFail` / `archiveStopActivity`） |
 | 删除模式下回退 | 先 fork 并确认新分支打开可用，**然后**才真删旧会话；删除失败自动**降级为归档**并 toast「删除失败，已改为归档」；成功 toast「旧会话已删除」 |
 | 删除模式与既有删除按钮 | 本开关图标带叉/红色警示，语义是“下次回退时处理旧会话”，与 chameleon「删除当前会话」的普通垃圾桶视觉可区分 |
 
@@ -43,7 +43,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 ## 删除模式（宿主半）
 
-- **settings**：node 半注册命名空间 `esc-rewind`，字段 `deleteOldOnRewind`（boolean，默认 `false`）。客户端经 `remote.settings.describe()` 读取、切换时 `update()` 写入；读取失败/缺字段一律回退 `false`（绝不因读不到配置而误开删除）。设置页可改（settings/document-updated 会即时刷新会话头图标）。
+- **settings**：命名空间 `esc-rewind`，字段 `deleteOldOnRewind`（boolean，默认 `false`）。**两代落点不同**：0.1.x 由 node 半 `settings.installSection` 注册（settings.yaml 的 `esc-rewind:` 段）；**0.2.0 退役了 installSection**，改为投影条目自身导出的 `Config`（命名空间 = 条目 id），因此 node 半导出一份手写 schema（`~standard` + `meta.volatile` + 真实 schemastery refs 表 `toJSON()`；`link:` 安装无法 import schemastery），写入走条目重启。客户端经 `remote.settings.describe()` 读取、切换时 `update()` 写入；读取失败/缺字段一律回退 `false`（绝不因读不到配置而误开删除）。设置页可改（settings/document-updated 会即时刷新会话头图标）。
 - **删除通道**（自建，无第三方依赖）：`webServer` 提供 `POST /__esc-rewind/session/delete`（校验 sessionId 格式与 POST 方法）；同时注册模型工具 `esc_rewind_session_delete`（terminal/edit-mode 可用）。`webServer`/`tools` 缺席时删除通道不可用，客户端自动降级归档。
 - **只读诊断端点**：`GET /__esc-rewind/status` 回报宿主半健康度——`settingsSectionRegistered` / `settingsSectionError` / `deleteOldOnRewind`（当前删除模式）。非 GET 方法回 405。排查「图标点了没反应 / 删除模式像没生效」时先打它，判断的是宿主半有没有起来，不看会话内容。
 - **客户端诊断快照**：`window.__dsew`（门控计数、最后一次决策、删除模式位；不含消息内容）。
@@ -77,6 +77,8 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 - **还原时机的确定性（0.1.5-rc.2 起暴露）**：还原必须在 `sessions.open(childId)` **之前**武装（open 会立刻触发 React 提交，子会话的桥先挂载，那一刻读到的 `__pending` 还是 null；旧实现在 open 之后、且在一次可能 sleep 的 await 之后才武装 ⇒ 真机「回退后文字没回到输入框」）。另外挂载 effect 只按 `[sessionId, draft, inputActions]` 重跑，武装晚到时不会补跑 ⇒ 补了模块级武装通知（同 `__toastListeners` 套路）让已挂载的桥补跑一次；「一次回退只回填一次」用「已回填的会话 id」表达，而不是一次性布尔 ref（旧写法会让同页第二次回退永不回填）。诊断：`__dsew.pendingStaged / pendingApplied / pendingLateArm / pendingDropped`。
 
 - **最低**：核心 ≥ **0.1.2-rc.1**（本插件一直支持的世代）。缺能力时一律**降级而不是报错**，且把探测结果写进 `window.__dsew`。
+- **0.2.0 设置模型变更**：`settings.installSection` 退役，命名空间钉在**条目 id**（其它 ns 抛 `No configurable plugin entry`）。同一份代码两代都可用：0.1.x 走 installSection，0.2.0 走导出的 `Config`；`/status` 的 `settingsSource` 写明命中的是哪一种，`settingsSectionRegistered` 在 0.2.0 下同样为 true。
+- **0.2.0 归档契约变更**：`workspaces.archiveSession(id, options?)` 返回 `RemoteResult`（`{ok:false,error}`）**而不抛异常**，所以「只 catch 不查返回值」= 归档没发生却当成功（真机症状：回退后原会话仍在列表里、删除模式也没删）。同时它对**仍有运行中工作**的会话默认拒绝（`WorkspaceActiveSessionError` → `workspace/session-active`），需 `{ stopActivity: true }` 才「停止并归档」——与核心「归档会话」确认框同款。本插件的 `archiveOldSession` 桥接：先普通归档，命中「仍活跃」才补一次 stopActivity，其余拒绝如实进诊断并 toast。
 - **核心 ≥ 0.1.5-rc.2**：核心把「图片草稿」泛化为「附件草稿」并改名——`conversation.createDraftImages(files)` → `createDrafts(sessionId, files)`、`releaseDraftImage(id)` → `releaseDraftAttachment(id)`、`inputActions.addImages(ids)` → `addAttachments(ids)`。本插件**不读版本号**，按能力探测优先新名、回退旧名，两代同一份代码都可用；探测结果见 `__dsew.draftCreateApi` / `__dsew.draftRestoreApi`（`'createDrafts'` / `'createDraftImages'` / `null`）。
 - 其余用到的核心面（槽位 `conversation.input.overlay` / `conversation.session.header.actions`、`sessions.binding|fork|open|create`、`workspaces.archiveSession`、`commandUi.register`、`remote.settings`、`chat.legacy.nodes` 与 `chat.timeline`、宿主 `turn/end` 的 `aborted`/`user` 与 `assistant/message.interrupted`）在 0.1.2-rc.1 → 0.1.5-rc.2 之间**逐项核对无变化**（审计方法与结论见 `docs/knowledge/2026-09-12-dsh-015-core-api-compat-audit.md`）。
 

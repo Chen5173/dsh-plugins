@@ -528,6 +528,10 @@ export const HOST_DIAG = {
   settingsSectionRegistered: false,
   settingsSectionError: null,
   settingsValue: DEFAULT_DELETE_OLD,
+  /** Which generation supplied the section: 'section' (0.1.x) | 'entry-config' (0.2.0) | null. */
+  settingsSource: null,
+  /** The profile entry's resolved Config on 0.2.0 (undefined on 0.1.x, where the row carries none). */
+  entryConfig: null,
   /** Last subagent guard outcome (diagnostics / status probe). */
   lastGuard: null,
   /** Last orphan scan outcome (diagnostics / status probe). */
@@ -562,9 +566,60 @@ function fallbackSectionSchema(field, fallback) {
   return schema
 }
 
+/**
+ * 0.2.0 entry config: the plugin's own profile row IS the settings section.
+ *
+ * 0.2.0 retired `settings.installSection`; the settings service now projects each
+ * plugin entry's exported `Config` (schema.reads `entry.fiber.runtime.Config`)
+ * under the ENTRY ID, and refuses writes to anything else with
+ * `No configurable plugin entry "<ns>"`. A `link:` host half cannot import
+ * `@deepseek-ai/schemastery` (verified: ERR_MODULE_NOT_FOUND), so this schema is
+ * hand-rolled to satisfy the three consumers that exist:
+ *   - cordis `resolveConfig` → `Config[~standard].validate(raw)`;
+ *   - the settings service → `meta.volatile` (volatileForm) + `toJSON()`
+ *     (`plainSchema` rebuilds it with the real schemastery);
+ *   - the loader diff → `~standard.vendor`. The vendor is deliberately NOT
+ *     `schemastery`: `equalExceptVolatile` only treats a change as an in-place
+ *     volatile commit for real schemastery schemas, and our plain values carry no
+ *     Volatile references — leaving the vendor unclaimed makes a config write take
+ *     the ordinary path (entry restart) so `apply(ctx, config)` sees the new value.
+ * The refs table below is captured from the equivalent schemastery schema
+ * (`z.object({ deleteOldOnRewind: z.boolean().default(false) }).volatile().toJSON()`).
+ */
+const CONFIG_SCHEMA_JSON = Object.freeze({"uid":3,"refs":{"1":{"type":"boolean","meta":{"default":false}},"3":{"type":"object","meta":{"default":{},"volatile":true},"dict":{"deleteOldOnRewind":1}}}})
+
+/** Normalize one entry config value to `{ deleteOldOnRewind: boolean }`. */
+function normalizeEntryConfig(input) {
+  const source = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {}
+  const raw = source[SETTINGS_FIELD]
+  return Object.assign({}, source, { [SETTINGS_FIELD]: typeof raw === 'boolean' ? raw : DEFAULT_DELETE_OLD })
+}
+
+/** The Config exported to the loader/settings service (see the block comment above). */
+function entryConfigSchema() {
+  const schema = (input) => normalizeEntryConfig(input)
+  schema.meta = { volatile: true }
+  schema.type = 'object'
+  schema.toJSON = () => JSON.parse(JSON.stringify(CONFIG_SCHEMA_JSON))
+  schema['~standard'] = {
+    version: 1,
+    vendor: 'dsh-esc-rewind',
+    validate(value) {
+      try { return { value: normalizeEntryConfig(value) } }
+      catch (error) { return { issues: [{ message: (error && error.message) ? error.message : String(error) }] } }
+    },
+  }
+  return schema
+}
+
+/** Exported for the loader (0.2.0 entry config) and asserted by the test harness. */
+export const Config = entryConfigSchema()
+
 function installSettingsSection(ctx, settings) {
   if (!settings || typeof settings.installSection !== 'function') {
-    HOST_DIAG.settingsSectionError = 'settings-service-unavailable'
+    // 0.2.0 retired installSection; the profile entry's own Config is the
+    // section (adopted in apply). Report unavailability only when neither exists.
+    if (HOST_DIAG.settingsSource !== 'entry-config') HOST_DIAG.settingsSectionError = 'settings-service-unavailable'
     return
   }
   const register = (Config) => {
@@ -588,6 +643,7 @@ function installSettingsSection(ctx, settings) {
       },
     })
     HOST_DIAG.settingsSectionRegistered = true
+    HOST_DIAG.settingsSource = 'section'
   }
 
   // Preferred path: a real schemastery schema (proper settings-page rendering).
@@ -890,9 +946,20 @@ function registerOrphanTool(ctx, tools) {
 
 // --- plugin ------------------------------------------------------------------
 
-function apply(ctx) {
-  // Settings section (optional): register the delete-mode switch namespace.
+function apply(ctx, config) {
+  // 0.2.0 entry config: the profile row's resolved Config IS the delete-mode
+  // section. On 0.1.x the row carries no config, so entryConfig is null and the
+  // installSection path below stays authoritative.
+  const entryConfig = (config && typeof config === 'object' && !Array.isArray(config)) ? config : null
   const settings = typeof ctx.get === 'function' ? ctx.get('settings') : null
+  const sectionCapable = !!(settings && typeof settings.installSection === 'function')
+  if (entryConfig && !sectionCapable) {
+    HOST_DIAG.entryConfig = entryConfig
+    HOST_DIAG.settingsValue = entryConfig[SETTINGS_FIELD] === true
+    HOST_DIAG.settingsSectionRegistered = true
+    HOST_DIAG.settingsSectionError = null
+    HOST_DIAG.settingsSource = 'entry-config'
+  }
   if (settings !== undefined) {
     installSettingsSection(ctx, settings)
   } else {
@@ -932,4 +999,4 @@ function apply(ctx) {
   }
 }
 
-export { apply, inject, name, fallbackSectionSchema }
+export { apply, inject, name, fallbackSectionSchema, normalizeEntryConfig }

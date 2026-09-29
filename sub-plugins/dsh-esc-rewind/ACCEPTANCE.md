@@ -1,6 +1,6 @@
 # 验收清单 — dsh-esc-rewind
 
-逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关/子代理守卫、子代理回收（扫描/停止/找回/入口 tab）、提示时机的耐久证据判定、草稿附件双代桥接 0.1.2 旧名 ⇄ 0.1.5 新名、命令描述双契约、未落定输入三来源与还原时序（含子会话继承残留、晚武装补跑、同页二次回退））由 `test/bundle.test.mjs`（89 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
+逻辑层（bundle 契约、决策矩阵、交换点推导/锚点、/rewind 选项与选择、fork/归档/打开调用序列、首轮降级、pending 还原、删除模式策略/降级/开关/子代理守卫、子代理回收（扫描/停止/找回/入口 tab）、提示时机的耐久证据判定、草稿附件双代桥接 0.1.2 旧名 ⇄ 0.1.5 新名、命令描述双契约、未落定输入三来源与还原时序（含子会话继承残留、晚武装补跑、同页二次回退））由 `test/bundle.test.mjs`（93 条）自动覆盖。标 `[B]` 的必须在真实 GUI 人眼/手测。
 
 架构重点：**回退 = fork 分支 + 按开关处置原会话**（默认归档，append-only 日志无原地删除；删除模式经宿主半真删）；armed 是派生状态（running 或 尾部 interrupted + 草稿为空）。
 
@@ -17,6 +17,11 @@ dsh --dump-config --profile web | grep -n esc-rewind
 - [ ] 0.1 `[B]` 刷新/强刷 GUI 后 Console 无报错；`window.__dsew` 存在且 `applied:true`；核心一切如常
 - [ ] 0.2 `[B]` 会话输入框输入 `/` → 命令菜单出现 `rewind`（描述为中文/英文对应 locale）
 - [ ] 0.3 `[B]` **0.1.5-rc.2 上 /rewind 仍可用**：菜单里能找到并打开原生命令选择器；`window.__dsew.commandDescShape === 'function'`（旧核心上为 `'string'`，两者都不得报错）
+- [ ] 0.4 `[B]` **0.2.0 删除模式开关可用**：会话头垃圾桶/档案柜图标切换不再报 `No configurable plugin entry "esc-rewind"`（切换后 profile 的 `- id: esc-rewind` 行出现 `config.deleteOldOnRewind`）；`GET /__esc-rewind/status` 的 `settingsSource === 'entry-config'`、`settingsSectionRegistered === true`
+- [ ] 0.5 `[B]` **0.1.x 回归**：同一份代码下 `/status` 的 `settingsSource === 'section'`，开关仍写 `settings.yaml` 的 `esc-rewind:` 段
+- [ ] 0.6 `[B]` **0.2.0 归档真的发生**：回退一轮后，原会话从主列表消失（「全部对话（显示已归档）」里能找到）；`window.__dsew.archiveFail === null`；若日志出现 `archiveStopActivity: true` 说明走的是「停止并归档」重试（会话当时仍有运行中工作）
+- [ ] 0.7 `[B]` **0.2.0 删除模式真的删**：打开处置开关（垃圾桶图标）后回退 → 原会话 `~/.dsh/sessions/**/<id>` 目录消失、列表里不再出现；`window.__dsew.lastDelete.ok === true`、`deleteFail === null`；若被宿主拒绝（仍有子代理）会提示并降级归档，`__dsew.lastDelete.reason` 写明原因
+- [ ] 0.8 `[B]` **归档失败可见**（构造法：临时让 `workspaces.archiveSession` 返回 `{ok:false}`）→ 回退仍成功，但出现「旧会话归档失败：…」提示且 `__dsew.archiveFail` 非空——不得静默
 
 ## 1. Esc 停止
 

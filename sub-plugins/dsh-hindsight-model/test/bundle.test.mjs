@@ -2074,6 +2074,31 @@ test('host: an installSection-only service registers the namespace but leaves th
   assert.equal(hostIndex.HOST_DIAG.settingsSectionError, 'settings-scope-unavailable', 'and the panel is told why writes are off')
 })
 
+test('host: 0.2.0 条目配置路线 —— describe/update（无 register/installSection）⇒ 开关可写', async () => {
+  const writes = []
+  const settings = {
+    describe: () => [{ ns: 'hindsight-model', value: { autoStart: true }, revision: 0 }],
+    update: async (ns, patch) => { writes.push({ ns, patch }) },
+  }
+  const ctx = makeCtx({ services: { settings } })
+  assert.doesNotThrow(() => hostIndex.apply(ctx, { autoStart: false }))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(hostIndex.HOST_DIAG.schemaSource, 'entry-config', '命中 0.2.0 条目配置路线')
+  assert.equal(hostIndex.HOST_DIAG.settingsSectionRegistered, true, 'describe() 里查得到本条目 ⇒ 命名空间已注册')
+  assert.equal(hostIndex.HOST_DIAG.settingsSectionError, null)
+  assert.equal(hostIndex.HOST_DIAG.autoStartValue, true, '读到条目当前值')
+
+  const route = ctx._registered.find((row) => row.path === hostIndex.ROUTES.auto)
+  assert.ok(route, '/auto 路由已注册')
+  const ok = await callHandler(route.handler, 'POST', { enabled: false })
+  assert.deepEqual(writes[0], { ns: 'hindsight-model', patch: { autoStart: false } },
+    '写进条目 id 的 config（0.2.0 的唯一可写命名空间），而不是旧命名空间')
+  // 之后的状态探测/冷启动在测试环境里可能失败（无子进程权限）——那不是本用例的断言对象：
+  // 关键是失败不再来自「设置不可写」。
+  if (ok.status !== 200) assert.notEqual(ok.json().code, 'settings-unavailable', '写已落地，不再报设置不可用')
+})
+
+
 // --- runner -----------------------------------------------------------------
 
 let passed = 0

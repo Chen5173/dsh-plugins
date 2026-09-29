@@ -47,6 +47,10 @@ const STATE = {
   readConfig: null,
   settingsInstalled: false,
   settingsReady: false,
+  /** Which generation supplies the section: 'section' (0.1.x) | 'entry-config' (0.2.0) | null. */
+  settingsSource: null,
+  /** The profile entry's resolved Config on 0.2.0 (null on 0.1.x, whose row carries none). */
+  configFromEntry: null,
   /** Owner context of the current registration (a reload brings a new one). */
   settingsOwner: null,
   settingsError: null,
@@ -104,8 +108,10 @@ function persistState() {
 
 function currentConfig() {
   ensureSettings()
-  if (!STATE.readConfig) return core.defaultConfig()
-  try { return core.normalizeConfig(STATE.readConfig()) } catch (e) {
+  // 0.1.x：installSection 的 source getter；0.2.0：条目 Config（apply 时拿到）。
+  const source = STATE.readConfig || (STATE.configFromEntry ? () => STATE.configFromEntry : null)
+  if (!source) return core.defaultConfig()
+  try { return core.normalizeConfig(source()) } catch (e) {
     STATE.lastError = 'config-read: ' + msg(e)
     return core.defaultConfig()
   }
@@ -459,6 +465,60 @@ function fallbackSectionSchema() {
   return schema
 }
 
+/**
+ * 0.2.0 entry config: the plugin's own profile row IS the settings section.
+ *
+ * 0.2.0 retired `settings.installSection`; the settings service projects each
+ * plugin entry's exported `Config` (it reads `entry.fiber.runtime.Config`) under
+ * the ENTRY ID, and rejects every other namespace with
+ * `No configurable plugin entry "<ns>"`. A `link:` host half cannot import
+ * `@deepseek-ai/schemastery` (verified: ERR_MODULE_NOT_FOUND), so the schema is
+ * hand-rolled for the three consumers that exist:
+ *   - cordis `resolveConfig` → `Config[~standard].validate(raw)`;
+ *   - the settings service → `meta.volatile` (volatileForm) + `toJSON()`
+ *     (`plainSchema` rebuilds it with the real schemastery);
+ *   - the loader diff → `~standard.vendor`. The vendor is deliberately NOT
+ *     `schemastery`: `equalExceptVolatile` only takes the in-place volatile path
+ *     for real schemastery schemas, and our plain values hold no Volatile
+ *     references — leaving the vendor unclaimed makes a settings write take the
+ *     ordinary path (entry restart), so `apply(ctx, config)` always sees the value
+ *     the client just wrote.
+ * The refs table is captured from the equivalent schemastery schema (the same
+ * fields `ruleSchema(z)` builds, root marked `.volatile()`).
+ */
+const CONFIG_SCHEMA_JSON = Object.freeze({"uid":49,"refs":{"11":{"type":"boolean","meta":{"default":true}},"13":{"type":"boolean","meta":{"default":false}},"14":{"type":"string","meta":{}},"16":{"type":"string","meta":{}},"17":{"type":"dict","meta":{"default":{}},"inner":14,"sKey":16},"19":{"type":"string","meta":{"required":true}},"20":{"type":"string","meta":{}},"22":{"type":"boolean","meta":{"default":false}},"23":{"type":"string","meta":{}},"24":{"type":"string","meta":{}},"26":{"type":"array","meta":{"default":[]},"inner":24},"27":{"type":"string","meta":{}},"28":{"type":"string","meta":{}},"30":{"type":"boolean","meta":{"default":true}},"32":{"type":"boolean","meta":{"default":true}},"34":{"type":"boolean","meta":{"default":true}},"35":{"type":"object","meta":{"default":{}},"dict":{"turnEnd":30,"approval":32,"question":34}},"36":{"type":"string","meta":{}},"37":{"type":"number","meta":{}},"38":{"type":"number","meta":{}},"40":{"type":"boolean","meta":{"default":false}},"41":{"type":"string","meta":{}},"43":{"type":"string","meta":{}},"44":{"type":"dict","meta":{"default":{}},"inner":41,"sKey":43},"45":{"type":"object","meta":{"default":{}},"dict":{"id":19,"name":20,"enabled":22,"command":23,"args":26,"interpreter":27,"cwd":28,"triggers":35,"precondition":36,"debounceMs":37,"timeoutMs":38,"shell":40,"env":44}},"47":{"type":"array","meta":{"default":[]},"inner":45},"49":{"type":"object","meta":{"default":{},"volatile":true},"dict":{"enabled":11,"seeded":13,"env":17,"rules":47}}}})
+
+/** Normalize one entry config value to the shape `core.normalizeConfig` accepts. */
+function normalizeEntryConfig(input) {
+  const source = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {}
+  const out = Object.assign({}, source)
+  out.enabled = typeof source.enabled === 'boolean' ? source.enabled : true
+  out.seeded = typeof source.seeded === 'boolean' ? source.seeded : false
+  out.env = (source.env && typeof source.env === 'object' && !Array.isArray(source.env)) ? source.env : {}
+  out.rules = Array.isArray(source.rules) ? source.rules : []
+  return out
+}
+
+/** The Config exported to the loader/settings service (see the block comment above). */
+function entryConfigSchema() {
+  const schema = (input) => normalizeEntryConfig(input)
+  schema.meta = { volatile: true }
+  schema.type = 'object'
+  schema.toJSON = () => JSON.parse(JSON.stringify(CONFIG_SCHEMA_JSON))
+  schema['~standard'] = {
+    version: 1,
+    vendor: 'dsh-idle-hook',
+    validate(value) {
+      try { return { value: normalizeEntryConfig(value) } }
+      catch (error) { return { issues: [{ message: (error && error.message) ? error.message : String(error) }] } }
+    },
+  }
+  return schema
+}
+
+/** Exported for the loader (0.2.0 entry config) and asserted by the test harness. */
+export const Config = entryConfigSchema()
+
 function ruleSchema(z) {
   const triggers = () => z.object({
     turnEnd: z.boolean().default(true),
@@ -499,10 +559,22 @@ function ruleSchema(z) {
 function installSettingsWith(owner, settings) {
   if (STATE.settingsInstalled) return
   if (!settings || typeof settings.installSection !== 'function') {
+    // 0.2.0 退役了 installSection：插件自己的 profile 条目 Config 就是这一节，
+    // 无需注册 —— 客户端继续用 remote.settings 读写「条目 id」这个命名空间，
+    // 宿主半读取 loader 解析后传给 apply(ctx, config) 的值。
+    if (STATE.configFromEntry) {
+      STATE.settingsInstalled = true
+      STATE.settingsReady = true
+      STATE.settingsError = null
+      STATE.settingsSource = 'entry-config'
+      STATE.readConfig = () => STATE.configFromEntry
+      return
+    }
     STATE.settingsError = '设置服务不可用：规则无法读取，插件保持静默'
     return
   }
   STATE.settingsInstalled = true
+  STATE.settingsSource = 'section'
   const register = (Schema) => {
     if (STATE.settingsReady) return
     try {
@@ -514,6 +586,7 @@ function installSettingsWith(owner, settings) {
       })
       STATE.settingsReady = true
       STATE.settingsError = null
+      STATE.settingsSource = 'section'
     } catch (e) {
       STATE.settingsError = 'installSection 失败：' + msg(e)
     }
@@ -592,7 +665,7 @@ function statusPayload() {
     plugin: core.PLUGIN_ID,
     pluginDir: PLUGIN_DIR,
     platform: process.platform,
-    settings: { ready: STATE.settingsReady, error: STATE.settingsError, namespace: core.SETTINGS_NS },
+    settings: { ready: STATE.settingsReady, error: STATE.settingsError, namespace: core.SETTINGS_NS, source: STATE.settingsSource },
     config: { enabled: cfg.enabled, seeded: cfg.seeded, env: cfg.env, rules: cfg.rules, count: cfg.rules.length },
     sampleRule: core.sampleRule(PLUGIN_DIR, process.platform),
     presence: core.presenceOf(STATE.presence),
@@ -693,7 +766,11 @@ function registerHttp(ctx, host) {
 
 // --- plugin ------------------------------------------------------------------
 
-function apply(ctx) {
+function apply(ctx, config) {
+  // 0.2.0：profile 行解析后的 Config（0.1.x 行上没有 config，此值为 null）。
+  // 每次客户端写配置，loader 都会重启本条目并带着新值再跑一次 apply。
+  STATE.configFromEntry = (config && typeof config === 'object' && !Array.isArray(config)) ? config : null
+  STATE.settingsSource = null
   if (STATE.settingsOwner !== ctx) {
     // 插件行被重新加载（禁用→启用 / 重启宿主）时，模块常常是被 ESM 缓存复用的，
     // 模块级状态会活下来 —— 必须按「新的 ctx」重置注册状态，否则新 context 永远
@@ -722,4 +799,4 @@ function apply(ctx) {
   }
 }
 
-export { apply, inject, name, registerHttp, dispatchTrigger, onTurnEnd, spawnOnce, fallbackSectionSchema, statusPayload }
+export { apply, inject, name, registerHttp, dispatchTrigger, onTurnEnd, spawnOnce, fallbackSectionSchema, statusPayload, normalizeEntryConfig }

@@ -110,7 +110,12 @@
 | 试跑 | 用**你当前打开的会话**的上下文跑一次；没有会话时用内置示例上下文。试跑计入历史，但**不计入**自动停用的失败计数 |
 | 执行历史 | 最近 200 条滚动，落盘 `<DSH_HOME 或 ~/.dsh>/idle-hook-history.json`（含 stderr/stdout 尾部），重启后仍在 |
 
-规则配置存在 DSH 的设置文件 `<DSH_HOME 或 ~/.dsh>/settings.yaml` 的 `idle-hook:` 命名空间里，可以直接手改（改完刷新页面即可看到）。
+规则配置的落点随宿主世代不同（**能力探测，两代同一份代码**）：
+
+- **0.2.0 起**：配置就是本插件 profile 条目的 `config:` 段（`cordis.patch.yml` 里 `- id: idle-hook` 那一行）。0.2.0 退役了 `settings.installSection`，设置服务改为投影每个条目自己导出的 `Config`（命名空间 = **条目 id**，其它 ns 一律抛 `No configurable plugin entry`），所以宿主半导出**手写 schema**（`link:` 安装解析不到 `@deepseek-ai/schemastery`），客户端仍用 `remote.settings.describe()/update()` 读写。写入会让该条目重启并带着新配置再跑一次 `apply`。
+- **0.1.x**：仍在设置文件的 `idle-hook:` 命名空间里（宿主半经 `settings.installSection` 注册）。
+
+两种形态都能直接手改（改完刷新页面即可看到）；`GET /__idle-hook/status` 的 `settings.source` 写明当前命中哪一种（`entry-config` / `section`）。
 
 ## 环境变量（两层）
 
@@ -122,7 +127,7 @@
 - **`IDLE_HOOK_*` 不可覆盖**：插件注入的触发上下文永远优先——你配了同名键会被忽略，界面只提示不报错，脚本拿到的仍是真实值。
 - **占位符**：值里可用 `{sessionId}` `{cwd}` `{title}` `{reason}` `{detail}` `{rule}`，例如 `PROJECT_DIR={cwd}`。
 - **格式**：键名限 `[A-Za-z_][A-Za-z0-9_]*`，空行与 `#` 开头的行忽略；缺等号或键名非法的行**会阻止保存**并说明原因。
-- **明文提醒**：变量值会明文写进 `<DSH_HOME 或 ~/.dsh>/settings.yaml`（和规则参数一样）。不愿落盘就把密钥留在启动 DSH 前的 `export` 里。
+- **明文提醒**：变量值会明文落盘（0.1.x 是 `<DSH_HOME 或 ~/.dsh>/settings.yaml`，0.2.0 起是 profile 的 `cordis.patch.yml` 里该条目的 `config:` 段），和规则参数一样。不愿落盘就把密钥留在启动 DSH 前的 `export` 里。
 - **文件路径**：设置文件在 `$DSH_HOME/settings.yaml`（`DSH_HOME` 未设置时才是 `~/.dsh/settings.yaml`）。用本仓库的 `dsh-start.sh` 启动时它把 `DSH_HOME` 指向仓库内的 `.dsh_home`，所以实际路径是 `<仓库>/.dsh_home/settings.yaml`；执行历史同理落在 `$DSH_HOME/idle-hook-history.json`。
 - 执行历史里只记录**变量名**（方便排查「脚本为什么没拿到变量」），**不记录变量值**。
 - **清空即删除**：把框里内容删光再保存 = 真的删掉这些变量（保存走的是设置服务的「整段替换」语义；如果只做合并，空框是删不掉任何键的 —— 这个坑踩过一次）。规则里的环境变量同理，改空的规则会随整条规则一起写回。
@@ -165,7 +170,7 @@
 
 - 以 **DSH 进程的身份**执行你配置的本地进程（不经过 DSH 的 sandbox 策略）。
 - 写 `<DSH_HOME 或 ~/.dsh>/idle-hook-history.json`（执行历史 + 每规则的失败计数/自动停用状态）。
-- 通过客户端写 `<DSH_HOME 或 ~/.dsh>/settings.yaml` 的 `idle-hook:` 段。
+- 通过客户端把配置写进当前世代的落点（0.1.x：`settings.yaml` 的 `idle-hook:` 段；0.2.0 起：本插件 profile 条目的 `config:` 段）。
 - 注册 `/__idle-hook/*` HTTP 路由，供设置页读取状态、上报页面在场、试跑与查历史。
 - 只**观察**批准与提问链路（`prepend` 后原样 `return next()`），绝不改变结果或延迟。
 

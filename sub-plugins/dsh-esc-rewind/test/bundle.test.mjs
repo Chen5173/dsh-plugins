@@ -173,6 +173,7 @@ function makeServices(overrides = {}) {
     creates: [],
     opens: [],
     archived: [],
+    archiveOptions: [],
     queueRemoves: [],
     renames: [],
     readAttachments: [],
@@ -261,7 +262,14 @@ function makeServices(overrides = {}) {
   }
   const workspaces = {
     list: { getSnapshot: () => ({ items: [{ workspaceId: 'w1', sessionIds: Object.keys(summaries) }] }) },
-    archiveSession: async (id) => { calls.archived.push(id) },
+    // 0.2.0：archiveSession(id, options?) 返回 RemoteResult（拒绝不抛异常），
+    // 且对「仍有运行中工作」的会话默认拒绝，需要 { stopActivity: true } 才停+归档。
+    archiveSession: async (id, options) => {
+      calls.archived.push(id)
+      calls.archiveOptions.push(options)
+      if (typeof overrides.archiveSession === 'function') return overrides.archiveSession(id, options, calls)
+      return undefined
+    },
   }
   // 草稿附件桥接的夹具：0.1.5-rc.2 起核心把「图片草稿」泛化为「附件草稿」并改名，
   // 所以 fixture 可以按世代装配——'legacy'（0.1.2 及更早）/ 'next'（0.1.5+）/ 'none'。
@@ -1659,6 +1667,72 @@ test('delete mode: failed delete degrades to archive and warns', async () => {
   env.rerender()
   assert.ok(toasts.includes('删除失败，已改为归档'), 'degrade warning shown')
 })
+
+test('archive (0.2.0): 被「仍活跃」拒绝 → 带 stopActivity 重试成功（不再静默失败）', async () => {
+  const chat = chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'rewind me'), runningAssistant(4)])
+  let attempts = 0
+  const services = makeServices({
+    chatOf: () => chat,
+    archiveSession: (id, options) => {
+      attempts += 1
+      if (attempts === 1) {
+        return { ok: false, error: { code: 'workspace/session-active', message: 'session has running work' } }
+      }
+      assert.equal(options && options.stopActivity, true, '重试必须带 stopActivity')
+      return { ok: true, value: { archivedSessionIds: [id] } }
+    },
+  })
+  services.seed('s1', { title: 'Original' })
+  applyWith(services)
+  const env = mount({ services, sessionId: 's1', chat })
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  assert.ok(target, 'target exchange found')
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true, '回退成功')
+  assert.equal(attempts, 2, '先普通归档、被拒后重试一次')
+  assert.equal(services.calls.archiveOptions[0], undefined, '第一次不带 options')
+  assert.equal(services.calls.archiveOptions[1].stopActivity, true, '第二次带 stopActivity')
+  assert.equal(window.__dsew.archiveStopActivity, true, '诊断记录走了「停止并归档」')
+  assert.equal(window.__dsew.archiveFail, null, '最终成功，无失败诊断')
+  env.rerender()
+  assert.ok(!toasts.some((text) => String(text).indexOf('归档失败') >= 0), '成功时不得弹归档失败')
+})
+
+test('archive (0.2.0): 其它拒绝如实记录并提示（绝不静默）', async () => {
+  const chat = chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'rewind me'), runningAssistant(4)])
+  const services = makeServices({
+    chatOf: () => chat,
+    archiveSession: () => ({ ok: false, error: { code: 'session/not-found', message: 'gone' } }),
+  })
+  services.seed('s1', { title: 'Original' })
+  applyWith(services)
+  const env = mount({ services, sessionId: 's1', chat })
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true, '回退本身仍然成功')
+  assert.equal(services.calls.archived.length, 1, '非「仍活跃」的拒绝不重试')
+  assert.equal(window.__dsew.archiveFail, 'gone', '拒绝原因进诊断')
+  assert.equal(window.__dsew.archiveStopActivity, false)
+  env.rerender()
+  assert.ok(toasts.some((text) => String(text).indexOf('旧会话归档失败') >= 0 && String(text).indexOf('gone') >= 0), '归档失败必须可见')
+})
+
+test('archive (0.1.x 兼容): 旧实现抛异常时被记录且不影响回退', async () => {
+  const chat = chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'rewind me'), runningAssistant(4)])
+  const services = makeServices({
+    chatOf: () => chat,
+    archiveSession: () => { throw new Error('legacy-boom') },
+  })
+  services.seed('s1', { title: 'Original' })
+  applyWith(services)
+  mount({ services, sessionId: 's1', chat })
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true, '回退成功')
+  assert.equal(window.__dsew.archiveFail, 'legacy-boom', '旧世代的抛错同样被记录')
+  assert.equal(window.__dsew.archiveStopActivity, false, '抛错不触发 stopActivity 重试')
+})
+
 
 test('delete mode: 宿主拒绝真删（仍有子代理）→ 降级归档 + 专用提示', async () => {
   const chat = chatOf([user(1, 'q1'), settled(2, 'a1'), user(3, 'rewind me'), runningAssistant(4)])
