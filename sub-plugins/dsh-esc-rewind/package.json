@@ -1,7 +1,7 @@
 {
   "name": "dsh-esc-rewind",
-  "version": "0.1.2",
-  "description": "Keyboard + command rewind for the DSH Web conversation. ESC once stops the running turn; ESC again rewinds the whole just-stopped exchange (fork a branch from the previous completed turn, restore the prompt into the composer); the `/rewind` slash command restarts from any historical exchange. Client-driven via the official sessions (fork/open/create/binding), workspaces (archive), conversation (cancel/updateQueue/draft images), uiConversation (node snapshots) and commandUi (popupSelect contribution) services. Optional DELETE mode: a session-header toggle (archive ⇄ permanently delete the old session after a rewind) persisted through the `esc-rewind` settings namespace, with a small self-hosted half (src/index.js) serving the delete endpoint/tool — no dependency on any third-party delete implementation.",
+  "version": "0.1.3",
+  "description": "Keyboard + command rewind for the DSH Web conversation. ESC once stops the running turn; ESC again rewinds the whole just-stopped exchange (fork a branch from the previous completed turn, restore the prompt into the composer); the `/rewind` slash command restarts from any historical exchange. Client-driven via the official sessions (fork/create/binding) and uiWorkspace (openSession — the 0.2.0 home of the switch-session verb), workspaces (archive), conversation (cancel/updateQueue/draft images), uiConversation (node snapshots) and commandUi (popupSelect contribution) services. Optional DELETE mode: a session-header toggle (archive ⇄ permanently delete the old session after a rewind) persisted through the `esc-rewind` settings namespace, with a small self-hosted half (src/index.js) serving the delete endpoint/tool — no dependency on any third-party delete implementation.",
   "type": "module",
   "license": "MIT",
   "publishConfig": {

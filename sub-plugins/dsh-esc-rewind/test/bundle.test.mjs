@@ -254,12 +254,19 @@ function makeServices(overrides = {}) {
       makeBinding(childId, false)
       return childId
     },
-    open: (id) => {
-      calls.opens.push(id)
-      // 真机顺序：open 触发 React 提交（子会话的桥先挂载），插件的 arm 在其后。
-      if (typeof overrides.onOpen === 'function') overrides.onOpen(id)
-    },
+    // 0.2.0 的 sessions 面**没有** open —— 真机调用它会抛 "sessions.open is not a
+    // function"（/rewind 选择器里的那条红字）。夹具必须与真机一致，否则插件里残留的
+    // sessions.open 会被这层假能力掩盖。切换会话的动词在 uiWorkspace 上（见下）。
   }
+  const uiWorkspace = overrides.noUiWorkspace === true
+    ? undefined
+    : {
+        openSession: (id) => {
+          calls.opens.push(id)
+          // 真机顺序：openSession 触发 React 提交（子会话的桥先挂载），插件的 arm 在其后。
+          if (typeof overrides.onOpen === 'function') overrides.onOpen(id)
+        },
+      }
   const workspaces = {
     list: { getSnapshot: () => ({ items: [{ workspaceId: 'w1', sessionIds: Object.keys(summaries) }] }) },
     // 0.2.0：archiveSession(id, options?) 返回 RemoteResult（拒绝不抛异常），
@@ -330,7 +337,7 @@ function makeServices(overrides = {}) {
   const setSettingsDescribeError = (e) => { settingsDescribeError = e || null }
   const setSettingsUpdateError = (e) => { settingsUpdateError = e || null }
 
-  const state = { bindings, summaries, sessions, workspaces, conversation, uiConversation, commandUi, contributions, calls,
+  const state = { bindings, summaries, sessions, uiWorkspace, workspaces, conversation, uiConversation, commandUi, contributions, calls,
     settings, settingsCalls, setSettingsValue, setSettingsDescribeError, setSettingsUpdateError,
     // 槽位存在性：null = 全部存在（默认）；数组 = 只认这些槽名（模拟旧核心没有 main.conversation）。
     slotsAvailable: Array.isArray(overrides.slotsAvailable) ? overrides.slotsAvailable : null }
@@ -1331,6 +1338,50 @@ test('pending 输入：清不掉就放弃本次回退（不 fork、不复制进�
   assert.equal(window.__dsew.lastGate, 'pending-input')
   assert.ok(
     toasts.some((text) => text.includes('还有没发出的消息在排队')),
+    `给出可理解的提示（实际：${JSON.stringify(toasts)}）`,
+  )
+})
+
+// --- 0.2.0 契约：会话切换动词迁移到 uiWorkspace.openSession ---------------------
+//
+// 真机报错：/rewind 选择器里红字 "sessions.open is not a function"。0.2.0 的 sessions
+// 面只剩 binding/fork/create/scope/search/retain/using，切换会话的动词搬到
+// uiWorkspace.openSession(target)。夹具复刻真机（sessions 上**没有** open），
+// 所以这组用例只有插件真的改走 uiWorkspace 才会绿。
+
+test('0.2.0 契约：夹具的 sessions 面不再有 open，切换动词在 uiWorkspace 上', () => {
+  const services = makeServices()
+  assert.equal(typeof services.sessions.open, 'undefined', 'sessions 面没有 open（与真机一致）')
+  assert.equal(typeof services.uiWorkspace.openSession, 'function', '切换动词在 uiWorkspace 上')
+})
+
+test('0.2.0 契约：回退经 uiWorkspace.openSession 切到分支，并照常归档原会话', async () => {
+  const services = makeServices({ chatOf: plainRewindChat })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  assert.equal(result.ok, true)
+  assert.deepEqual(services.calls.opens, [result.childId], 'openSession 收到分支 id')
+  assert.ok(services.calls.archived.includes('s1'), '归档路径不受影响')
+})
+
+test('宿主没有会话切换通道时：放弃回退、原会话不动、给出可读提示', async () => {
+  const services = makeServices({ chatOf: plainRewindChat, noUiWorkspace: true })
+  services.seed('s1', { title: 'T' })
+  applyWith(services)
+  toasts.length = 0
+  const env = mount({ services, sessionId: 's1', chat: plainRewindChat() })
+  const target = internals()._module.exchangesOfSession('s1').find((ex) => ex.seq === 3)
+  const result = await internals()._module.doRewind('s1', target)
+  env.rerender()
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'open-unavailable')
+  assert.equal(services.calls.opens.length, 0)
+  assert.equal(services.calls.archived.length, 0, '切不过去就不动原会话')
+  assert.ok(window.__dsew.openFail, '诊断留下失败原因')
+  assert.ok(
+    toasts.some((text) => text.includes('切换会话失败')),
     `给出可理解的提示（实际：${JSON.stringify(toasts)}）`,
   )
 })

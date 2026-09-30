@@ -169,13 +169,65 @@ schemastery 的 refs 表，用同版本 schemastery 现场捕获）、`~standard
   （插件已用 `__unwrapOpen` 双形状解包）、`remote.commands.execute`、`remote.session.modelCatalog/selectModel`
   （插件已查 `ok`）—— 即：Result 化只发生在 `workspaces.archiveSession`（§7 已修），其余仍是抛异常或普通值。
 - **槽位与服务名**：`slots.entries(key)`/`slots.subscribe(key, fn)`（在 `dsh-client-ui-renderer`）、
-  `ctx.slots.register/inject/renderSlot`、`commandUi.register`、`sessions.binding|open|scope|scopeOf|list.getSnapshot`
+  `ctx.slots.register/inject/renderSlot`、`commandUi.register`、`sessions.binding|scope|scopeOf|list.getSnapshot`
   （快照仍有 `byId`）、`workspaces.list.getSnapshot`（`items/pinnedSessionIds/archivedSessionIds`）、
   `uiConversation.binding`（`snapshot.getSnapshot().views.get('chat')`）、`locale.register/translate/subscribe`
-  —— 全部存在且形状未变。
+  —— 全部存在且形状未变。**唯一例外：`sessions.open` 在 0.2.0 不存在**（本行初稿把它列进了「存在」，直接放过了一次真机红字，见 §9）；切换会话的动词是 `uiWorkspace.openSession`。
 - **宿主服务**：`agents.get/list/roots/cancel`、`subagents.listChildren(parentId)`、`tools.register`+`defineTool`、
   `webServer.register({kind})`、`storageDomain` 的单元/表名（`session_projcache`、`workspace`/`workspaces`）、
   存储表的 `get/put/delete/entries` —— 全部健在。唯一消失的是 `agent.whenIdle()`（运行时已无实现，
   类型文件里还留着），调用点本来就有 `typeof === 'function'` 守卫。
 - **插件清单面**：`dsh.client.inject`（0.2.0 只当排序提示，未知名字不致命，但已按 §2.1 清掉）、
   `dsh.bundle.patch`、`exports["./client"]`、`window.__ModuleLoader__.load({id, factory})` 协议 —— 未变。
+
+## 9. 追加（同日，用户报障）：「0.2.0 的 sessions 面没有 open」——§8.2 的漏网
+
+**真机症状**：`/rewind` 打开的选择器里红字 `sessions.open is not a function`（选择器是本插件贡献的
+popupSelect，错误行由核心渲染插件抛出的 TypeError 文本）。回退的后半段全部没发生：分支不打开、
+问题文本不回填、诊断里也没有任何线索。
+
+**根因**（证据带路径）：
+
+- 0.2.0 客户端 `sessions` 面（`packages/extensions/cordis-client-runner/src/client/api-catalog.ts:181-229`）
+  只有 `retain / using / retainInfo / refreshProjections / search / fork / scope / binding`，**没有 `open`**。
+- 切换会话的正式动词搬到了另一个服务：`uiWorkspace.openSession(target)`（`api-catalog.ts:334-341`，
+  「Select a Session and show its Conversation as one UI navigation action」）；类型面
+  `packages/client/ui-workspace/src/client/navigation.ts:29-34`，实现 `:200-202` = `replaceMain(target, signal, 'reveal')`；
+  `SessionTarget = SessionId | SubagentAddress`（`packages/api/session-controller/src/client/contract/sessions.ts:22`），
+  所以传 fork 出来的子会话 id 字符串即可。
+- 两处调用点：`doRewind`（旧 `src/client.js:1359`，**裸调用** → TypeError 冒到选择器）与
+  `rescueOrphan`（旧 `:2270`，`typeof sessions.open === 'function'` 守卫把失败**吞掉** ⇒ 孤儿「找回」
+  时不切分支、静默半途而废）。`sessions.create/fork/binding` 在 0.2.0 仍在——报错只出在 open，
+  也说明 fork 已经成功（这条差异是定位最快的一步）。
+
+**为什么审计没拦住**（两条都可复用）：
+
+1. §8.2 是**按名字对表**，不是**按动作对表**：把「切换会话」当成 `sessions` 面上的一个方法名去核对
+   存在性，而没有先问「0.2.0 里谁负责这个动作」。名字没了、动作还在，对名字的表就会漏。
+2. `test/bundle.test.mjs` 的假 `sessions` **自带 `open`**，比真机多一个动词 ⇒ 红绿失真，
+   夹具替真机圆了谎。（同类教训在 v7.4 已出现过一次；结论一致：**夹具必须与真机同形，
+   多一个方法就是一次假绿**。）
+
+**修法**（`sub-plugins/dsh-esc-rewind/src/client.js`）：
+
+- 新增 `openSessionInUi(childId)`：能力探测优先 `__svc.uiWorkspace.openSession`，回退旧核心
+  `__svc.sessions.open`，两者都缺/都抛 ⇒ 写 `__diag.openFail` 并返回 false（**不读版本号**）。
+- `apply()` 注入名单加 `uiWorkspace`；`rescueOrphan` 改用同一 helper。
+- `doRewind` 切换失败 ⇒ 撤掉已武装的还原、释放已建的图片草稿、**原会话不归档也不删除**、
+  返回 `{ok:false, code:'open-unavailable'}` 并 toast（新增 i18n key `rewind.open.fail`，中英各一）。
+
+**验证**：夹具删掉假的 `sessions.open`、改 `uiWorkspace.openSession`（`overrides.noUiWorkspace`
+可模拟「宿主没有该服务」），新增 3 条用例（夹具同形 / 经 uiWorkspace 切换且照常归档 / 无通道时
+放弃且不动原会话）。**红绿**：把 `src/client.js` 还原到 `HEAD` 后跑套件 —— 进程以
+`TypeError: sessions.open is not a function` 直接死掉（正是真机那条红字）；恢复实现后 **96/96 全绿**
+（此前 93 条）。
+
+**同步改到的地方**：插件 README（服务面、切换步骤、还原时机 3 处 + 一条 0.2.0 bullet）、
+插件 `package.json` description、本仓知识库 `2026-09-08-dsh-esc-rewind.md` 的服务清单与 v7.8 小节。
+
+**运行中 GUI 的注意（本轮做过的一次性动作）**：profile `web` 装的是 git 快照
+（`github:Chen5173/dsh-plugins#174a17e…`），改仓库源码**不即时生效**。为让用户当场复测，本轮把修好的
+`src/client.js` 直接覆盖到 `…/profiles/web/node_modules/dsh-plugin-manager/sub-plugins/dsh-esc-rewind/src/client.js`
+（原件备份为 `client.js.bak-0.1.2-snapshot`）。**这是手工同步、不是安装**：`dsh plugin --profile web update`
+会覆盖回 git 快照内容；要长期热改，按根 README 换本地路径入口
+（`dsh plugin --profile web add D:/ChenSirDocument/Dsh-Projects/dsh-plugins`，需重启 `dsh web`）。

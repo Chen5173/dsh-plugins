@@ -25,7 +25,8 @@
 //  expressed with the officially supported, non-destructive primitives — fork
 //  a branch (like the core Branch button), archive the original (the row-menu
 //  Archive action keeps the log recoverable). The only client services used:
-//  sessions (binding/fork/open/create/loadOlder/loadThrough), workspaces
+//  sessions (binding/fork/create/loadOlder/loadThrough), uiWorkspace (openSession —
+//  the 0.2.0 home of the switch-session verb), workspaces
 //  (archiveSession), conversation (cancel/updateQueue/createDrafts — pre-0.1.5
 //  core spells the last one createDraftImages; both are probed by capability),
 //  uiConversation (per-session node snapshots), commandUi (the '/'-menu).
@@ -369,6 +370,7 @@ window.__ModuleLoader__.load({
       'rewind.deleted': '旧会话已删除',
       'rewind.delete.fail': '删除失败，已改为归档',
       'rewind.archive.fail': '旧会话归档失败：{msg}（它仍留在列表里）',
+      'rewind.open.fail': '切换会话失败：宿主没有可用的会话切换接口（uiWorkspace.openSession）',
       'rewind.subagents': '该会话还有 {n} 个子代理（运行中 {r}），已改为归档（不删除）',
       'rewind.subagents.unknown': '读不到该会话的子代理状态，已改为归档（不删除）：{msg}',
       'orphans.tab': '子代理',
@@ -425,6 +427,7 @@ window.__ModuleLoader__.load({
       'rewind.deleted': 'Old session deleted',
       'rewind.delete.fail': 'Delete failed — archived instead',
       'rewind.archive.fail': 'Failed to archive the old session: {msg} (it stays in the list)',
+      'rewind.open.fail': 'Failed to switch sessions: the host exposes no session-switch API (uiWorkspace.openSession)',
       'rewind.subagents': 'Old session still owns {n} subagent(s) ({r} running) — archived instead of deleted',
       'rewind.subagents.unknown': 'Subagent state unreadable — archived instead of deleted: {msg}',
       'orphans.tab': 'Subagents',
@@ -1263,6 +1266,34 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Switch the UI to a session. The verb MOVED in 0.2.0: it used to be
+     * sessions.open(id), but the sessions face no longer carries it (it exposes
+     * binding/fork/create/scope/search/retain/using) — the switch verb is now
+     * uiWorkspace.openSession(target). Probed by capability at call time (never
+     * by version number), and the reason is kept in __diag so callers can report
+     * something readable instead of a "sessions.open is not a function" TypeError.
+     */
+    function openSessionInUi(childId) {
+      const ui = __svc.uiWorkspace
+      if (ui && typeof ui.openSession === 'function') {
+        try { ui.openSession(childId); return true } catch (error) {
+          __diag.openFail = (error && error.message) ? error.message : String(error)
+          return false
+        }
+      }
+      const sessions = __svc.sessions
+      // 0.1.x hosts: the verb still lives on the sessions face.
+      if (sessions && typeof sessions.open === 'function') {
+        try { sessions.open(childId); return true } catch (error) {
+          __diag.openFail = (error && error.message) ? error.message : String(error)
+          return false
+        }
+      }
+      __diag.openFail = 'no session-switch channel (uiWorkspace.openSession / sessions.open)'
+      return false
+    }
+
     // --- the rewind engine ----------------------------------------------------
 
     /**
@@ -1356,7 +1387,17 @@ window.__ModuleLoader__.load({
           // Open the branch BEFORE disposing the original: opening the child
           // first means the archive/delete only affects the original (never
           // clears the current selection out from under the user).
-          sessions.open(childId)
+          // 切换会话的动词：0.2.0 起是 uiWorkspace.openSession（sessions.open 已不存在）。
+          // 切不过去就不再往下走：原会话保持不动（不归档/删除），撤掉刚武装的还原与
+          // 已建草稿，把原因交回调用方转成提示，而不是抛 "not a function" 的 TypeError。
+          if (!openSessionInUi(childId)) {
+            clearPendingRestore(childId)
+            if (imageDraftIds.length > 0 && __svc.conversation) {
+              try { for (const id of imageDraftIds) releaseDraftAttachment(__svc.conversation, id) } catch { /* noop */ }
+            }
+            publishToast(__t('rewind.open.fail'))
+            return { ok: false, code: 'open-unavailable' }
+          }
           // 兜底，且这是主因：0.1.5 的 fork 种子 = 父会话 [0, cut)，cut 从边界 turn/end
           // 一路走到**下一个 turn/start**；被回退那条消息的 inbox 插入事件恰好排在它的
           // turn/start 之前、claim 之后 ⇒ 种子必然带出一条继承来的 pending 旧消息。
@@ -1402,7 +1443,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Stage a composer restore for the just-forked branch (applied on mount).
-     * **必须在 `sessions.open(childId)` 之前调用**：open 会立刻触发 React 提交，子会话的桥
+     * **必须在切换会话（openSessionInUi）之前调用**：open 会立刻触发 React 提交，子会话的桥
      * 先挂载，而挂载 effect 读到的 __pending 仍是 null；只靠挂载那一刻去看，这次还原就永远
      * 丢了（真机「回退后文字没回到输入框」的成因之一）。武装时同时广播一次，让已经挂载的
      * 桥也能补跑。
@@ -2267,7 +2308,7 @@ window.__ModuleLoader__.load({
       } catch (error) {
         __diag.orphanRenameFail = (error && error.message) ? error.message : String(error)
       }
-      if (typeof sessions.open === 'function') sessions.open(childId)
+      openSessionInUi(childId)
       __diag.orphanActions = __diag.orphanActions.concat([{ kind: 'rescue', id: row.id, childId, at: Date.now() }]).slice(-10)
       return { childId, stopped }
     }
@@ -2520,7 +2561,8 @@ window.__ModuleLoader__.load({
       }
 
       const disposers = []
-      const names = ['sessions', 'workspaces', 'conversation', 'uiConversation', 'commandUi']
+      // uiWorkspace: 0.2.0 起会话切换动词（openSession）落在这个面，sessions 面已无 open。
+      const names = ['sessions', 'uiWorkspace', 'workspaces', 'conversation', 'uiConversation', 'commandUi']
       for (const name of names) {
         try {
           const disposer = bindService(ctx, name)

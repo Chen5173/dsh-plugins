@@ -2,7 +2,7 @@
 
 给 DSH Web 会话加「停止 + 回退重来」：`Esc` 一次=停止当前生成；再按一次 `Esc` = 把刚被停的**整个最后一轮**撤销重来；另有 `/rewind` 命令，可从**历史任意一轮**重新开始。重来一律走 DSH 官方机制——**fork 分支 + 打开分支 + 还原问题到输入框**；旧会话如何处置由一个**会话头开关**控制：默认**归档**（隐藏出主列表、日志保留可恢复），可切到**删除**（经宿主半真删磁盘日志，不可恢复）。
 
-客户端为主（`sessions` binding/fork/open/create、`workspaces` archiveSession、`conversation` cancel/updateQueue/createDrafts（0.1.5-rc.2 起；旧核心为 `createDraftImages`，按能力探测兼容）、`uiConversation` 节点快照、`commandUi` popupSelect 贡献）；**删除模式额外带一个宿主半**（`src/index.js`）：注册 settings 命名空间 `esc-rewind`（字段 `deleteOldOnRewind`，默认 `false`）+ 自建删除端点 `/__esc-rewind/session/delete` 与模型工具，不依赖任何第三方删除实现。架构上与核心“Branch(分叉)/Archive(归档)”行菜单同源，不碰 append-only 日志（删除模式是用户显式开启后的真删）。
+客户端为主（`sessions` binding/fork/create、`uiWorkspace` openSession（0.2.0 起；0.1.x 仍在 `sessions.open`，按能力探测）、`workspaces` archiveSession、`conversation` cancel/updateQueue/createDrafts（0.1.5-rc.2 起；旧核心为 `createDraftImages`，按能力探测兼容）、`uiConversation` 节点快照、`commandUi` popupSelect 贡献）；**删除模式额外带一个宿主半**（`src/index.js`）：注册 settings 命名空间 `esc-rewind`（字段 `deleteOldOnRewind`，默认 `false`）+ 自建删除端点 `/__esc-rewind/session/delete` 与模型工具，不依赖任何第三方删除实现。架构上与核心“Branch(分叉)/Archive(归档)”行菜单同源，不碰 append-only 日志（删除模式是用户显式开启后的真删）。
 
 ## 行为
 
@@ -37,7 +37,7 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 1. **fork** 于目标回合的上一完整回合边界（与 Branch 按钮同款 `sessions.fork({atSeq})`，`increaseTitle:false` 后按需改回原标题）；
 2. **按开关处置原会话**：默认 `workspaces.archiveSession`（归档隐藏、日志保留可恢复）；开启删除后，fork+open 新分支确认可用才经宿主半真删（磁盘日志目录 + 投影缓存 + 工作区记账一并移除），但**该会话仍挂着子代理时不删**（宿主半拒绝 → 同样降级归档，避免子代理变孤儿）；
-3. **open 分支**并还原问题文本（`inputActions.setDraft`，图片经 `readAttachment` → 草稿附件桥（新核心 `createDrafts`/`addAttachments`，旧核心 `createDraftImages`/`addImages`，按能力探测选名字）尽力还原）。
+3. **切换分支**（0.2.0 起 `uiWorkspace.openSession`，0.1.x 为 `sessions.open`）并还原问题文本（`inputActions.setDraft`，图片经 `readAttachment` → 草稿附件桥（新核心 `createDrafts`/`addAttachments`，旧核心 `createDraftImages`/`addImages`，按能力探测选名字）尽力还原）。
 
 **为什么删除不是默认**：客户端没有任何官方“删除会话”verb，真删必须宿主动盘（`src/index.js` 自建端点/工具），且**不可恢复**。因此开关默认关闭（归档=安全侧），只有用户显式打开才进入删除态；删除态下**无二次确认**（已接受误触即永久丢失的风险），防误触靠：默认关闭 + 图标红叉状态 + 切换/停止/执行的 toast 警示。
 
@@ -74,13 +74,14 @@ DSH 会话日志是 **append-only**：没有任何受支持的插件 API 能在�
 
 - **命令描述契约（0.1.5-rc.2 起）**：`CommandContribution.description` 由**字符串**改成 **`() => string`**（核心会调用它）；旧核心把值当 React 子节点渲染，函数会直接抛 `Functions are not valid as a React child`。两个契约无法用同一个值同时满足，所以本插件用**能力探测**（0.1.5 起才有的 `main.conversation` 槽位，或槽位新标准 props `usePanelInfo`/`useResource`，任一出现即判新契约）在**读取时**决定形态（`description` 写成 getter），**不读版本号**；结果见 `__dsew.commandDescShape`。
 - **未落定输入守卫（0.1.5-rc.2 起）**：0.1.5 把 agent 收件箱写进事件日志（`agent/inbox/spliced`）并做成**耐久投影**（`inbox`），而 fork 用事件种子重建子会话，于是两处都会把旧输入带进新分支：①「父会话里刚发出、尚未落盘」的排队输入；②**被回退那条消息自己的插入事件**（它排在自身 `turn/start` 之前，而 fork 的切点正是那个 `turn/start`）。回退因此在两处清：fork 前 `settlePendingInputs(parent)`（宿主 `inbox` 投影 ∪ queue 镜像 ∪ 未对账本地回声，删掉并**等确认空**，清不掉则返回 `code:'pending-input'` 放弃本次回退），open 分支后 `settlePendingInputs(child)` 清掉继承项。诊断：`__dsew.pendingSource / childPendingSource / pendingCleared / childPendingCleared / pendingBlocked / pendingConfirmMs / childPendingConfirmMs / inboxProjectionSeen`。
-- **还原时机的确定性（0.1.5-rc.2 起暴露）**：还原必须在 `sessions.open(childId)` **之前**武装（open 会立刻触发 React 提交，子会话的桥先挂载，那一刻读到的 `__pending` 还是 null；旧实现在 open 之后、且在一次可能 sleep 的 await 之后才武装 ⇒ 真机「回退后文字没回到输入框」）。另外挂载 effect 只按 `[sessionId, draft, inputActions]` 重跑，武装晚到时不会补跑 ⇒ 补了模块级武装通知（同 `__toastListeners` 套路）让已挂载的桥补跑一次；「一次回退只回填一次」用「已回填的会话 id」表达，而不是一次性布尔 ref（旧写法会让同页第二次回退永不回填）。诊断：`__dsew.pendingStaged / pendingApplied / pendingLateArm / pendingDropped`。
+- **还原时机的确定性（0.1.5-rc.2 起暴露）**：还原必须在切换分支（0.2.0 起 `uiWorkspace.openSession`，0.1.x 为 `sessions.open`）**之前**武装（切换会立刻触发 React 提交，子会话的桥先挂载，那一刻读到的 `__pending` 还是 null；旧实现在 open 之后、且在一次可能 sleep 的 await 之后才武装 ⇒ 真机「回退后文字没回到输入框」）。另外挂载 effect 只按 `[sessionId, draft, inputActions]` 重跑，武装晚到时不会补跑 ⇒ 补了模块级武装通知（同 `__toastListeners` 套路）让已挂载的桥补跑一次；「一次回退只回填一次」用「已回填的会话 id」表达，而不是一次性布尔 ref（旧写法会让同页第二次回退永不回填）。诊断：`__dsew.pendingStaged / pendingApplied / pendingLateArm / pendingDropped`。
 
 - **最低**：核心 ≥ **0.1.2-rc.1**（本插件一直支持的世代）。缺能力时一律**降级而不是报错**，且把探测结果写进 `window.__dsew`。
 - **0.2.0 设置模型变更**：`settings.installSection` 退役，命名空间钉在**条目 id**（其它 ns 抛 `No configurable plugin entry`）。同一份代码两代都可用：0.1.x 走 installSection，0.2.0 走导出的 `Config`；`/status` 的 `settingsSource` 写明命中的是哪一种，`settingsSectionRegistered` 在 0.2.0 下同样为 true。
 - **0.2.0 归档契约变更**：`workspaces.archiveSession(id, options?)` 返回 `RemoteResult`（`{ok:false,error}`）**而不抛异常**，所以「只 catch 不查返回值」= 归档没发生却当成功（真机症状：回退后原会话仍在列表里、删除模式也没删）。同时它对**仍有运行中工作**的会话默认拒绝（`WorkspaceActiveSessionError` → `workspace/session-active`），需 `{ stopActivity: true }` 才「停止并归档」——与核心「归档会话」确认框同款。本插件的 `archiveOldSession` 桥接：先普通归档，命中「仍活跃」才补一次 stopActivity，其余拒绝如实进诊断并 toast。
+- **0.2.0 会话切换动词迁移（真机红字 "sessions.open is not a function" 的根因）**：`sessions` 面**不再有 `open`**（只剩 binding/fork/create/scope/search/retain/using），切换会话改为 `uiWorkspace.openSession(target)`（`target = sessionId | 子代理地址`，「点列表切会话」那一个导航动作）。插件的 `openSessionInUi` 按能力探测两个世代（uiWorkspace 优先、`sessions.open` 回退），**都缺就放弃本次回退**：原会话不归档/不删除、撤掉已武装的还原与草稿，提示 `rewind.open.fail`，诊断 `__dsew.openFail`。
 - **核心 ≥ 0.1.5-rc.2**：核心把「图片草稿」泛化为「附件草稿」并改名——`conversation.createDraftImages(files)` → `createDrafts(sessionId, files)`、`releaseDraftImage(id)` → `releaseDraftAttachment(id)`、`inputActions.addImages(ids)` → `addAttachments(ids)`。本插件**不读版本号**，按能力探测优先新名、回退旧名，两代同一份代码都可用；探测结果见 `__dsew.draftCreateApi` / `__dsew.draftRestoreApi`（`'createDrafts'` / `'createDraftImages'` / `null`）。
-- 其余用到的核心面（槽位 `conversation.input.overlay` / `conversation.session.header.actions`、`sessions.binding|fork|open|create`、`workspaces.archiveSession`、`commandUi.register`、`remote.settings`、`chat.legacy.nodes` 与 `chat.timeline`、宿主 `turn/end` 的 `aborted`/`user` 与 `assistant/message.interrupted`）在 0.1.2-rc.1 → 0.1.5-rc.2 之间**逐项核对无变化**（审计方法与结论见 `docs/knowledge/2026-09-12-dsh-015-core-api-compat-audit.md`）。
+- 其余用到的核心面（槽位 `conversation.input.overlay` / `conversation.session.header.actions`、`sessions.binding|fork|create`、`uiWorkspace.openSession`、`workspaces.archiveSession`、`commandUi.register`、`remote.settings`、`chat.legacy.nodes` 与 `chat.timeline`、宿主 `turn/end` 的 `aborted`/`user` 与 `assistant/message.interrupted`）在 0.1.2-rc.1 → 0.1.5-rc.2 之间**逐项核对无变化**（审计方法与结论见 `docs/knowledge/2026-09-12-dsh-015-core-api-compat-audit.md`）。
 
 ## 安装 / 启停
 

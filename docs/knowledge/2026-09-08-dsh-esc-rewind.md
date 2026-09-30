@@ -4,8 +4,8 @@
 
 ## 结论（可复用）
 
-- **DSH 会话日志 append-only，插件无法原地删消息**。核心 `ConversationContextOriginKind 'rewind'/'rewrite'`（`packages/client/ui-chat/src/client/model/conversation-context.ts`）是全仓死代码（无生产者/消费者）；surface-replace（`core/session/src/surface.ts`）只能「一段→一条新节点」且仅供 `/compact` 宿主内部，客户端无任何 delete/truncate/rewind verb。想表达 Codex/Claude 式 rewind → 用官方非破坏组合：`sessions.fork({sessionId, atSeq, increaseTitle:false})`（fork 边界 = `atSeq` 之后第一个 turn/end）+ `workspaces.archiveSession(oldId)` + `sessions.open(childId)` + `inputActions.setDraft(text)`。fork 语义见 `api/session-controller/.../contract/sessions.ts` 的 fork 注释：只切「完整回合前缀」。
-- **客户端可触达的服务**（plugin client apply(ctx) 用 `ctx.inject([name], cb)` 懒取即可，勿写死 inject 数组以免旧版本阻塞加载）：`sessions`（ISessions：binding/fork/open/create/search；list 快照 `{ids, byId: {title, displayTitle, origin:'subagent'}}`）、`workspaces`（IWorkspaces：`archiveSession`/`list.getSnapshot().items[{workspaceId, sessionIds}]`）、`conversation`（ConversationController：scope-addressed cancel/send/updateQueue + 无 scope 的 `createDraftImages(File[])→ComposerAttachment[]`、`releaseDraftImage`，Service 名 `'conversation'`，root 单例）、`uiConversation`（root Service：`binding(sessionId).snapshot.get().views.get('chat')` 可命令式读会话节点）、`commandUi`（`register(CommandContribution)`：纯客户端 `/`-菜单条目，`ui.kind:'popupSelect'` 的 options/onSelect 全在 client，是「斜杠命令+自绘交互」的正规扩展缝；贡献名与宿主命令冲突会 fail loud）。
+- **DSH 会话日志 append-only，插件无法原地删消息**。核心 `ConversationContextOriginKind 'rewind'/'rewrite'`（`packages/client/ui-chat/src/client/model/conversation-context.ts`）是全仓死代码（无生产者/消费者）；surface-replace（`core/session/src/surface.ts`）只能「一段→一条新节点」且仅供 `/compact` 宿主内部，客户端无任何 delete/truncate/rewind verb。想表达 Codex/Claude 式 rewind → 用官方非破坏组合：`sessions.fork({sessionId, atSeq, increaseTitle:false})`（fork 边界 = `atSeq` 之后第一个 turn/end）+ `workspaces.archiveSession(oldId)` + `sessions.open(childId)`（**0.2.0 起该动词已不存在，改用 `uiWorkspace.openSession`，见篇末 v7.8**）+ `inputActions.setDraft(text)`。fork 语义见 `api/session-controller/.../contract/sessions.ts` 的 fork 注释：只切「完整回合前缀」。
+- **客户端可触达的服务**（plugin client apply(ctx) 用 `ctx.inject([name], cb)` 懒取即可，勿写死 inject 数组以免旧版本阻塞加载）：`sessions`（ISessions：binding/fork/create/search（**0.2.0 无 `open`**，见 v7.8）；list 快照 `{ids, byId: {title, displayTitle, origin:'subagent'}}`）、`workspaces`（IWorkspaces：`archiveSession`/`list.getSnapshot().items[{workspaceId, sessionIds}]`）、`conversation`（ConversationController：scope-addressed cancel/send/updateQueue + 无 scope 的 `createDraftImages(File[])→ComposerAttachment[]`、`releaseDraftImage`，Service 名 `'conversation'`，root 单例）、`uiConversation`（root Service：`binding(sessionId).snapshot.get().views.get('chat')` 可命令式读会话节点）、`commandUi`（`register(CommandContribution)`：纯客户端 `/`-菜单条目，`ui.kind:'popupSelect'` 的 options/onSelect 全在 client，是「斜杠命令+自绘交互」的正规扩展缝；贡献名与宿主命令冲突会 fail loud）。
 - **取消**：`sessions.binding(id).session.cancel()`（SessionFace，含 updateQueue/readAttachment/rename/loadOlder；getSnapshot().running/queue）。`inputActions`（slot kit 提供的公共面）**没有** cancel/stop——只有 setDraft/addImages/removeImage/pruneImages/submit。排队清除：对 `snapshot.queue[]` 每个 `item.id` 调 `session.updateQueue(item.id, {kind:'remove'})`。
 - **会话节点读数**：`chat` 视图快照（`views.get('chat')`）历史字段 `legacy.nodes` 已在新版消失；可靠路径 = `{order, nodes.get(key)}` 的 view node：`node.kind`、`node.anchorSeq`(seq)、`node.data.content`（user/steering，ContentBlock[]，image 块为 `{type:'image', attachment: ImageAttachmentRef{attachmentId, mediaType, name}}`）、assistant 状态在 `node.data.status`（'running'|'settled'|'interrupted'）。跨版本读法写容错 + `window.__dsew` 诊断。
 - **Esc 捕获**：核心所有 Esc 关闭逻辑都是 bubble 阶段（Menu/Modal/ContextMeter/TurnUsagePanel/Lightbox/MessageFeedback）；composer 内 Lexical keymap 在 CRITICAL 优先级处理 ESC 弹层（`KEY_ESCAPE_COMMAND`）。插件用 document **capture** keydown（同 composer-history-recall），必须先过门控：无弹层（role dialog/menu/listbox/aria-modal）+ 无外来文本框 + **composer 无 `/@` trigger token 在光标前**（trigger 弹层是 portal，composedPath 看不见）。
@@ -178,3 +178,20 @@
 - 自建 tab chrome 的两个关键点：① tab 台账用 `ctx.slots.entries(slot)` + `ctx.slots.subscribe(slot, …)` 自己订阅；② 当前 tab 用 `props.renderSlot(slot, {}, { only: id })` 挂载，并"首挂载后保持挂载"（切回来不丢草稿）。
 - 副作用：入口归管理器所有 ⇒ **管理器被停用时这些 tab 一并消失**（"一个入口"的代价，与用户预期一致）。
 - 同批反馈的 UI 打磨：孤儿面板按钮改成与核心卡片同几何（`.5px var(--dsw-alias-border-l3)` / radius 6 / height 26 / padding `0 10px`），破坏性动作（停止）用 `--dsw-alias-state-error-primary` 描边；每行操作**右对齐**（`marginLeft: auto`），行内元信息收进左侧两行。
+
+## v7.8（2026-09-29）：0.2.0 的 `sessions` 面**没有 `open`** —— 真机红字与「夹具比真机多一个动词」
+
+- **症状**：`/rewind` 的选择器里红字 `sessions.open is not a function`（错误行由核心渲染插件抛出的 TypeError 文本）。
+- **根因**：0.2.0 客户端 `sessions` 面只有 `retain/using/retainInfo/refreshProjections/search/fork/scope/binding`
+  （`packages/extensions/cordis-client-runner/src/client/api-catalog.ts:181-229`）；**切换会话的动词搬到了
+  `uiWorkspace.openSession(target)`**（同文件 :334-341；类型面 `packages/client/ui-workspace/src/client/navigation.ts:29-34`；
+  `target = SessionId | SubagentAddress`）。`sessions.create/fork/binding` 都还在——所以「只有 open 报错」本身就是线索。
+- **两处调用点**：`doRewind`（旧 :1359 裸调用）与 `rescueOrphan`（旧 :2270 被 `typeof` 守卫生吞 ⇒ 孤儿「找回」静默不切分支）。
+- **修法**：新增 `openSessionInUi(childId)` 能力探测（uiWorkspace 优先、旧 `sessions.open` 回退、都不行写
+  `__dsew.openFail` 并返回 false）；注入名单加 `uiWorkspace`；切换失败 ⇒ 撤还原、释放草稿、
+  **原会话不归档不删除**、`{ok:false, code:'open-unavailable'}` + toast `rewind.open.fail`。
+- **可复用教训（两条）**：① 跨版本审计要**按动作对表**而不是按名字对表——「名字没了、动作还在」是迁移的常态；
+  ② **夹具比真机多一个方法 = 一次假绿**（本插件的假 `sessions` 自带 `open`，替真机圆了这个谎）。
+- **测试**：套件 93 → **96/96**（新增「夹具同形」「经 uiWorkspace 切换且照常归档」「无通道 ⇒ 放弃且不动原会话」）；
+  **红绿**：源码还原到 `HEAD` 后套件以 `TypeError: sessions.open is not a function` 直接崩。
+- **详版**（证据、验证、运行中 GUI 的注意事项）：`docs/knowledge/2026-09-29-dsh-020-core-api-compat-audit.md` §9。
